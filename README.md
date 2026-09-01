@@ -1,5 +1,10 @@
 # S5: Simplified State Space Layers for Sequence Modeling
 
+> This working branch adds an optional causal prospective readout correction
+> while preserving the upstream S5 state transition and associative scan. See
+> [PROSPECTIVE_S5.md](PROSPECTIVE_S5.md) for the design, installation paths,
+> tests, and first experiment commands.
+
 This repository provides the implementation for the
 paper:
 
