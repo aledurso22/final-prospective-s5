@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main, "prospective-*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: unit tests (CPU)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements_test.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q --durations=10
+
+      - name: Check whitespace errors in diff
+        if: github.event_name == 'pull_request'
+        run: git diff --check origin/${{ github.base_ref }}...HEAD
