@@ -1,0 +1,9 @@
+# Minimal set for the unit tests only (no dataloading, no training entrypoint).
+# `pytest tests/test_s5_baseline.py` runs fully with just these.
+jax==0.11.1
+jaxlib==0.11.1
+flax==0.12.9
+optax==0.2.8
+numpy==2.5.2
+scipy==1.18.1
+pytest==9.1.1

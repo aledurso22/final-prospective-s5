@@ -164,3 +164,14 @@ cython_debug/
 wandb/
 cache_dir/
 raw_datasets/
+
+# Local virtualenv, test and JAX/build caches
+.venv/
+.venv*/
+.pytest_cache/
+.jax_cache/
+jax_cache/
+
+# Experiment outputs and cluster logs
+results/
+slurm_logs/

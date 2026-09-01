@@ -1,0 +1,25 @@
+# Verified modern-JAX CPU environment for plain S5.
+#
+# Exercised on macOS arm64 / Python 3.14.4 with the full test suite and a
+# one-epoch sequential-MNIST training run (see docs/BASELINE.md).
+#
+# Deliberately CPU-only: no GPU JAX wheel is pinned here because it must match
+# the target cluster's CUDA and driver versions. See docs/CLUSTER.md.
+jax==0.11.1
+jaxlib==0.11.1
+flax==0.12.9
+optax==0.2.8
+numpy==2.5.2
+scipy==1.18.1
+
+# Dataloading. s5/dataloaders/__init__.py imports audio eagerly, so torchaudio
+# is required even for the MNIST-only path.
+torch==2.13.0
+torchvision==0.28.0
+torchaudio==2.11.0
+einops==0.8.2
+datasets==5.0.1
+
+tqdm==4.70.0
+wandb==0.29.0
+pytest==9.1.1
