@@ -20,6 +20,14 @@ class StackedEncoderModel(nn.Module):
             step_rescale  (float32):  allows for uniformly changing the timescale parameter,
                                     e.g. after training on a different resolution for
                                     the speech commands benchmark
+            prospective_mode (string): "off" (upstream S5) or "lead" (causal
+                                    prospective readout correction)
+            prospective_alpha (float32): lead coefficient (initial value if learned)
+            prospective_alpha_learned (bool): learn one alpha scalar per enabled block
+            prospective_layers (string): "all" enables every S5 block, "last" only
+                                    the final block
+            prospective_alpha_max (float32): upper bound for the learned alpha
+            bidirectional (bool):   whether the wrapped SSM is bidirectional
     """
     ssm: nn.Module
     d_model: int
@@ -31,11 +39,32 @@ class StackedEncoderModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    prospective_mode: str = "off"
+    prospective_alpha: float = 0.0
+    prospective_alpha_learned: bool = False
+    prospective_layers: str = "last"
+    prospective_alpha_max: float = 1.0
+    bidirectional: bool = False
 
     def setup(self):
         """
         Initializes a linear encoder and the stack of S5 layers.
         """
+        if self.prospective_layers not in ("all", "last"):
+            raise ValueError(
+                "prospective_layers must be one of ('all', 'last'), got "
+                "{}".format(self.prospective_layers))
+
+        # Choose which blocks carry the prospective coordinate.  "last" keeps a
+        # single correction immediately before the decoder; "all" enables every
+        # block.  Disabled blocks take the exact upstream path.
+        if self.prospective_mode == "lead" and self.prospective_layers == "all":
+            enabled = [True] * self.n_layers
+        elif self.prospective_mode == "lead":
+            enabled = [i == self.n_layers - 1 for i in range(self.n_layers)]
+        else:
+            enabled = [False] * self.n_layers
+
         self.encoder = nn.Dense(self.d_model)
         self.layers = [
             SequenceLayer(
@@ -48,8 +77,13 @@ class StackedEncoderModel(nn.Module):
                 batchnorm=self.batchnorm,
                 bn_momentum=self.bn_momentum,
                 step_rescale=self.step_rescale,
+                prospective_mode="lead" if is_enabled else "off",
+                prospective_alpha=self.prospective_alpha,
+                prospective_alpha_learned=self.prospective_alpha_learned,
+                prospective_alpha_max=self.prospective_alpha_max,
+                bidirectional=self.bidirectional,
             )
-            for _ in range(self.n_layers)
+            for is_enabled in enabled
         ]
 
     def __call__(self, x, integration_timesteps):
@@ -109,6 +143,14 @@ class ClassificationModel(nn.Module):
             step_rescale  (float32):  allows for uniformly changing the timescale parameter,
                                     e.g. after training on a different resolution for
                                     the speech commands benchmark
+            prospective_mode (string): "off" (upstream S5) or "lead" (causal
+                                    prospective readout correction)
+            prospective_alpha (float32): lead coefficient (initial value if learned)
+            prospective_alpha_learned (bool): learn one alpha scalar per enabled block
+            prospective_layers (string): "all" enables every S5 block, "last" only
+                                    the final block
+            prospective_alpha_max (float32): upper bound for the learned alpha
+            bidirectional (bool):   whether the wrapped SSM is bidirectional
     """
     ssm: nn.Module
     d_output: int
@@ -123,6 +165,12 @@ class ClassificationModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    prospective_mode: str = "off"
+    prospective_alpha: float = 0.0
+    prospective_alpha_learned: bool = False
+    prospective_layers: str = "last"
+    prospective_alpha_max: float = 1.0
+    bidirectional: bool = False
 
     def setup(self):
         """
@@ -139,6 +187,12 @@ class ClassificationModel(nn.Module):
                             batchnorm=self.batchnorm,
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
+                            prospective_mode=self.prospective_mode,
+                            prospective_alpha=self.prospective_alpha,
+                            prospective_alpha_learned=self.prospective_alpha_learned,
+                            prospective_layers=self.prospective_layers,
+                            prospective_alpha_max=self.prospective_alpha_max,
+                            bidirectional=self.bidirectional,
                                         )
         self.decoder = nn.Dense(self.d_output)
 
@@ -240,6 +294,14 @@ class RetrievalModel(nn.Module):
             prenorm     (bool):     apply prenorm if true or postnorm if false
             batchnorm   (bool):     apply batchnorm if true or layernorm if false
             bn_momentum (float32):  the batchnorm momentum if batchnorm is used
+            prospective_mode (string): "off" (upstream S5) or "lead" (causal
+                                    prospective readout correction)
+            prospective_alpha (float32): lead coefficient (initial value if learned)
+            prospective_alpha_learned (bool): learn one alpha scalar per enabled block
+            prospective_layers (string): "all" enables every S5 block, "last" only
+                                    the final block
+            prospective_alpha_max (float32): upper bound for the learned alpha
+            bidirectional (bool):   whether the wrapped SSM is bidirectional
     """
     ssm: nn.Module
     d_output: int
@@ -253,6 +315,12 @@ class RetrievalModel(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.9
     step_rescale: float = 1.0
+    prospective_mode: str = "off"
+    prospective_alpha: float = 0.0
+    prospective_alpha_learned: bool = False
+    prospective_layers: str = "last"
+    prospective_alpha_max: float = 1.0
+    bidirectional: bool = False
 
     def setup(self):
         """
@@ -279,6 +347,12 @@ class RetrievalModel(nn.Module):
                             batchnorm=self.batchnorm,
                             bn_momentum=self.bn_momentum,
                             step_rescale=self.step_rescale,
+                            prospective_mode=self.prospective_mode,
+                            prospective_alpha=self.prospective_alpha,
+                            prospective_alpha_learned=self.prospective_alpha_learned,
+                            prospective_layers=self.prospective_layers,
+                            prospective_alpha_max=self.prospective_alpha_max,
+                            bidirectional=self.bidirectional,
                                         )
         BatchRetrievalDecoder = nn.vmap(
             RetrievalDecoder,

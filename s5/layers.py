@@ -1,6 +1,8 @@
 from flax import linen as nn
 import jax
 
+from .prospective import ProspectiveLead
+
 
 class SequenceLayer(nn.Module):
     """ Defines a single S5 layer, with S5 SSM, nonlinearity,
@@ -18,6 +20,16 @@ class SequenceLayer(nn.Module):
             step_rescale  (float32):  allows for uniformly changing the timescale parameter,
                                     e.g. after training on a different resolution for
                                     the speech commands benchmark
+            prospective_mode (string): "off" reproduces upstream S5 exactly.  "lead"
+                                    applies the causal prospective correction
+                                    b_pc[t] = b[t] + alpha*(b[t]-b[t-1]) to the SSM
+                                    preactivation, after the readout/feedthrough and
+                                    before the activation/GLU, dropout and residual.
+            prospective_alpha (float32): lead coefficient (initial value if learned)
+            prospective_alpha_learned (bool): learn alpha as alpha_max*sigmoid(a)
+            prospective_alpha_max (float32): upper bound used by the learned parameterization
+            bidirectional (bool):   whether the wrapped SSM is bidirectional.  The
+                                    prospective operator is causal and rejects this.
     """
     ssm: nn.Module
     dropout: float
@@ -28,11 +40,32 @@ class SequenceLayer(nn.Module):
     batchnorm: bool = False
     bn_momentum: float = 0.90
     step_rescale: float = 1.0
+    prospective_mode: str = "off"
+    prospective_alpha: float = 0.0
+    prospective_alpha_learned: bool = False
+    prospective_alpha_max: float = 1.0
+    bidirectional: bool = False
 
     def setup(self):
         """Initializes the ssm, batch/layer norm and dropout
         """
         self.seq = self.ssm(step_rescale=self.step_rescale)
+
+        if self.prospective_mode not in ("off", "lead"):
+            raise ValueError(
+                "prospective_mode must be one of ('off', 'lead'), got "
+                "{}".format(self.prospective_mode))
+
+        if self.prospective_mode == "lead":
+            if self.bidirectional:
+                raise ValueError(
+                    "prospective_mode='lead' is causal and requires a "
+                    "unidirectional S5; set bidirectional=False.")
+            self.prospective = ProspectiveLead(
+                alpha=self.prospective_alpha,
+                learned=self.prospective_alpha_learned,
+                alpha_max=self.prospective_alpha_max,
+            )
 
         if self.activation in ["full_glu"]:
             self.out1 = nn.Dense(self.d_model)
@@ -64,6 +97,13 @@ class SequenceLayer(nn.Module):
         if self.prenorm:
             x = self.norm(x)
         x = self.seq(x)
+
+        # Causal prospective coordinate, applied to the S5 preactivation after
+        # the readout and feedthrough and before the activation/GLU, dropout
+        # and residual path.  The state recurrence and associative scan above
+        # are untouched.
+        if self.prospective_mode == "lead":
+            x = self.prospective.apply_parallel(x)
 
         if self.activation in ["full_glu"]:
             x = self.drop(nn.gelu(x))
