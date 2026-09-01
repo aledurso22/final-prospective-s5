@@ -107,6 +107,11 @@ def train(args):
                              clip_eigs=args.clip_eigs,
                              bidirectional=args.bidirectional)
 
+    if args.prospective_mode == "lead" and args.bidirectional:
+        raise ValueError(
+            "prospective_mode='lead' is causal and requires a unidirectional "
+            "S5; rerun with --bidirectional=False.")
+
     if retrieval:
         # Use retrieval head for AAN task
         print("Using Retrieval head for {} task".format(args.dataset))
@@ -122,6 +127,12 @@ def train(args):
             prenorm=args.prenorm,
             batchnorm=args.batchnorm,
             bn_momentum=args.bn_momentum,
+            prospective_mode=args.prospective_mode,
+            prospective_alpha=args.prospective_alpha,
+            prospective_alpha_learned=args.prospective_alpha_learned,
+            prospective_layers=args.prospective_layers,
+            prospective_alpha_max=args.prospective_alpha_max,
+            bidirectional=args.bidirectional,
         )
 
     else:
@@ -138,6 +149,12 @@ def train(args):
             prenorm=args.prenorm,
             batchnorm=args.batchnorm,
             bn_momentum=args.bn_momentum,
+            prospective_mode=args.prospective_mode,
+            prospective_alpha=args.prospective_alpha,
+            prospective_alpha_learned=args.prospective_alpha_learned,
+            prospective_layers=args.prospective_layers,
+            prospective_alpha_max=args.prospective_alpha_max,
+            bidirectional=args.bidirectional,
         )
 
     # initialize training state

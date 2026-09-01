@@ -48,6 +48,24 @@ if __name__ == "__main__":
 						help="whether to enforce the left-half plane condition")
 	parser.add_argument("--bidirectional", type=str2bool, default=False,
 						help="whether to use bidirectional model")
+	# Prospective coordinate (causal lead filter on the S5 preactivation)
+	parser.add_argument("--prospective_mode", type=str, default="off",
+						choices=["off", "lead"],
+						help="off: original S5 path \\" \
+							 "lead: b_pc[t] = b[t] + alpha*(b[t]-b[t-1]) on the "
+							 "S5 preactivation, before the activation/GLU")
+	parser.add_argument("--prospective_alpha", type=float, default=0.0,
+						help="prospective lead coefficient (initial value if learned)")
+	parser.add_argument("--prospective_alpha_learned", type=str2bool, default=False,
+						help="learn one alpha per enabled block as "
+							 "alpha=alpha_max*sigmoid(a)")
+	parser.add_argument("--prospective_layers", type=str, default="last",
+						choices=["all", "last"],
+						help="apply the prospective coordinate to every S5 block "
+							 "or only the final block")
+	parser.add_argument("--prospective_alpha_max", type=float, default=1.0,
+						help="upper bound used by the learned alpha parameterization")
+
 	parser.add_argument("--dt_min", type=float, default=0.001,
 						help="min value to sample initial timescale params from")
 	parser.add_argument("--dt_max", type=float, default=0.1,
