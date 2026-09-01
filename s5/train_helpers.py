@@ -3,6 +3,7 @@ import jax
 import jax.numpy as np
 from jax.nn import one_hot
 from tqdm import tqdm
+from flax.core import unfreeze
 from flax.training import train_state
 import optax
 from typing import Any, Tuple
@@ -132,11 +133,13 @@ def create_train_state(model_cls,
                            dummy_input, integration_timesteps,
                            )
     if batchnorm:
-        params = variables["params"].unfreeze()
+        params = unfreeze(variables["params"])
         batch_stats = variables["batch_stats"]
     else:
-        params = variables["params"].unfreeze()
-        # Note: `unfreeze()` is for using Optax.
+        params = unfreeze(variables["params"])
+        # Note: `unfreeze()` is for using Optax.  Modern Flax already returns a
+        # plain dict from `.init()`; `flax.core.unfreeze` handles both a dict
+        # and a legacy FrozenDict, so this works across Flax versions.
 
     if opt_config in ["standard"]:
         """This option applies weight decay to C, but B is kept with the
@@ -252,7 +255,7 @@ def create_train_state(model_cls,
 
     fn_is_complex = lambda x: x.dtype in [np.complex64, np.complex128]
     param_sizes = map_nested_fn(lambda k, param: param.size * (2 if fn_is_complex(param) else 1))(params)
-    print(f"[*] Trainable Parameters: {sum(jax.tree_leaves(param_sizes))}")
+    print(f"[*] Trainable Parameters: {sum(jax.tree_util.tree_leaves(param_sizes))}")
 
     if batchnorm:
         class TrainState(train_state.TrainState):
