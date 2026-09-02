@@ -13,6 +13,7 @@ comparison, and must not be cited as a performance claim.
 |---|---|---|---|---|---|
 | `E2-001` | 2026-09-01 | `main` | `6fcbca7` | E2 (smoke, CPU) | plain S5, 1 epoch sMNIST, CPU host — test acc 0.8995 |
 | `E2-002` | 2026-09-02 | `main` | `6fcbca798a93e7b511d8862cae4cce4afa43c34f` | E2 (smoke, GPU) | plain S5, 1 epoch sMNIST, RTX 3090 — test acc 0.8998 |
+| `E1-001` | 2026-09-02 | `prospective-lead` | `a93b845bf8760e7693c6ec2ef4e04d17e182ac9e` | E1 (correctness, GPU) | **G2a-core PASSED** — 63/63 exact-identity tests on RTX 3090 |
 
 ---
 
@@ -174,3 +175,65 @@ described in `docs/GATES.md`; it has not been run.
 
 Two runs on different hardware are in any case not a controlled comparison.
 Nothing about the CPU/GPU delta should be read as a result.
+
+
+---
+
+## `E1-001` — G2a-core alpha=0 exact identity, PASSED on GPU
+
+**Evidence label: E1 — correctness evidence (owner-assigned).** Deterministic
+exact-equality tests on the target hardware. Unlike E2 smoke runs this is a
+correctness result, not a plausibility check.
+
+### Verdict
+
+**G2a-core PASSED.** The claim
+
+```
+F_PC-S5,alpha=0(u; theta) == F_S5(u; theta)
+```
+
+holds exactly — `assert_array_equal`, zero tolerance — for finite valid model
+tensors on the RTX 3090, under identical parameters, input, masks, RNG keys,
+optimizer state and precision.
+
+Notably, exact equality held on GPU. The fusion/rounding divergence I flagged
+as a possible INVESTIGATE/BLOCKED outcome did **not** occur.
+
+### Provenance
+
+| Field | Value |
+|---|---|
+| Branch | `prospective-lead` |
+| Commit | `a93b845bf8760e7693c6ec2ef4e04d17e182ac9e` |
+| Working tree | clean |
+| Host / node | `pgi15-gpu3` |
+| `SLURM_JOB_ID` | `63277` |
+| `CUDA_VISIBLE_DEVICES` | `0` |
+| GPU | NVIDIA GeForce RTX 3090 |
+| Result | **63 passed in 107.75s**, `exit=0` |
+| Artifact | `g2a.log` (exact directory to be confirmed — see below) |
+
+Provenance for this run was captured **inside the same invocation** as the
+test run, per the standing practice adopted after `E2-002`.
+
+> **Artifact path pending.** The run directory was generated as
+> `$HOME/s5-runs/<timestamp>-G2a-a93b845/`. The exact timestamp has not been
+> supplied and is **not inferred here**. To be filled in from the cluster.
+
+### What passed
+
+All 63 tests, comprising the 44-test prospective suite plus the 19-test
+G2a-core suite (`tests/test_g2a_identity.py`) covering the specified checks:
+parameter-tree structure/shapes/dtypes, parameter count exactly 26,058,
+no alpha parameter allocated at fixed zero, operator and parallel-path
+identity, model logits (eager and JIT), fixed-batch loss, gradients for every
+ordinary parameter, one optimizer update including optimizer state, streaming
+output identity, and the boundary cases (t=0, length-one, reset/restart,
+packed segment, stale cache).
+
+### Explicitly still open
+
+`F-001` (G2a-robustness) remains **OPEN**. This PASS is scoped to finite
+tensors per the theory specification. Non-finite behaviour is unchanged by
+this result. See [FINDINGS.md](FINDINGS.md).

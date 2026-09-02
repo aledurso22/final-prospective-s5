@@ -8,7 +8,7 @@ rationalization.
 |---|---|
 | G0 - plain-S5 baseline tests on target GPU | PASSED (13/13, `E2-002`) |
 | G1 - plain-S5 one-epoch GPU smoke | PASSED (`E2-002`) |
-| G2a-core - `alpha=0` exact identity, finite tensors | **FROZEN, NOT YET RUN ON GPU** |
+| G2a-core - `alpha=0` exact identity, finite tensors | **PASSED** on RTX 3090, 63/63 (`E1-001`, commit `a93b845`) |
 | G2a-robustness - `alpha=0` under Inf/NaN | **FINDING F-001, OPEN** (does not gate G2a-core) |
 | G2b - paired one-epoch training diagnostic | approved, blocked on G2a-core |
 | G3 - lag metrics instrumentation | not started |
