@@ -93,7 +93,7 @@ environment, hardware, seed, command, artifact path and evidence label - is in
 [EXPERIMENT_REGISTRY.md](EXPERIMENT_REGISTRY.md#e2-002--plain-s5-gpu-baseline-smoke).
 
 Host `pgi15-gpu3`, NVIDIA RTX 3090 (24576 MiB, cc 8.6), driver 570.86.10 /
-CUDA 12.8, `SLURM_JOB_ID=63277`, commit
+CUDA 12.8, `SLURM_JOB_ID=63277` (verified against `sacct`), commit
 `6fcbca798a93e7b511d8862cae4cce4afa43c34f`, clean tree, seed 1919, 1 epoch.
 
 | Metric | Value |

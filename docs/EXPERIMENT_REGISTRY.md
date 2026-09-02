@@ -31,29 +31,36 @@ explicitly *not* a benchmark and *not* a comparison against anything.
 | Commit | `6fcbca798a93e7b511d8862cae4cce4afa43c34f` |
 | Working tree | clean (`git status --porcelain` empty) |
 | Host | `pgi15-gpu3.iff.kfa-juelich.de` |
-| `SLURM_JOB_ID` | `63277` - **UNVERIFIED, provenance not frozen** (see note) |
+| `SLURM_JOB_ID` | `63277` - **VERIFIED** against cluster `sacct` records |
+| `SLURM_JOB_NODELIST` | `pgi15-gpu3` |
 | Artifact path | `/Users/durso/s5-runs/20260902-154442-main-6fcbca7/` (NFS `pgi-15.iff.kfa-juelich.de:/Users/pgi-15/durso`) |
 | Artifacts | `provenance.txt`, `requirements-frozen.txt`, `train.log`, `gpu_mem.csv` |
 
-> **Provenance caveat - this record is not frozen.**
+> **Provenance VERIFIED - this record is frozen.**
 >
-> `SLURM_JOB_ID=63277` is transcribed from the `provenance.txt` capture. The
-> project owner separately recorded allocation `63249`, so the value is under
-> verification.
+> `SLURM_JOB_ID=63277` was confirmed against cluster `sacct` records, not
+> inferred:
 >
-> Independently of which number is correct, the provenance capture ran at
-> `15:44:42` while the training run started at `15:52:07` (per the wandb run
-> directory `offline-run-20260902_155207`) - two separate shell invocations
-> about 7.5 minutes apart. The capture therefore attests to the allocation at
-> *capture* time, not necessarily at *run* time. Future runs must capture
-> provenance inside the same invocation as the run.
+> | Evidence | Value |
+> |---|---|
+> | `provenance.txt` | `SLURM_JOB_ID = 63277`, `SLURM_JOB_NODELIST = pgi15-gpu3` |
+> | `sacct` job 63277 | started `2026-09-02 15:05:52`, node `pgi15-gpu3`, RUNNING throughout |
+> | provenance capture | `15:44:42` - inside 63277 |
+> | training run start | `15:52:07` (wandb dir `offline-run-20260902_155207`) - inside 63277 |
+> | job 63249 | separate earlier allocation, `12:02`-`14:20`; ended before both timestamps, **not** associated with this run |
 >
-> The artifact path is verified: `df -h "$HOME"` reported filesystem
+> This also resolves the earlier concern that provenance capture and the run
+> were separate shell invocations ~7.5 minutes apart: a single allocation
+> (63277) demonstrably spans both timestamps, so the capture attests to the
+> run's allocation. The concern is closed by evidence, not waived.
+>
+> Artifact path verified independently: `df -h "$HOME"` reported filesystem
 > `pgi-15.iff.kfa-juelich.de:/Users/pgi-15/durso` mounted at `/Users/durso`,
 > and the artifacts are owned `durso:pgi-15`. It is a cluster NFS path.
 >
-> All other fields (commit, clean tree, hardware, environment, seed, command,
-> metrics) are unaffected.
+> **Standing practice going forward** (process improvement, not a defect in
+> this record): capture provenance inside the same invocation as the run, so
+> allocation identity never depends on a separate `sacct` reconciliation.
 
 ### Hardware
 
