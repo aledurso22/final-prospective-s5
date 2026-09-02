@@ -8,7 +8,9 @@ rationalization.
 |---|---|
 | G0 - plain-S5 baseline tests on target GPU | PASSED (13/13, `E2-002`) |
 | G1 - plain-S5 one-epoch GPU smoke | PASSED (`E2-002`) |
-| G2 - prospective `alpha=0` identity control | **DESIGNED, NOT RUN** |
+| G2a-core - `alpha=0` exact identity, finite tensors | **FROZEN, NOT YET RUN ON GPU** |
+| G2a-robustness - `alpha=0` under Inf/NaN | **FINDING F-001, OPEN** (does not gate G2a-core) |
+| G2b - paired one-epoch training diagnostic | approved, blocked on G2a-core |
 | G3 - lag metrics instrumentation | not started |
 | G4 - sMNIST alpha/placement sweep | not started |
 
@@ -34,7 +36,20 @@ This is an architectural claim, provable from the code:
 The claim is therefore **exact identity of the computed function**, not
 "statistically indistinguishable training".
 
-## G2a - direct tensor/model identity (primary, authoritative)
+## Scope split (frozen per the theory specification)
+
+**G2a-core** - the authoritative identity gate. The claim
+`F_PC-S5,alpha=0(u; theta) == F_S5(u; theta)` is scoped by theory to **finite
+valid model tensors**, under identical parameters, input, masks, RNG keys,
+optimizer state and precision. Exact, zero tolerance.
+
+**G2a-robustness** - non-finite behaviour. The current `0*(x-prev)`
+implementation is **not** identity-preserving for Inf/NaN and contaminates the
+following timestep. Recorded as `F-001` in [FINDINGS.md](FINDINGS.md), an open
+implementation defect. It is **not** a passed identity case and it does **not**
+gate G2a-core.
+
+## G2a-core - direct tensor/model identity (primary, authoritative)
 
 This is the gate. It does not involve training, a dataloader, or an optimizer,
 so no run-to-run nondeterminism can weaken it.
