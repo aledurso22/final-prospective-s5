@@ -2,6 +2,16 @@
 
 These operators deliberately act *after* an S5 state-space scan.  They do not
 change the SSM transition, discretization, or associative scan.
+
+Two layers, with different responsibilities:
+
+- the module-level ``apply_parallel`` / ``step`` functions always compute the
+  arithmetic ``x + alpha * (x - previous)``, for any alpha including a traced
+  one.  They remain the tested definition of the operator.
+- ``ProspectiveLead`` wraps them and adds a static, trace-time bypass for a
+  fixed non-trainable ``alpha == 0`` (see ``F-001`` in ``docs/FINDINGS.md``),
+  so that configuration is an exact identity on every input, non-finite
+  values included, and touches no cache.
 """
 
 import math
@@ -77,15 +87,44 @@ class ProspectiveLead(nn.Module):
                 "alpha_logit", lambda _key: jnp.asarray(initial_logit, dtype=jnp.float32)
             )
 
+    @property
+    def _is_static_zero(self):
+        """True when alpha is a fixed, non-trainable, exactly-zero Python float.
+
+        This must be a *Python-level* predicate, decidable at trace time: a
+        traced alpha cannot be branched on inside ``jit``.  It is therefore
+        available here, where ``alpha`` is a static dataclass field, and
+        deliberately not in the module-level ``apply_parallel``/``step``
+        functions, whose ``alpha`` may be traced.
+        """
+        return (
+            not self.learned
+            and isinstance(self.alpha, (int, float))
+            and not isinstance(self.alpha, bool)
+            and float(self.alpha) == 0.0
+        )
+
     def effective_alpha(self):
         if self.learned:
             return self.alpha_max * nn.sigmoid(self.alpha_logit)
         return jnp.asarray(self.alpha)
 
     def apply_parallel(self, sequence, reset_mask=None):
+        # F-001 hardening: at fixed alpha=0 the correction is identically zero
+        # for finite input, but `0.0 * (x - previous)` is NaN when either term
+        # is non-finite, which also contaminates the following timestep.  A
+        # static bypass removes the arithmetic entirely, so alpha=0 is an exact
+        # identity on every input including Inf/NaN.  The module and all of its
+        # wiring still execute, preserving the end-to-end code-path control.
+        if self._is_static_zero:
+            return sequence
         return apply_parallel(sequence, self.effective_alpha(), reset_mask)
 
     def step(self, token, cache=None, reset=False):
+        # F-001 hardening: the cache is neither read nor written at fixed
+        # alpha=0, so no stale-cache state can ever be observed.
+        if self._is_static_zero:
+            return token, cache
         return step(token, cache, self.effective_alpha(), reset)
 
     def __call__(self, sequence, reset_mask=None):
