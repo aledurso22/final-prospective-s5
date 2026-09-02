@@ -39,7 +39,46 @@ The claim is therefore **exact identity of the computed function**, not
 This is the gate. It does not involve training, a dataloader, or an optimizer,
 so no run-to-run nondeterminism can weaken it.
 
-Existing tests, to be executed on the RTX 3090:
+### Coverage required, and current gaps
+
+The architectural identity claim is carried by fixed-input / fixed-parameter
+functional and gradient tests, **not** by the training comparison. Required
+coverage, against what the suite has today:
+
+| # | Required assertion | Status | Test |
+|---|---|---|---|
+| 1 | exact parameter-tree structure, leaf shapes and total count | **PARTIAL - must extend** | `test_off_mode_reproduces_baseline_layer` compares key paths only (`sorted(flatten_dict(...))`), at layer level, not on the real-S5 model, and never compares shapes or a parameter count |
+| 2 | exact fixed-batch **loss** | **MISSING** | logits are compared; no scalar loss is |
+| 3 | exact **gradients** w.r.t. the ordinary S5/model parameters | **MISSING** | `test_real_s5_prospective_forward_jit_and_grad` only checks finiteness/presence at `alpha != 0`; no off-vs-`alpha=0` gradient equality exists |
+| 4 | exact result of **one optimizer update** from identical params and batch | **MISSING** | no such comparison exists on either branch |
+| 5 | parallel-path identity | COVERED | `test_alpha_zero_is_exact_identity` (`atol=0`), `test_off_mode_stack_reproduces_baseline_stack`, `test_real_s5_prospective_alpha_zero_matches_off` |
+| 6 | streaming `step` identity and reset/boundary behaviour | **PARTIAL - must extend** | `test_parallel_matches_streaming_with_resets` and `test_module_parallel_matches_streaming_steps` prove parallel == streaming for arbitrary alpha and zero correction at resets, but nothing asserts that at `alpha=0` the streaming path equals the plain-S5 preactivation |
+
+Four new tests and two strengthenings are therefore required before G2a can be
+executed as specified. They are **not yet written** - see "Tests to be added".
+
+### Tests to be added (not yet implemented)
+
+- `test_alpha_zero_param_tree_identical`: full `jax.tree_util` comparison of
+  the real-S5 model's parameter tree against `mode='off'` - identical key
+  paths, identical leaf shapes and dtypes, identical total parameter count
+  (26,058 in the smoke configuration).
+- `test_alpha_zero_fixed_batch_loss_identical`: same fixed batch and fixed
+  parameters, `assert_array_equal` on the scalar loss.
+- `test_alpha_zero_gradients_identical`: `jax.grad` of that loss w.r.t. every
+  ordinary S5/model parameter, compared leaf-by-leaf with `assert_array_equal`.
+  Ordinary parameters only; at `alpha=0` fixed there is no alpha parameter.
+- `test_alpha_zero_optimizer_step_identical`: from identical initial
+  parameters and one identical batch, one `optax` update, then
+  `assert_array_equal` on every updated leaf.
+- extend #1 above to the stack and the real-S5 model, not just `SequenceLayer`.
+- `test_alpha_zero_streaming_matches_plain_preactivation`: the streaming
+  `step` path at `alpha=0`, run token by token, equals the plain-S5 block
+  preactivation exactly, including across a reset boundary.
+
+All use `assert_array_equal`. All run on CPU and on the RTX 3090.
+
+### Existing tests, to be executed on the RTX 3090:
 
 | Test | Asserts |
 |---|---|
@@ -60,29 +99,46 @@ pytest -q tests/test_prospective_integration.py -k "alpha_zero or baseline or ss
 
 ### Pass criterion
 
-`test_real_s5_prospective_alpha_zero_matches_off` passes with **exact**
-equality, and the full suite is 44/44.
+**Exact equality is the only PASS.** Every assertion in G2a is `atol=0,
+rtol=0` (`assert_array_equal`). There is no tolerance band that counts as a
+pass.
 
-### Predefined failure interpretation
+### Predefined outcome classification
 
 Written before the run so the outcome cannot be reinterpreted afterwards.
+Note there are only three verdicts and only one of them is PASS.
 
-| Observation | Interpretation | Action |
+| Observation | Verdict | Action |
 |---|---|---|
-| exact equality | G2a PASSED | proceed to G2b |
-| differences at or below ~1e-6 relative | **not** an identity failure in the mathematics; adding `x + 0.0*(x-prev)` can change XLA fusion, and different fusion can change reduction order and therefore rounding | investigate and confirm the mechanism, then decide explicitly whether to assert exactness on CPU and a bounded tolerance on GPU. Record the decision. |
-| differences above ~1e-6 relative | real defect | stop, do not proceed to G2b |
-| differing parameter counts or parameter trees | real defect - the `alpha=0` path is allocating something | stop |
+| exact equality on every G2a assertion | **PASS** | proceed to G2b |
+| any non-zero discrepancy, however small | **INVESTIGATE / BLOCKED** | G2 does not pass. Demonstrate the backend/compiler mechanism, then bring it back for an explicit decision. |
+| parameter count, shapes or tree structure differ | **FAIL** | stop; the `alpha=0` path is allocating or restructuring something |
 
-The middle row is a known possibility, not an excuse prepared in advance: if it
-occurs, the mechanism must be *demonstrated* (e.g. by showing the same
-discrepancy appears when an algebraically-null operation is inserted into plain
-S5 alone), not assumed.
+A small discrepancy is **not** a pass and must never be relabelled as one.
+It is a blocking finding pending explanation.
+
+If the INVESTIGATE branch is taken, the mechanism must be *demonstrated*, not
+asserted. A sufficient demonstration inserts an algebraically-null operation
+(for example `x + 0.0 * x`) into **plain S5 alone**, on the same hardware, and
+shows it reproduces a discrepancy of the same character and magnitude. That
+isolates compiler/backend behaviour from the prospective operator. Absent such
+a demonstration, the discrepancy is treated as a defect in the operator.
+
+Any decision to accept a bounded tolerance on some backend is a decision for
+the project owner, recorded with its rationale - not a judgement this gate is
+permitted to make on its own.
 
 ## G2b - paired one-epoch training behaviour (secondary, diagnostic)
 
 Same GPU, same host, same commit-pair, same seed, same configuration. This
 characterizes end-to-end behaviour; it does **not** define the identity claim.
+
+**G2b cannot rescue G2a.** If G2a is INVESTIGATE/BLOCKED or FAIL, G2 does not
+pass, regardless of how well the training runs agree. Full-GPU-run
+nondeterminism, if observed, is recorded as its own separate finding about the
+training loop; it is never evidence about architectural identity, and it never
+converts a G2a failure into a pass. The two gates are read in order and G2a
+is decisive.
 
 Prerequisite - establish the run-to-run noise floor on plain S5 first,
 otherwise a paired difference cannot be interpreted:
@@ -128,6 +184,30 @@ Reporting `d_0` without `d_AB` is meaningless and is not acceptable evidence.
 
 G2b is **E2 - smoke evidence only**, like `E2-001` and `E2-002`. A single epoch
 at one seed characterizes nothing beyond "it runs and behaves the same".
+
+## Open questions - awaiting the theory specification
+
+Left deliberately unresolved. **No implementation change is to be made around
+either point until reconciled.** Current behaviour is stated as fact so the
+theory response has something concrete to rule on.
+
+1. **Should `alpha=0` traverse the prospective code path, or bypass it?**
+   *Current implementation:* it traverses. `prospective_mode='lead',
+   alpha=0` constructs the `ProspectiveLead` submodule and executes
+   `x + 0.0 * (x - previous)`. Only `prospective_mode='off'` skips the module
+   entirely. So `alpha=0` is presently an end-to-end **code-path control**,
+   which is the stronger control but also the one exposed to compiler/fusion
+   differences. An explicit bypass would guarantee bit-identity trivially, at
+   the cost of no longer testing the code path.
+
+2. **What does identity mean for the prospective streaming cache?**
+   *Current implementation:* `step(token, cache, alpha, reset)` returns
+   `(corrected_token, token)` - the cache always stores the **uncorrected**
+   token, and at `alpha=0` the returned token equals the input exactly.
+   Plain S5 has no such cache, so "identity" for the cache is undefined
+   until theory specifies whether the requirement is (a) output identity only,
+   (b) cache contents equal to the plain-S5 block preactivation, or
+   (c) the cache being unobservable at `alpha=0`.
 
 ## Explicitly out of scope for G2
 
