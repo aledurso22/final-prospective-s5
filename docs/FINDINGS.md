@@ -5,14 +5,15 @@ here whether or not it blocks the gate it was found under.
 
 | ID | Date | Severity | Area | Status |
 |---|---|---|---|---|
-| `F-001` | 2026-09-02 | hardening | `s5/prospective.py`, fixed `alpha=0` | OPEN - patch proposed, not implemented |
+| `F-001` | 2026-09-02 | hardening | `s5/prospective.py`, fixed `alpha=0` | **PATCHED** on `prospective-lead` `d60252f`; awaiting GPU re-verification |
 
 ---
 
 ## `F-001` - fixed `alpha=0` is not identity-preserving for Inf/NaN
 
-**Status: OPEN.** Recorded as a real implementation defect / hardening finding.
-It is explicitly **not** a passed identity case.
+**Status: PATCHED on `prospective-lead` (`d60252f`), awaiting GPU
+re-verification.** Recorded as a real implementation defect / hardening
+finding. The original behaviour was explicitly **not** a passed identity case.
 
 ### Scope
 
@@ -60,8 +61,34 @@ G2a-core is unaffected. It matters when a run diverges: plain S5 and
 prospective path corrupts one timestep more than the baseline. That would make
 a diverged paired comparison misleading rather than merely useless.
 
-### Disposition
+### Disposition - PATCHED
 
-A hardening patch introducing a static-zero bypass has been **proposed and not
-implemented**, pending review. Theory prefers bypass on exactly these grounds
-(`0*NaN`, stale cache, RNG/state hazards). No architecture change has been made.
+A static-zero bypass was approved and implemented in `ProspectiveLead`
+(`prospective-lead` `d60252f`):
+
+- `apply_parallel` returns the input sequence directly at fixed `alpha == 0`;
+- `step` returns `(token, cache)`, so the cache is neither read nor written;
+- the module and all wiring still execute, preserving the end-to-end code-path
+  control;
+- `alpha > 0` behaviour, the S5 recurrence, the scan, the layers and the CLI
+  are untouched.
+
+The guard is Python-level by necessity - a traced `alpha` cannot be branched on
+inside `jit` - so it lives on `ProspectiveLead`, where `alpha` is a static
+dataclass field, and not on the module-level functions. `bool` is excluded so
+`False` cannot masquerade as a fixed zero.
+
+**Deliberate scope limit.** The module-level `apply_parallel`/`step` functions
+are *not* bypassed and still compute `x + alpha*(x - previous)`. They remain
+the tested definition of the operator, and
+`test_f001_hardening.py::test_2_free_function_still_shows_the_arithmetic_hazard`
+asserts the un-bypassed arithmetic still exhibits the Inf/NaN behaviour. The
+split between the two layers is therefore explicit and tested, not accidental.
+
+**Known consequence.** After this patch, `alpha=0` through the module no longer
+exercises the correction arithmetic, so G2a-core is trivially satisfied at the
+module level and is weaker as an arithmetic control than it was. The arithmetic
+control is retained via the free functions in `tests/test_g2a_identity.py`.
+
+24 new tests; full suite 87 passed on CPU. GPU re-verification of G2a on the
+hardened implementation is pending before G2b.
