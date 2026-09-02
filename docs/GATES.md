@@ -152,92 +152,93 @@ claim and **cannot rescue a failed G2a**. G2a-core has already PASSED
 Evidence label: **E2 - smoke/diagnostic**. One epoch at one seed characterizes
 nothing beyond "it runs and behaves the same".
 
-### Required runs - four, ~1 min each
+### Required runs - four, ~1 min each, on PINNED commits
 
 All four in a **single SLURM allocation**, back to back, on the same node, with
 provenance captured in the same invocation.
 
-| Run | Branch | Flags added to the baseline script | Purpose |
+Commits are **pinned by SHA**, checked out detached. No open-ended `git pull`
+immediately before a run.
+
+| Run | Branch / pinned commit | Flags added to the baseline script | Purpose |
 |---|---|---|---|
-| `C1` | `main` | none | branch-level plain-S5 control |
-| `C2` | `prospective-lead` | `--prospective_mode=off` | **same-commit** plain-S5 control |
-| `C2R` | `prospective-lead` | `--prospective_mode=off` (repeat) | run-to-run noise floor `d_noise` |
-| `T`  | `prospective-lead` | `--prospective_mode=lead --prospective_alpha=0.0 --prospective_alpha_learned=False --prospective_layers=all` | the alpha=0 treatment |
+| `C1` | `main` @ `3c17a9af9725cfb8c06123a5ebd7add4cd819bfa` | none | branch-level plain-S5 control |
+| `C2` | `prospective-lead` @ `0316e3c3d102d230ed3660b0b6f5084a66bc01ea` | `--prospective_mode=off` | **same-commit** plain-S5 control |
+| `C2R` | same as `C2` | `--prospective_mode=off` (repeat) | run-to-run repeat discrepancy |
+| `T` | same as `C2` | `--prospective_mode=lead --prospective_alpha=0.0 --prospective_alpha_learned=False --prospective_layers=all` | the alpha=0 treatment |
 
-Rationale for four rather than two: `C2` vs `T` is the decisive comparison
-because it is the **same commit and same binary**, differing only by the flag,
-so a difference cannot be attributed to the branch. `C1` vs `C2` separately
-confirms the branch itself does not perturb plain S5. `C2R` supplies the noise
-floor without which `C2` vs `T` is uninterpretable.
+Both SHAs are verified present on `origin`. Clean trees must be confirmed
+before execution.
 
-`C1` is *not* a re-use of `E2-002`: it is re-run inside this allocation so all
-four runs share hardware state and environment.
+### Metric precision - what "identical" can and cannot mean
 
-### Held identical across all four
+The console prints losses at `:.5f` and accuracies at `:.4f`. **Equality of
+printed numbers is therefore equality to reported precision, not exact
+equality, and must never be described as "exact training identity."**
 
-Seed `1919`; `bsz=64`, `n_layers=2`, `d_model=64`, `ssm_size_base=64`,
-`blocks=2`, `batchnorm=False`, `bidirectional=False`, `p_dropout=0.0`,
-`epochs=1`; node `pgi15-gpu3`, one RTX 3090, `CUDA_VISIBLE_DEVICES=0`; the
-same venv and `requirements-frozen.txt`; `XLA_PYTHON_CLIENT_PREALLOCATE=false`,
-`WANDB_MODE=offline`; the same `cache_dir`.
+A full-precision machine-readable artifact does exist: `s5/train.py` calls
+`wandb.init(mode="offline")` unconditionally (even at `--USE_WANDB=False`) and
+logs `Training Loss`, `Val loss`, `Val Accuracy`, `Test Loss`, `Test Accuracy`
+via `wandb.log`, plus `Best Val Loss/Accuracy/Epoch` and
+`Best Test Loss/Accuracy` via `wandb.run.summary`. Setting `WANDB_DIR` to the
+persistent G2b directory preserves that history and summary at full precision.
 
-**Data ordering is controlled, not assumed.** `make_data_loader` builds a
-`torch.Generator` seeded with `--jax_seed` and `DataLoader` is constructed with
-`num_workers` defaulting to 0 (single process). With seed 1919 fixed, shuffle
-order is identical across all four runs.
+**The strongest available machine-readable level is therefore the offline W&B
+history/summary**, and the comparison is made there. The printed log is a
+secondary, rounded view.
 
-`p_dropout=0.0` removes the dropout RNG stream, so no stochastic path differs.
+There is no checkpoint artifact: the training entrypoint does not serialize
+parameters, so a parameter-level comparison is not available at this gate.
+Exact parameter-level identity is established separately and already by
+G2a-core (`E1-001`, `E1-002`), which compares parameter trees, gradients and a
+full optimizer update with `assert_array_equal`.
 
-### Metrics and artifacts compared
+### Predeclared verdict logic
 
-Extracted from each run's log:
-
-- trainable parameter count
-- train loss, val loss, val accuracy, test loss, test accuracy
-- best val loss / accuracy, best test loss / accuracy
-
-Descriptive only, never part of the criterion: wall clock, peak GPU memory.
-
-Artifacts per run: full stdout log, plus one shared `provenance.txt` and
-`requirements-frozen.txt` for the allocation.
-
-### Predeclared pass / stop criterion
-
-Fixed before execution.
+Fixed before execution. `d_noise` is **descriptive only**: it never relaxes the
+identity criterion, and it is consulted solely as a candidate *explanation*
+after a discrepancy has already been classified INVESTIGATE.
 
 **Hard precondition.** Trainable parameters must be exactly **26,058 in all
-four runs**. Any deviation is an immediate **STOP** - it would mean the
-`alpha=0` path allocates or restructures parameters, contradicting G2a-core.
+four runs**. Any deviation is an immediate **STOP** - it would contradict
+G2a-core.
 
-Define, per metric, over the exact printed values:
-
-```
-d_noise    = |metric(C2) - metric(C2R)|      # run-to-run noise floor
-d_identity = |metric(C2) - metric(T)|        # the paired comparison
-d_branch   = |metric(C1) - metric(C2)|       # branch control
-```
-
-| Condition (all metrics) | Verdict |
+| Condition | Verdict |
 |---|---|
-| `d_identity == 0` | **PASS** |
-| `d_noise > 0` and `d_identity <= d_noise` | **PASS** - within the measured noise floor |
-| `d_noise == 0` and `d_identity > 0` | **INVESTIGATE** - the training loop is deterministic, so alpha=0 should reproduce exactly given G2a-core passed |
-| `d_identity > d_noise` | **INVESTIGATE** |
-| parameter count != 26,058 anywhere | **STOP** |
+| parameter count != 26,058 in any run | **STOP** |
+| `C2` vs `T` identical at the strongest available machine-readable level (offline W&B history + summary) | **PASS** |
+| any `C2` vs `T` discrepancy, of any size | **INVESTIGATE** |
 
-`d_branch` is reported separately. `d_branch > d_noise` is its own finding
-about the branch, not about the alpha=0 path, and does not by itself fail G2b.
+On INVESTIGATE, `C2` vs `C2R` is then examined to judge whether general
+run-to-run nondeterminism is a plausible explanation. That examination informs
+the diagnosis; it does **not** convert the verdict to PASS on its own. A pass
+after investigation requires an explicit decision, recorded with its rationale.
 
-`d_noise` is **descriptive only**. It characterizes the training loop; it never
-redefines what alpha=0 identity means, and a large `d_noise` cannot be used to
-excuse a large `d_identity` beyond the explicit rule above.
+If only rounded console metrics were available for some quantity, the
+corresponding finding is reported as **"identical to reported precision"**,
+explicitly grounded together with the exact G2a-core result rather than
+presented as exact training identity on its own.
+
+### `C1` vs `C2` - branch trustworthiness (not merely informational)
+
+The feature branch's `off` mode must be a trustworthy plain-S5 control for all
+later work.
+
+| Condition | Verdict |
+|---|---|
+| `C1` and `C2` identical, or differing no more than the `C2`/`C2R` repeat discrepancy | acceptable |
+| `C1` differs from `C2` materially beyond the `C2`/`C2R` repeat discrepancy | **INVESTIGATE, before any alpha > 0 experiment** |
+
+A material `C1` vs `C2` divergence means `--prospective_mode=off` on
+`prospective-lead` is not a faithful plain-S5 baseline, which would undermine
+every subsequent paired comparison. It is resolved before G4, not deferred.
 
 ### Interpretation limits, fixed in advance
 
 - G2b passing adds **no** support for any `alpha > 0` claim.
 - G2b failing does **not** retract G2a-core, which is the architectural claim
-  and is already established by exact tests. It would be a finding to
-  investigate before any paired `alpha > 0` comparison is trusted.
+  and is already established by exact tests. It would be a finding to resolve
+  before any paired `alpha > 0` comparison is trusted.
 - Full-run nondeterminism, if observed, is recorded as its own separate finding
   about the training loop.
 
