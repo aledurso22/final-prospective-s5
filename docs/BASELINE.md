@@ -81,7 +81,44 @@ python run_train.py \
 | Wall clock | 1m57.32s (528s user, 461% CPU) |
 | Peak GPU memory | n/a - CPU-only host, no GPU present |
 
+Registry ID `E2-001`. Evidence label **E2 - smoke evidence only**.
+
 `--p_dropout=0.0` is deliberate: it removes the dropout RNG stream so this run
 can be compared exactly against the prospective branch at `alpha=0`.
 
-Peak GPU memory must be re-measured on the cluster. It is **not** estimated here.
+## GPU baseline (`E2-002`)
+
+The same command and seed on the target cluster GPU. Full provenance - commit,
+environment, hardware, seed, command, artifact path and evidence label - is in
+[EXPERIMENT_REGISTRY.md](EXPERIMENT_REGISTRY.md#e2-002--plain-s5-gpu-baseline-smoke).
+
+Host `pgi15-gpu3`, NVIDIA RTX 3090 (24576 MiB, cc 8.6), driver 570.86.10 /
+CUDA 12.8, `SLURM_JOB_ID=63277`, commit
+`6fcbca798a93e7b511d8862cae4cce4afa43c34f`, clean tree, seed 1919, 1 epoch.
+
+| Metric | Value |
+|---|---|
+| Baseline unit tests | 13/13 passed on the RTX 3090 |
+| Trainable parameters | 26,058 |
+| Train loss | 1.40519 |
+| Val loss | 0.36402 |
+| Val accuracy | 0.8952 |
+| Test loss | 0.33766 |
+| **Test accuracy** | **0.8998** |
+| Wall clock | 56.431 s |
+| Peak GPU memory | 837 MiB (of 24576 MiB) |
+| Peak sampled GPU utilization | 42% |
+| Mean GPU utilization | invalid - not reported (sampler ran past job end) |
+
+Artifacts: `/Users/durso/s5-runs/20260902-154442-main-6fcbca7/`.
+
+Evidence label **E2 - smoke evidence only**: this shows the pipeline runs and
+produces plausible numbers on the target hardware. It is not a benchmark and
+not a comparison.
+
+The parameter count matches the CPU run exactly; the metrics agree to about
+three decimal places without being identical. **The cause of that residual
+difference is not established** - reduced-precision matmul modes, kernel and
+reduction order, and fusion decisions can all differ across backends, and this
+run does not discriminate between them. See `docs/GATES.md` for a test that
+would.
