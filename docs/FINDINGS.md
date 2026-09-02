@@ -5,15 +5,16 @@ here whether or not it blocks the gate it was found under.
 
 | ID | Date | Severity | Area | Status |
 |---|---|---|---|---|
-| `F-001` | 2026-09-02 | hardening | `s5/prospective.py`, fixed `alpha=0` | **PATCHED** on `prospective-lead` `d60252f`; awaiting GPU re-verification |
+| `F-001` | 2026-09-02 | hardening | `s5/prospective.py`, fixed `alpha=0` | **CLOSED** — GPU-VERIFIED (`E1-002`, `0316e3c`, SLURM 63311, 87/87) |
 
 ---
 
 ## `F-001` - fixed `alpha=0` is not identity-preserving for Inf/NaN
 
-**Status: PATCHED on `prospective-lead` (`d60252f`), awaiting GPU
-re-verification.** Recorded as a real implementation defect / hardening
-finding. The original behaviour was explicitly **not** a passed identity case.
+**Status: CLOSED — GPU-VERIFIED.** Fixed by `d60252f`, verified on the RTX 3090
+as `E1-002` (commit `0316e3c`, SLURM 63311, 87 passed, `exit=0`). Recorded as a
+real implementation defect / hardening finding; the original behaviour was
+explicitly **not** a passed identity case.
 
 ### Scope
 
@@ -90,5 +91,5 @@ exercises the correction arithmetic, so G2a-core is trivially satisfied at the
 module level and is weaker as an arithmetic control than it was. The arithmetic
 control is retained via the free functions in `tests/test_g2a_identity.py`.
 
-24 new tests; full suite 87 passed on CPU. GPU re-verification of G2a on the
-hardened implementation is pending before G2b.
+24 new tests; full suite 87 passed on CPU and **87 passed on the RTX 3090**
+(`E1-002`). F-001 is closed.

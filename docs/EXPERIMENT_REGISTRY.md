@@ -14,6 +14,7 @@ comparison, and must not be cited as a performance claim.
 | `E2-001` | 2026-09-01 | `main` | `6fcbca7` | E2 (smoke, CPU) | plain S5, 1 epoch sMNIST, CPU host — test acc 0.8995 |
 | `E2-002` | 2026-09-02 | `main` | `6fcbca798a93e7b511d8862cae4cce4afa43c34f` | E2 (smoke, GPU) | plain S5, 1 epoch sMNIST, RTX 3090 — test acc 0.8998 |
 | `E1-001` | 2026-09-02 | `prospective-lead` | `a93b845bf8760e7693c6ec2ef4e04d17e182ac9e` | E1 (correctness, GPU) | **G2a-core PASSED** — 63/63 exact-identity tests on RTX 3090 |
+| `E1-002` | 2026-09-02 | `prospective-lead` | `0316e3c3d102d230ed3660b0b6f5084a66bc01ea` | E1 (correctness, GPU) | **G2a-core re-PASSED post-hardening; F-001 GPU-VERIFIED/CLOSED** — 87/87 |
 
 ---
 
@@ -237,3 +238,45 @@ packed segment, stale cache).
 `F-001` (G2a-robustness) remains **OPEN**. This PASS is scoped to finite
 tensors per the theory specification. Non-finite behaviour is unchanged by
 this result. See [FINDINGS.md](FINDINGS.md).
+
+
+---
+
+## `E1-002` — post-hardening G2a verification, PASSED on GPU
+
+**Evidence label: E1 — correctness evidence.**
+
+### Verdict
+
+- **G2a-core = PASSED** on the hardened implementation.
+- **F-001 = GPU-VERIFIED / CLOSED.**
+
+### Provenance
+
+| Field | Value |
+|---|---|
+| Branch | `prospective-lead` |
+| Commit | `0316e3c3d102d230ed3660b0b6f5084a66bc01ea` |
+| Hardening commit contained | `d60252f9b08f4ba020a829a38de9a186a69d4332` |
+| Host / node | `pgi15-gpu3` |
+| `SLURM_JOB_ID` | `63311` |
+| `CUDA_VISIBLE_DEVICES` | `0` |
+| GPU | NVIDIA GeForce RTX 3090 |
+| Result | **87 passed in 111.15s**, `exit=0` |
+| Artifact | `g2a.log` — *exact directory pending, not inferred* |
+
+### Coverage
+
+87 tests = the 63 of `E1-001` plus 24 F-001 hardening tests. The static-zero
+bypass is confirmed on GPU to: preserve finite exact identity (eager, JIT, with
+reset mask); leave Inf/NaN values unchanged **and** the following timestep
+clean; treat any stale cache (including NaN/Inf caches) as observationally
+irrelevant; and leave `alpha > 0` byte-identical to the un-bypassed free
+functions, with learned alpha never taking the bypass.
+
+### Residual note
+
+Module-level `alpha=0` no longer exercises the correction arithmetic, so
+G2a-core is a weaker *arithmetic* control than before the patch. The arithmetic
+control is retained through the free functions, still tested at `alpha=0` for
+finite inputs and still asserted to exhibit the Inf/NaN behaviour. See `F-001`.

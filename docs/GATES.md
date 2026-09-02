@@ -8,9 +8,9 @@ rationalization.
 |---|---|
 | G0 - plain-S5 baseline tests on target GPU | PASSED (13/13, `E2-002`) |
 | G1 - plain-S5 one-epoch GPU smoke | PASSED (`E2-002`) |
-| G2a-core - `alpha=0` exact identity, finite tensors | **PASSED** on RTX 3090, 63/63 (`E1-001`, commit `a93b845`) |
-| G2a-robustness - `alpha=0` under Inf/NaN | **FINDING F-001, OPEN** (does not gate G2a-core) |
-| G2b - paired one-epoch training diagnostic | approved, blocked on G2a-core |
+| G2a-core - `alpha=0` exact identity, finite tensors | **PASSED** on RTX 3090 (`E1-001` 63/63; re-passed post-hardening `E1-002` 87/87) |
+| G2a-robustness - `alpha=0` under Inf/NaN | **CLOSED** - `F-001` patched and GPU-verified (`E1-002`) |
+| G2b - paired one-epoch training diagnostic | **PROTOCOL FROZEN, NOT RUN** |
 | G3 - lag metrics instrumentation | not started |
 | G4 - sMNIST alpha/placement sweep | not started |
 
@@ -143,62 +143,108 @@ Any decision to accept a bounded tolerance on some backend is a decision for
 the project owner, recorded with its rationale - not a judgement this gate is
 permitted to make on its own.
 
-## G2b - paired one-epoch training behaviour (secondary, diagnostic)
+## G2b - paired one-epoch alpha=0 training diagnostic (FROZEN, not run)
 
-Same GPU, same host, same commit-pair, same seed, same configuration. This
-characterizes end-to-end behaviour; it does **not** define the identity claim.
+Secondary and diagnostic. It does **not** carry the architectural identity
+claim and **cannot rescue a failed G2a**. G2a-core has already PASSED
+(`E1-001`, `E1-002`); G2b characterizes end-to-end training behaviour only.
 
-**G2b cannot rescue G2a.** If G2a is INVESTIGATE/BLOCKED or FAIL, G2 does not
-pass, regardless of how well the training runs agree. Full-GPU-run
-nondeterminism, if observed, is recorded as its own separate finding about the
-training loop; it is never evidence about architectural identity, and it never
-converts a G2a failure into a pass. The two gates are read in order and G2a
-is decisive.
+Evidence label: **E2 - smoke/diagnostic**. One epoch at one seed characterizes
+nothing beyond "it runs and behaves the same".
 
-Prerequisite - establish the run-to-run noise floor on plain S5 first,
-otherwise a paired difference cannot be interpreted:
+### Required runs - four, ~1 min each
 
-```bash
-# on main, twice, same seed
-./bin/run_experiments/run_baseline_mnist_smoke.sh   # -> baseline_A.log
-./bin/run_experiments/run_baseline_mnist_smoke.sh   # -> baseline_B.log
+All four in a **single SLURM allocation**, back to back, on the same node, with
+provenance captured in the same invocation.
+
+| Run | Branch | Flags added to the baseline script | Purpose |
+|---|---|---|---|
+| `C1` | `main` | none | branch-level plain-S5 control |
+| `C2` | `prospective-lead` | `--prospective_mode=off` | **same-commit** plain-S5 control |
+| `C2R` | `prospective-lead` | `--prospective_mode=off` (repeat) | run-to-run noise floor `d_noise` |
+| `T`  | `prospective-lead` | `--prospective_mode=lead --prospective_alpha=0.0 --prospective_alpha_learned=False --prospective_layers=all` | the alpha=0 treatment |
+
+Rationale for four rather than two: `C2` vs `T` is the decisive comparison
+because it is the **same commit and same binary**, differing only by the flag,
+so a difference cannot be attributed to the branch. `C1` vs `C2` separately
+confirms the branch itself does not perturb plain S5. `C2R` supplies the noise
+floor without which `C2` vs `T` is uninterpretable.
+
+`C1` is *not* a re-use of `E2-002`: it is re-run inside this allocation so all
+four runs share hardware state and environment.
+
+### Held identical across all four
+
+Seed `1919`; `bsz=64`, `n_layers=2`, `d_model=64`, `ssm_size_base=64`,
+`blocks=2`, `batchnorm=False`, `bidirectional=False`, `p_dropout=0.0`,
+`epochs=1`; node `pgi15-gpu3`, one RTX 3090, `CUDA_VISIBLE_DEVICES=0`; the
+same venv and `requirements-frozen.txt`; `XLA_PYTHON_CLIENT_PREALLOCATE=false`,
+`WANDB_MODE=offline`; the same `cache_dir`.
+
+**Data ordering is controlled, not assumed.** `make_data_loader` builds a
+`torch.Generator` seeded with `--jax_seed` and `DataLoader` is constructed with
+`num_workers` defaulting to 0 (single process). With seed 1919 fixed, shuffle
+order is identical across all four runs.
+
+`p_dropout=0.0` removes the dropout RNG stream, so no stochastic path differs.
+
+### Metrics and artifacts compared
+
+Extracted from each run's log:
+
+- trainable parameter count
+- train loss, val loss, val accuracy, test loss, test accuracy
+- best val loss / accuracy, best test loss / accuracy
+
+Descriptive only, never part of the criterion: wall clock, peak GPU memory.
+
+Artifacts per run: full stdout log, plus one shared `provenance.txt` and
+`requirements-frozen.txt` for the allocation.
+
+### Predeclared pass / stop criterion
+
+Fixed before execution.
+
+**Hard precondition.** Trainable parameters must be exactly **26,058 in all
+four runs**. Any deviation is an immediate **STOP** - it would mean the
+`alpha=0` path allocates or restructures parameters, contradicting G2a-core.
+
+Define, per metric, over the exact printed values:
+
+```
+d_noise    = |metric(C2) - metric(C2R)|      # run-to-run noise floor
+d_identity = |metric(C2) - metric(T)|        # the paired comparison
+d_branch   = |metric(C1) - metric(C2)|       # branch control
 ```
 
-Then the paired run on `prospective-lead`:
+| Condition (all metrics) | Verdict |
+|---|---|
+| `d_identity == 0` | **PASS** |
+| `d_noise > 0` and `d_identity <= d_noise` | **PASS** - within the measured noise floor |
+| `d_noise == 0` and `d_identity > 0` | **INVESTIGATE** - the training loop is deterministic, so alpha=0 should reproduce exactly given G2a-core passed |
+| `d_identity > d_noise` | **INVESTIGATE** |
+| parameter count != 26,058 anywhere | **STOP** |
 
-```bash
-./bin/run_experiments/run_baseline_mnist_smoke.sh \
-  --prospective_mode=lead \
-  --prospective_alpha=0.0 \
-  --prospective_alpha_learned=False \
-  --prospective_layers=all
-```
+`d_branch` is reported separately. `d_branch > d_noise` is its own finding
+about the branch, not about the alpha=0 path, and does not by itself fail G2b.
 
-Held identical across all runs: GPU and host, `CUDA_VISIBLE_DEVICES`, seed
-1919, `bsz=64`, `n_layers=2`, `d_model=64`, `ssm_size_base=64`, `blocks=2`,
-`batchnorm=False`, `bidirectional=False`, `p_dropout=0.0`, dataset and data
-order, environment variables, `requirements-frozen.txt`.
+`d_noise` is **descriptive only**. It characterizes the training loop; it never
+redefines what alpha=0 identity means, and a large `d_noise` cannot be used to
+excuse a large `d_identity` beyond the explicit rule above.
 
-### Pass criterion
+### Interpretation limits, fixed in advance
 
-Let `d_AB` be the difference between the two plain-S5 repeats (the noise
-floor) and `d_0` the difference between plain S5 and `alpha=0`, on train loss,
-val loss, val accuracy, test loss, test accuracy and parameter count.
+- G2b passing adds **no** support for any `alpha > 0` claim.
+- G2b failing does **not** retract G2a-core, which is the architectural claim
+  and is already established by exact tests. It would be a finding to
+  investigate before any paired `alpha > 0` comparison is trusted.
+- Full-run nondeterminism, if observed, is recorded as its own separate finding
+  about the training loop.
 
-- Parameter count must be **26,058 in every run**. Any deviation fails outright.
-- If `d_AB == 0` (training is bit-reproducible): require `d_0 == 0`. Anything
-  else is a finding to investigate, given that G2a asserts exact identity.
-- If `d_AB > 0` (training is not bit-reproducible): require `d_0 <= d_AB`,
-  i.e. the prospective `alpha=0` run differs from plain S5 by no more than
-  plain S5 differs from itself. `d_0` materially larger than `d_AB` is a
-  finding, not a pass.
+### Out of scope
 
-Reporting `d_0` without `d_AB` is meaningless and is not acceptable evidence.
-
-### Evidence label
-
-G2b is **E2 - smoke evidence only**, like `E2-001` and `E2-002`. A single epoch
-at one seed characterizes nothing beyond "it runs and behaves the same".
+`alpha > 0`; lag, prefix accuracy or time-to-correct (no instrumentation
+exists - G3); throughput or memory comparison; the sweep (G4).
 
 ## Open questions - awaiting the theory specification
 
