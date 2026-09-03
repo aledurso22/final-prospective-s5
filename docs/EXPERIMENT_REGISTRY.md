@@ -15,6 +15,7 @@ comparison, and must not be cited as a performance claim.
 | `E2-002` | 2026-09-02 | `main` | `6fcbca798a93e7b511d8862cae4cce4afa43c34f` | E2 (smoke, GPU) | plain S5, 1 epoch sMNIST, RTX 3090 — test acc 0.8998 |
 | `E1-001` | 2026-09-02 | `prospective-lead` | `a93b845bf8760e7693c6ec2ef4e04d17e182ac9e` | E1 (correctness, GPU) | **G2a-core PASSED** — 63/63 exact-identity tests on RTX 3090 |
 | `E1-002` | 2026-09-02 | `prospective-lead` | `0316e3c3d102d230ed3660b0b6f5084a66bc01ea` | E1 (correctness, GPU) | **G2a-core re-PASSED post-hardening; F-001 GPU-VERIFIED/CLOSED** — 87/87 |
+| `E2-004` | 2026-09-03 | `main` `3c17a9a` + `prospective-lead` `0316e3c` | see below | E1 (correctness, GPU) | **G2b PASSED under deterministic XLA** — all four runs bit-identical |
 | `E2-003` | 2026-09-03 | `main` `3c17a9a` + `prospective-lead` `0316e3c` | see below | E2 (diagnostic, GPU) | **G2b = INVESTIGATE** — alpha=0 differs from plain S5 in full training; the training loop is itself nondeterministic |
 
 ---
@@ -386,3 +387,66 @@ with an interpretable distribution.
 ### Status
 
 `alpha > 0` remains blocked until G2b is closed.
+
+
+---
+
+## `E2-004` — G2b re-run under deterministic XLA: **PASSED**
+
+**Verdict: PASS.** Supersedes the INVESTIGATE verdict of `E2-003`, whose
+divergence is now explained by `F-002` (cross-process backward-pass
+nondeterminism) and eliminated by `XLA_FLAGS=--xla_gpu_deterministic_ops=true`.
+
+Evidence label **E1 — correctness**: with the training loop bit-reproducible,
+this is an exact result, not a smoke comparison.
+
+### Provenance
+
+| Field | Value |
+|---|---|
+| Artifact path | `/Users/durso/s5-runs/20260903-170803-G2b-deterministic/` |
+| Host | `pgi15-gpu3` |
+| `XLA_FLAGS` | `--xla_gpu_deterministic_ops=true` |
+| `C1` commit | `3c17a9af9725cfb8c06123a5ebd7add4cd819bfa` (`main`) |
+| `C2`/`C2R`/`T` commit | `0316e3c3d102d230ed3660b0b6f5084a66bc01ea` (`prospective-lead`) |
+| Clean trees | confirmed before each detached checkout |
+| Exit codes | all four `0` |
+| Env | `CUDA_VISIBLE_DEVICES=0`, `XLA_PYTHON_CLIENT_PREALLOCATE=false`, `WANDB_MODE=offline`, seed 1919 |
+
+Flags verified from the argument list embedded in each W&B artifact; `T` carries
+`--prospective_mode=lead --prospective_alpha=0.0
+--prospective_alpha_learned=False --prospective_layers=all`.
+
+### Result — all four runs bit-identical
+
+| Metric | C1 | C2 | C2R | T |
+|---|---|---|---|---|
+| Training Loss | 1.4052175283432007 | *same* | *same* | *same* |
+| Val loss | 0.36393970251083374 | *same* | *same* | *same* |
+| Val Accuracy | 0.8949999809265137 | *same* | *same* | *same* |
+| Test Loss | 0.3375144600868225 | *same* | *same* | *same* |
+| Test Accuracy | 0.9000999927520752 | *same* | *same* | *same* |
+
+```
+d_identity (C2 vs T)   = 0    -> PASS
+d_noise    (C2 vs C2R) = 0    -> training loop is bit-reproducible
+d_branch   (C1 vs C2)  = 0    -> off-mode is a faithful plain-S5 control
+```
+
+### What this closes
+
+1. **G2b PASSED.** Fixed `alpha=0` is a genuine no-op end to end, through the
+   live code path, not merely at tensor level (which G2a had already shown).
+2. **The branch-trustworthiness gate passes.** `prospective-lead` with
+   `--prospective_mode=off` is bit-identical to `main`, so it is a valid
+   control for every future paired comparison.
+3. **`F-002`'s remedy is validated on a real training run**, not just the probe.
+
+### Cost of determinism
+
+| | wall clock |
+|---|---|
+| ordinary (`E2-002`) | 56.431 s |
+| deterministic (this run, 4 runs) | 67.402 / 66.833 / 67.192 / 67.287 s |
+
+Mean 67.2 s, **+19.1%**. Accepted as the standing cost for paired comparisons.

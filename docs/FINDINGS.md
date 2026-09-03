@@ -151,8 +151,10 @@ dataset setup and compilation and is only an upper bound.
 3. If a future configuration cannot use the flag, the floor must be measured
    with >= 5 repeats of the control, not one, and every difference judged
    against that measured distribution.
-4. `E2-003` (G2b) should be re-run under the flag; its INVESTIGATE verdict was
-   produced under the cross-process condition now known to be nondeterministic.
+4. `E2-003` (G2b) was re-run under the flag as `E2-004`: **all four runs came
+   back bit-identical**, so G2b PASSES and the remedy is validated on a real
+   training run, not only on the probe. Measured cost: 56.4 s -> 67.2 s,
+   **+19.1%**, accepted as the standing cost for paired comparisons.
 
 Two runs of **plain S5** at the same commit (`0316e3c`), same flags
 (`--prospective_mode=off`), same seed (1919), same node and same environment
