@@ -15,6 +15,7 @@ comparison, and must not be cited as a performance claim.
 | `E2-002` | 2026-09-02 | `main` | `6fcbca798a93e7b511d8862cae4cce4afa43c34f` | E2 (smoke, GPU) | plain S5, 1 epoch sMNIST, RTX 3090 — test acc 0.8998 |
 | `E1-001` | 2026-09-02 | `prospective-lead` | `a93b845bf8760e7693c6ec2ef4e04d17e182ac9e` | E1 (correctness, GPU) | **G2a-core PASSED** — 63/63 exact-identity tests on RTX 3090 |
 | `E1-002` | 2026-09-02 | `prospective-lead` | `0316e3c3d102d230ed3660b0b6f5084a66bc01ea` | E1 (correctness, GPU) | **G2a-core re-PASSED post-hardening; F-001 GPU-VERIFIED/CLOSED** — 87/87 |
+| `E2-003` | 2026-09-03 | `main` `3c17a9a` + `prospective-lead` `0316e3c` | see below | E2 (diagnostic, GPU) | **G2b = INVESTIGATE** — alpha=0 differs from plain S5 in full training; the training loop is itself nondeterministic |
 
 ---
 
@@ -280,3 +281,108 @@ Module-level `alpha=0` no longer exercises the correction arithmetic, so
 G2a-core is a weaker *arithmetic* control than before the patch. The arithmetic
 control is retained through the free functions, still tested at `alpha=0` for
 finite inputs and still asserted to exhibit the Inf/NaN behaviour. See `F-001`.
+
+
+---
+
+## `E2-003` — G2b paired one-epoch alpha=0 training diagnostic
+
+**Verdict: INVESTIGATE. G2b does NOT pass.**
+
+Applied verbatim from the criterion frozen in [GATES.md](GATES.md) before
+execution: *any* C2-vs-T discrepancy is INVESTIGATE. There is a discrepancy on
+all five full-precision metrics.
+
+**This does not retract G2a-core.** Exact architectural identity — logits,
+loss, gradients and a full optimizer step, all `assert_array_equal` — is
+established on this same GPU by `E1-001` and `E1-002`. G2b probes whether that
+survives 843 optimizer steps through the training loop.
+
+### Provenance
+
+| Field | Value |
+|---|---|
+| Artifact path | `/Users/durso/s5-runs/20260903-150747-G2b/` |
+| Host / node | `pgi15-gpu3.iff.kfa-juelich.de` |
+| GPU | RTX 3090, `CUDA_VISIBLE_DEVICES=0` |
+| `C1` commit | `3c17a9af9725cfb8c06123a5ebd7add4cd819bfa` (`main`) |
+| `C2`/`C2R`/`T` commit | `0316e3c3d102d230ed3660b0b6f5084a66bc01ea` (`prospective-lead`) |
+| Clean trees | confirmed before each checkout |
+| Exit codes | all four `0` |
+| Env | `XLA_PYTHON_CLIENT_PREALLOCATE=false`, `WANDB_MODE=offline`, seed 1919 |
+
+Commits and argument lists were verified from provenance embedded **inside each
+W&B run artifact**, not from directory timestamps. `tools/wandb_extract.py`
+reads them from the binary `run-*.wandb` datastore.
+
+### Run identification
+
+Three attempts exist under `wb/T`; two are excluded on the evidence of their
+recorded argument lists:
+
+| Dir | Recorded args | Disposition |
+|---|---|---|
+| `151801-6ryb7x3d` | `--prospective_alpha=0.0`, **no `--prospective_layers`** | invalid — `layers` defaulted to `last`; **excluded** |
+| `152011-wtvvhp49` | correct flags | interrupted, no metrics; **excluded** |
+| `152030-2vn4mtb0` | correct flags, complete | **the valid `T`** |
+
+### Hard precondition
+
+Trainable parameters = **26,058 in all four runs**. Satisfied; no STOP.
+
+### Full-precision metrics
+
+| Metric | `C1` (main) | `C2` (off) | `C2R` (off repeat) | `T` (alpha=0) |
+|---|---|---|---|---|
+| Training Loss | 1.405187726020813 | 1.4051856994628906 | 1.405187726020813 | 1.4051895141601562 |
+| Val loss | 0.3641023337841034 | 0.36359065771102905 | 0.36366006731987 | 0.3639678657054901 |
+| Val Accuracy | 0.8951666355133057 | 0.8951666355133057 | 0.8951666355133057 | 0.8949999809265137 |
+| Test Loss | 0.33774080872535706 | 0.33723869919776917 | 0.3372980058193207 | 0.33759671449661255 |
+| Test Accuracy | 0.899899959564209 | 0.8999999761581421 | 0.8999999761581421 | 0.899899959564209 |
+
+### Deltas
+
+| Metric | `d_noise` (C2,C2R) | `d_ident` (C2,T) | `d_branch` (C1,C2) |
+|---|---|---|---|
+| Training Loss | 2.027e-06 | 3.815e-06 | 2.027e-06 |
+| Val loss | 6.941e-05 | 3.772e-04 | 5.117e-04 |
+| Val Accuracy | 0 | 1.667e-04 | 0 |
+| Test Loss | 5.931e-05 | 3.580e-04 | 5.021e-04 |
+| Test Accuracy | 0 | 1.000e-04 | 1.000e-04 |
+
+### Findings
+
+1. **The training loop is nondeterministic.** `C2` and `C2R` are the same
+   commit, flags and seed and still differ (2e-6 train loss, 7e-5 val loss).
+   Bit-reproducibility does not hold for full training runs on this GPU.
+   Recorded separately as `F-002`.
+2. **Every accuracy difference is exactly one sample**: `d_ident` on val
+   accuracy is 0.99993 x (1/6000), on test accuracy 1.00017 x (1/10000).
+   Accuracy is too coarse to function as an identity test at this scale.
+3. **`C1` vs `C2` also exceeds the repeat discrepancy** on three metrics, which
+   triggers the branch-trustworthiness rule. Both runs are plain S5 with no
+   prospective code executing, which points at the training loop rather than
+   the `alpha=0` path.
+
+### Methodological caveat
+
+`d_noise` is a **sample of size one**. A single repeat pair is a weak estimator
+of the noise distribution, so `d_ident > d_noise` is not strong evidence that
+`T` is anomalous. The criterion was predeclared and has been applied as
+written rather than reinterpreted after seeing the data; the caveat is recorded
+so the investigation does not begin by assuming `T` is at fault.
+
+### Recommended investigation
+
+**Primary.** Re-run `C2`, `C2R` and `T` with
+`XLA_FLAGS=--xla_gpu_deterministic_ops=true`. If `C2 == C2R` and `C2 == T`
+exactly, G2b passes cleanly. If `C2 == C2R` but `T` differs, that is a genuine
+finding and work stops. Four runs, ~4 minutes.
+
+**Fallback**, if the flag is unsupported on this XLA build: 5x `C2` and 5x `T`,
+then test whether `T` lies inside the `C2` spread — replacing a size-1 estimate
+with an interpretable distribution.
+
+### Status
+
+`alpha > 0` remains blocked until G2b is closed.

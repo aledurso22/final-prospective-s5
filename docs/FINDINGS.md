@@ -5,6 +5,7 @@ here whether or not it blocks the gate it was found under.
 
 | ID | Date | Severity | Area | Status |
 |---|---|---|---|---|
+| `F-002` | 2026-09-03 | investigation | training loop, full GPU runs | OPEN - one-epoch training is not bit-reproducible on RTX 3090 |
 | `F-001` | 2026-09-02 | hardening | `s5/prospective.py`, fixed `alpha=0` | **CLOSED** — GPU-VERIFIED (`E1-002`, `0316e3c`, SLURM 63311, 87/87) |
 
 ---
@@ -93,3 +94,38 @@ control is retained via the free functions in `tests/test_g2a_identity.py`.
 
 24 new tests; full suite 87 passed on CPU and **87 passed on the RTX 3090**
 (`E1-002`). F-001 is closed.
+
+
+---
+
+## `F-002` - one-epoch training is not bit-reproducible on the RTX 3090
+
+**Status: OPEN.** Discovered during G2b (`E2-003`).
+
+Two runs of **plain S5** at the same commit (`0316e3c`), same flags
+(`--prospective_mode=off`), same seed (1919), same node and same environment
+produced different results:
+
+| Metric | `C2` | `C2R` | difference |
+|---|---|---|---|
+| Training Loss | 1.4051856994628906 | 1.405187726020813 | 2.027e-06 |
+| Val loss | 0.36359065771102905 | 0.36366006731987 | 6.941e-05 |
+| Test Loss | 0.33723869919776917 | 0.3372980058193207 | 5.931e-05 |
+
+No prospective code executes in either run, so this is a property of the
+training loop and not of the prospective operator.
+
+Data ordering is controlled (`torch.Generator` seeded from `--jax_seed`,
+`num_workers=0`) and dropout is disabled (`--p_dropout=0.0`), so the remaining
+candidates are non-deterministic GPU reductions/atomics and autotuned kernel
+selection under XLA.
+
+**Consequence.** Until this is characterized or removed, no paired full-run
+training comparison - including every future `alpha > 0` comparison - can be
+interpreted at a resolution finer than this noise. It is therefore a
+prerequisite for the sweep (G4), not merely a curiosity.
+
+**Next step.** Test `XLA_FLAGS=--xla_gpu_deterministic_ops=true`; if runs
+become bit-reproducible, paired comparisons become exact. Otherwise the noise
+distribution must be characterized with repeats and every comparison judged
+against it.

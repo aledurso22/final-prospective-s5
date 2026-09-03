@@ -10,7 +10,7 @@ rationalization.
 | G1 - plain-S5 one-epoch GPU smoke | PASSED (`E2-002`) |
 | G2a-core - `alpha=0` exact identity, finite tensors | **PASSED** on RTX 3090 (`E1-001` 63/63; re-passed post-hardening `E1-002` 87/87) |
 | G2a-robustness - `alpha=0` under Inf/NaN | **CLOSED** - `F-001` patched and GPU-verified (`E1-002`) |
-| G2b - paired one-epoch training diagnostic | **PROTOCOL FROZEN, NOT RUN** |
+| G2b - paired one-epoch training diagnostic | **INVESTIGATE** (`E2-003`) - not a pass; see `F-002` |
 | G3 - lag metrics instrumentation | not started |
 | G4 - sMNIST alpha/placement sweep | not started |
 
