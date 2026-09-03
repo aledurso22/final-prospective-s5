@@ -5,7 +5,7 @@ here whether or not it blocks the gate it was found under.
 
 | ID | Date | Severity | Area | Status |
 |---|---|---|---|---|
-| `F-002` | 2026-09-03 | investigation | training loop, full GPU runs | OPEN - one-epoch training is not bit-reproducible on RTX 3090 |
+| `F-002` | 2026-09-03 | investigation | training loop, full GPU runs | **CHARACTERIZED** - cross-process backward-pass nondeterminism; removed by `--xla_gpu_deterministic_ops=true` |
 | `F-001` | 2026-09-02 | hardening | `s5/prospective.py`, fixed `alpha=0` | **CLOSED** — GPU-VERIFIED (`E1-002`, `0316e3c`, SLURM 63311, 87/87) |
 
 ---
@@ -100,7 +100,59 @@ control is retained via the free functions in `tests/test_g2a_identity.py`.
 
 ## `F-002` - one-epoch training is not bit-reproducible on the RTX 3090
 
-**Status: OPEN.** Discovered during G2b (`E2-003`).
+**Status: CHARACTERIZED.** Discovered during G2b (`E2-003`), diagnosed on the
+RTX 3090 with `tools/f002_determinism_probe.py`.
+
+### Diagnosis
+
+| condition | in-process repeat | cross-process repeat |
+|---|---|---|
+| ordinary | identical | **first divergence at `5_first_grads`, max abs 2.441e-04** |
+| `XLA_FLAGS=--xla_gpu_deterministic_ops=true` | identical | **fully identical** |
+
+Staged comparison, ordinary cross-process:
+
+| stage | identical | max abs diff |
+|---|---|---|
+| 1 data order | yes | 0 |
+| 1 data values | yes | 0 |
+| 2 init params | yes | 0 |
+| 3 forward logits | yes | 0 |
+| 4 first loss | yes | 0 |
+| **5 first gradients** | **no** | **2.441e-04** |
+| 6 params after one update | no | 1.490e-08 |
+| 6 optimizer state | no | 1.221e-04 |
+| 7 step losses | no | 2.384e-07 |
+
+**The nondeterminism is confined to the backward pass, and it is
+process-level, not run-level.** The forward pass, the loss, the parameter
+initialization and the data pipeline are all bit-exact. Within a single
+process both repeats agree even without the deterministic flag, because XLA
+compiles the kernel once and reuses it; across processes autotuning can select
+a different reduction algorithm for the gradient, and the associative-scan
+backward pass uses non-deterministic reductions/atomics.
+
+This explains `E2-003` exactly: those were four separate `python run_train.py`
+invocations, i.e. the cross-process condition.
+
+### Remedy
+
+`XLA_FLAGS=--xla_gpu_deterministic_ops=true` makes cross-process runs bit-
+identical through every stage. Cost is not yet measured on a real training
+run; the probe's own wall clock (1m1.4s -> 1m6.4s, ~8%) is dominated by
+dataset setup and compilation and is only an upper bound.
+
+### Protocol for architecture comparisons
+
+1. Every paired comparison sets
+   `XLA_FLAGS=--xla_gpu_deterministic_ops=true`, recorded in provenance.
+2. Under that flag, paired runs are expected to be **exactly** equal, so
+   comparisons are exact and no reproducibility floor has to be assumed.
+3. If a future configuration cannot use the flag, the floor must be measured
+   with >= 5 repeats of the control, not one, and every difference judged
+   against that measured distribution.
+4. `E2-003` (G2b) should be re-run under the flag; its INVESTIGATE verdict was
+   produced under the cross-process condition now known to be nondeterministic.
 
 Two runs of **plain S5** at the same commit (`0316e3c`), same flags
 (`--prospective_mode=off`), same seed (1919), same node and same environment
@@ -125,7 +177,6 @@ training comparison - including every future `alpha > 0` comparison - can be
 interpreted at a resolution finer than this noise. It is therefore a
 prerequisite for the sweep (G4), not merely a curiosity.
 
-**Next step.** Test `XLA_FLAGS=--xla_gpu_deterministic_ops=true`; if runs
-become bit-reproducible, paired comparisons become exact. Otherwise the noise
-distribution must be characterized with repeats and every comparison judged
-against it.
+**Reproduce.** `python tools/f002_determinism_probe.py` (in-process) and
+`--write` / `--compare` (cross-process), with and without `--deterministic`.
+Evidence: `$HOME/s5-runs/20260903-165456-F002-determinism/` on `pgi15-gpu3`.
