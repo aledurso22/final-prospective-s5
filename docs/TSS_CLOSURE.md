@@ -136,6 +136,12 @@ the impulse response, evaluation the step response.
 **A reduced model can match the nominal response to machine precision and
 still fail its parameter tangent.**
 
+> This experiment is the simplest **precursor** of the learning-access result.
+> It shows nominal response closure is not local parameter-tangent closure. The
+> three-state system in [LEARNING_ACCESS.md](LEARNING_ACCESS.md) strengthens it
+> into an actual prospective architecture with a consequence for BPTT and
+> learned memory.
+
 A further nuance worth recording: at `theta = 0` the hidden mode has zero
 amplitude and is **not identifiable at all** - AR(2) returns a spurious pole at
 -69. It becomes exactly identifiable (`-3, -1`) as soon as `theta != 0`. The
