@@ -55,6 +55,48 @@ def gp_scan(a_bar, b_bar, input_sequence):
     return hs
 
 
+def gp_scan_reset(a_bar, b_bar, input_sequence, reset_mask=None):
+    """Parallel scan with optional per-interval reset.
+
+    `reset_mask[k] == True` means the carry is dropped BEFORE interval k, so
+    h_k = b_bar x_k. Implemented by zeroing the transition factor at those
+    positions, which the associative operator handles exactly - no second scan
+    and no sequential fallback.
+    """
+    L = input_sequence.shape[0]
+    Lambda_elements = a_bar * np.ones((L, a_bar.shape[0]))
+    if reset_mask is not None:
+        keep = (~np.asarray(reset_mask, dtype=bool))[:, None].astype(a_bar.dtype)
+        Lambda_elements = Lambda_elements * keep
+    Bu_elements = jax.vmap(lambda u: b_bar @ u)(input_sequence)
+    _, hs = jax.lax.associative_scan(binary_operator,
+                                     (Lambda_elements, Bu_elements))
+    return hs
+
+
+def gp_scan_sequential(a_bar, b_bar, input_sequence, h0=None, reset_mask=None):
+    """DIFFERENTIABLE sequential recurrence, with carry and resets.
+
+    Uses `lax.scan`, so unlike a NumPy loop it can validate GRADIENTS against
+    the parallel path, and it accepts a NON-ZERO initial carry so chunked
+    evaluation can be checked.
+    """
+    L = input_sequence.shape[0]
+    h_init = (np.zeros(a_bar.shape[0], dtype=a_bar.dtype) if h0 is None
+              else np.asarray(h0, dtype=a_bar.dtype))
+    mask = (np.zeros(L, dtype=bool) if reset_mask is None
+            else np.asarray(reset_mask, dtype=bool))
+
+    def step(h, inp):
+        x_k, r_k = inp
+        h_prev = np.where(r_k, np.zeros_like(h), h)
+        h_new = a_bar * h_prev + b_bar @ x_k
+        return h_new, h_new
+
+    _, hs = jax.lax.scan(step, h_init, (input_sequence, mask))
+    return hs
+
+
 def gp_readout(hs, d_x, C_tilde, input_sequence, conj_sym):
     """s_k = h_k + D_x x_k, then the ordinary conjugate-symmetric readout."""
     s = hs + jax.vmap(lambda u: d_x @ u)(input_sequence)
@@ -106,12 +148,25 @@ class GPSSM(S5SSM):
                 f"step_rescale must be 1.0 for the generalized mechanism (got "
                 f"{self.step_rescale}). Sample-clock T would have to rescale "
                 f"as 1/c; that protocol is not implemented or tested.")
+        if not self.clip_eigs:
+            raise ValueError(
+                "generalized prospective response requires clip_eigs=True.\n"
+                "The stability identity Re(a_eff) = (sigma - t|a|^2)/|m|^2 < 0 "
+                "is CONDITIONAL on Re(a) < 0. A stable initialization does not "
+                "constrain later optimizer updates, and an unconstrained run "
+                "was measured to reach |a_bar| = 1.0035 > 1. The historical "
+                "plain default (clip_eigs=False) is deliberately unchanged; "
+                "for a matched treatment/control comparison set clip_eigs=True "
+                "on BOTH arms.")
         if self.gp_init_scale <= 0.0:
             raise ValueError(
-                "gp_init_scale must be strictly positive: a response "
-                "initialized at exactly zero has zero tangent and cannot "
-                "learn away from zero. Use mechanism='plain' for the exact "
-                "identity baseline.")
+                "gp_init_scale must be strictly positive. softplus is a "
+                "bijection onto (0, inf), so no finite raw value gives t = 0 "
+                "exactly and inverse_softplus(0) is not finite; the target "
+                "scale must therefore be positive. (softplus'(0) = 1/2, so "
+                "raw = 0 is a perfectly good tangent - the zero-tangent "
+                "problem belongs to a SQUARED parameterization, not to this "
+                "one.) Use mechanism='plain' for the exact identity baseline.")
 
         n_response = 1 if self.mechanism in _SCALAR_MECHANISMS else self.P
         raw0 = inverse_softplus(self.gp_init_scale)  # host-side float
@@ -131,9 +186,9 @@ class GPSSM(S5SSM):
         a, b = absorb_clock(self.Lambda, B_tilde, step)
         return build_coefficients(self.mechanism, a, b, self.response())
 
-    def __call__(self, input_sequence):
+    def __call__(self, input_sequence, reset_mask=None):
         c = self.coefficients()
-        hs = gp_scan(c["a_bar"], c["b_bar"], input_sequence)
+        hs = gp_scan_reset(c["a_bar"], c["b_bar"], input_sequence, reset_mask)
         ys = gp_readout(hs, c["d_x"], self.C_tilde, input_sequence,
                         self.conj_sym)
         Du = jax.vmap(lambda u: self.D * u)(input_sequence)

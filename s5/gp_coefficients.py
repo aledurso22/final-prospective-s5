@@ -50,27 +50,72 @@ so for ``sigma < 0`` and ``t >= 0`` the effective pole is strictly stable for
 EVERY admissible t. No extra constraint beyond a stable native pole is needed.
 """
 
+import math as _math
+
 import jax
 import jax.numpy as np
 
-# Series switch for phi1. Chosen so the truncated series and the closed form
-# agree to well under float64 resolution at the crossover.
-_PHI1_SMALL = 1e-4
+# phi1 switch thresholds, chosen from MEASURED error, per dtype.
+#
+# Two errors fight each other:
+#   * series truncation grows with |z|;
+#   * cancellation in (exp(z)-1)/z, and far more severely in its DERIVATIVE,
+#     grows as |z| shrinks - roughly eps/|z|^2 for phi1'.
+#
+# Measured in complex64, derivative absolute error of the direct branch:
+#     |z|=1e-4 -> 1.0e+03      |z|=1e-3 -> 1.3e+01
+#     |z|=1e-2 -> 5.2e-02      |z|=0.1  -> 1.4e-03
+# so a 1e-4 cutoff (the previous value) leaves the derivative useless, and
+# even wrong-signed, just outside it. The series with 14 terms is accurate to
+# ~1e-12 at |z|=1, so the 32-bit switch is placed there instead.
+_PHI1_SWITCH_32 = 1.0
+_PHI1_SWITCH_64 = 1e-2
+_PHI1_TERMS = 14
+# 1/(n+1)! for n = 0..13, the phi1 Taylor coefficients
+_PHI1_COEFFS = tuple(1.0 / _math.factorial(n + 1) for n in range(_PHI1_TERMS))
+
+
+def _switch_threshold(dtype):
+    """32-bit and 64-bit need very different crossover points."""
+    return _PHI1_SWITCH_32 if np.finfo(
+        np.zeros((), dtype).real.dtype).eps > 1e-10 else _PHI1_SWITCH_64
+
+
+def safe_expm1(z):
+    """exp(z) - 1 for complex z, without the catastrophic cancellation.
+
+    Writing z = x + iy,
+
+        Re = expm1(x) cos y - 2 sin^2(y/2)
+        Im = exp(x) sin y
+
+    Both pieces are computed from primitives that are themselves accurate near
+    zero, so the small-|z| relative error stays at eps rather than eps/|z|.
+    """
+    z = np.asarray(z)
+    if not np.issubdtype(z.dtype, np.complexfloating):
+        return np.expm1(z)
+    x, y = z.real, z.imag
+    half = np.sin(0.5 * y)
+    return (np.expm1(x) * np.cos(y) - 2.0 * half * half) + 1j * (np.exp(x) * np.sin(y))
 
 
 def phi1(z):
-    """phi1(z) = (exp(z) - 1)/z, with phi1(0) = 1. Autodiff-safe.
+    """phi1(z) = (exp(z) - 1)/z, with phi1(0) = 1. Accurate in VALUE AND
+    DERIVATIVE, in float32/complex64 as well as float64/complex128.
 
-    The inactive branch of the `where` must not contain a literal 0/0: that
-    produces NaN in the cotangent even though the value is discarded. The
-    denominator is therefore replaced by 1 where the series is used, so both
-    branches are finite in value AND derivative.
+    The inactive branch of the `where` never contains a literal 0/0: the
+    denominator is replaced by 1 where the series is used, so both branches are
+    finite in value and in cotangent.
     """
     z = np.asarray(z)
-    small = np.abs(z) < _PHI1_SMALL
+    cutoff = _switch_threshold(z.dtype)
+    small = np.abs(z) < cutoff
     safe = np.where(small, np.ones_like(z), z)
-    series = 1.0 + z / 2.0 + z ** 2 / 6.0 + z ** 3 / 24.0
-    exact = (np.exp(z) - 1.0) / safe
+    series = np.zeros_like(z)
+    for c in reversed(_PHI1_COEFFS):          # Horner, most accurate ordering
+        series = series * z + np.asarray(c, dtype=z.dtype)
+    exact = safe_expm1(z) / safe
     return np.where(small, series, exact)
 
 
@@ -82,10 +127,15 @@ def absorb_clock(Lambda, B_tilde, step):
 
 
 def softplus_response(raw):
-    """Smooth positive map for the response coefficient t >= 0.
+    """Smooth positive map for the response coefficient, t = softplus(raw) > 0.
 
-    A squared parameterization initialized at exactly zero has zero tangent and
-    cannot learn away from zero; softplus does not.
+    softplus is a bijection onto (0, inf): no finite raw value gives t = 0
+    exactly, and inverse_softplus(0) is not finite. That is why a zero target
+    scale is rejected.
+
+    Note softplus'(0) = 1/2, so raw = 0 is a perfectly usable starting point -
+    the "zero tangent at zero" problem belongs to a SQUARED parameterization,
+    not to this one. (Corrected per coordinator review R7.4.)
     """
     return jax.nn.softplus(raw)
 

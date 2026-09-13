@@ -46,7 +46,11 @@ GATE_STREAM_X64 = 1e-11
 H, SSM_SIZE, BLOCKS, L = 4, 8, 2, 24
 
 
-def ssm_kwargs(conj_sym=True, bidirectional=False, discretization="zoh"):
+def ssm_kwargs(conj_sym=True, bidirectional=False, discretization="zoh",
+               clip_eigs=False):
+    """`clip_eigs` is EXPLICIT. The historical plain default is False; the
+    generalized mechanisms require True (admissibility, see R2), so any
+    treatment/control comparison must set it identically on both arms."""
     block = SSM_SIZE // BLOCKS
     Lam, _, _, V, _ = make_DPLR_HiPPO(block)
     if conj_sym:
@@ -60,11 +64,13 @@ def ssm_kwargs(conj_sym=True, bidirectional=False, discretization="zoh"):
     return dict(H=H, P=P, Lambda_re_init=Lam.real, Lambda_im_init=Lam.imag,
                 V=block_diag(*([V] * BLOCKS)), Vinv=block_diag(*([Vc] * BLOCKS)),
                 C_init="trunc_standard_normal", discretization=discretization,
-                dt_min=0.001, dt_max=0.1, conj_sym=conj_sym, clip_eigs=False,
-                bidirectional=bidirectional)
+                dt_min=0.001, dt_max=0.1, conj_sym=conj_sym,
+                clip_eigs=clip_eigs, bidirectional=bidirectional)
 
 
 def build(mechanism, gp_init_scale=0.05, **kw):
+    """GP mechanisms are built with clip_eigs=True, as admissibility requires."""
+    kw.setdefault("clip_eigs", mechanism != "plain")
     fn = init_gp_ssm(mechanism=mechanism, gp_init_scale=gp_init_scale,
                      **ssm_kwargs(**kw))
     return fn(step_rescale=1.0)
@@ -417,15 +423,24 @@ def test_6_unsupported_configurations_are_rejected(kw, match):
 
 
 def test_6_non_unit_step_rescale_is_rejected():
-    fn = init_gp_ssm(mechanism="gp_diagonal", gp_init_scale=0.05, **ssm_kwargs())
+    fn = init_gp_ssm(mechanism="gp_diagonal", gp_init_scale=0.05,
+                     **ssm_kwargs(clip_eigs=True))
     with pytest.raises(ValueError, match="step_rescale"):
         fn(step_rescale=2.0).init(jax.random.PRNGKey(0), inputs())
 
 
 def test_6_zero_init_scale_is_rejected():
-    with pytest.raises(ValueError, match="zero tangent"):
+    with pytest.raises(ValueError, match="strictly positive"):
         build("gp_diagonal", gp_init_scale=0.0).init(jax.random.PRNGKey(0),
                                                      inputs())
+
+
+def test_6_unconstrained_gp_configuration_is_rejected():
+    """R2: a GP run must not be launched without the stability constraint."""
+    fn = init_gp_ssm(mechanism="gp_diagonal", gp_init_scale=0.05,
+                     **ssm_kwargs(clip_eigs=False))
+    with pytest.raises(ValueError, match="clip_eigs=True"):
+        fn(step_rescale=1.0).init(jax.random.PRNGKey(0), inputs())
 
 
 def test_6_float32_production_parallel_vs_streaming():
@@ -470,7 +485,8 @@ def test_theory_dc_gain_invariant_across_mechanisms():
     base = None
     for mech in ("plain", "gp_scalar", "gp_diagonal", "prospective_input",
                  "full_state_pc"):
-        kw = dict(mechanism=mech, **ssm_kwargs())
+        # MATCHED settings on every arm: identical clipping, identical init
+        kw = dict(mechanism=mech, **ssm_kwargs(clip_eigs=True))
         if mech != "plain":
             kw["gp_init_scale"] = 0.3
         mod = init_gp_ssm(**kw)(step_rescale=1.0)
@@ -484,11 +500,19 @@ def test_theory_dc_gain_invariant_across_mechanisms():
             assert onp.max(onp.abs(dc - base)) < 1e-12, mech
 
 
-def test_theory_prospectivity_does_not_increase_hankel_memory():
-    """Increasing instantaneous response does not increase the layer's
-    past-to-future operator norm (overview.md section 3).
+def test_fixture_observation_hankel_decreases_on_THIS_configuration():
+    """A FIXTURE-SPECIFIC OBSERVATION, not a theorem and not a general rule.
 
-    Reported as a measured relation on this configuration, not as a proof.
+    On this particular HiPPO initialization the layer's Hankel top happens to
+    fall as the response grows. It does NOT generalize: the coordinator's
+    counterexample (a = -0.1 + 2*pi*i) has the Hankel top INCREASE with
+    response, and is reproduced in
+    tests/test_gp_review_fixes.py::test_R6_complex_mode_hankel_INCREASES_with_response.
+
+    sigma_memory = |K0| tau_0/(2 tau) concerns a fixed SCALAR RECIPROCAL
+    CONTINUOUS-TIME mode. It is not a monotonicity statement about a sampled
+    complex S5 core's finite Hankel norm. No rule to maximize or minimize
+    Hankel strength is inferred from either observation.
     """
     from s5.gp_diagnostics import core_from_module, hankel_singular_values
     u = inputs(78)

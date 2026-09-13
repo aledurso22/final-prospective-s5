@@ -33,8 +33,10 @@ BSZ, SEQ, NCLS = 4, 16, 5
 
 
 def _model_cls(mechanism, gp_init_scale=0.1):
+    # GP mechanisms require clip_eigs=True (admissibility, R2). Plain keeps the
+    # historical default unless a matched comparison asks otherwise.
     fn = init_gp_ssm(mechanism=mechanism, gp_init_scale=gp_init_scale,
-                     **ssm_kwargs())
+                     **ssm_kwargs(clip_eigs=(mechanism != "plain")))
     return partial(BatchClassificationModel, ssm=fn, d_output=NCLS, d_model=H,
                    n_layers=2, padded=False, activation="half_glu1",
                    dropout=0.0, mode="pool", prenorm=True, batchnorm=False)
@@ -55,7 +57,9 @@ def test_A_provenance_records_required_fields():
               "backend", "devices", "timestamp"):
         assert k in p
     if p["dirty"]:
-        assert p["diff_sha256"], "dirty tree must carry a diff identity"
+        # must cover unstaged + staged + untracked content, not `git diff` alone
+        assert p["dirty_manifest_sha256"], "dirty tree needs a manifest identity"
+        assert "untracked_files" in p
 
 
 @pytest.mark.parametrize("mechanism", ["plain", "gp_diagonal"])

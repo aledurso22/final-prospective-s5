@@ -17,6 +17,14 @@ Restore is supported and checked **at an epoch boundary, in-process, on the
 same host and backend**. Under those conditions a restored state reproduces a
 fixed-batch evaluation and the next optimizer update exactly.
 
+DEFERRED, and explicitly NOT part of Milestone A:
+  * a wired epoch-resume entrypoint (`--resume_from`) does not exist; this
+    module loads and stores state, it does not restart the training loop;
+  * the training RNG and the dataloader's RNG state are not captured - only
+    the seed is recorded, and a seed is not a current state;
+  * training-loop scheduling/selection counters (best_acc, early-stop count,
+    lr step) are not captured.
+
 NOT claimed, and not checked:
   * mid-epoch resume (the dataloader's within-epoch position is not captured);
   * cross-process or cross-host continuation, which additionally requires
@@ -46,17 +54,36 @@ def _git(*args, cwd=None):
 def provenance(repo_root=None):
     """Commit, dirty-tree identity, host, backend, devices, timestamp."""
     root = repo_root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    status = _git("status", "--porcelain", cwd=root)
-    diff = _git("diff", cwd=root) or ""
+    status = _git("status", "--porcelain", cwd=root) or ""
+    # `git diff` alone sees neither staged nor untracked content, so its hash
+    # cannot identify every dirty tree. Hash the WORKING TREE against HEAD
+    # (includes staged) and add the bytes of every untracked file.
     import hashlib
+    h = hashlib.sha256()
+    h.update((_git("diff", "HEAD", cwd=root) or "").encode())
+    untracked = [ln[3:] for ln in status.splitlines() if ln.startswith("??")]
+    for rel in sorted(untracked):
+        full = os.path.join(root, rel)
+        h.update(rel.encode())
+        if os.path.isfile(full):
+            with open(full, "rb") as fh:
+                h.update(fh.read())
+        elif os.path.isdir(full):
+            for dirpath, _, names in os.walk(full):
+                for nm in sorted(names):
+                    fp = os.path.join(dirpath, nm)
+                    h.update(os.path.relpath(fp, root).encode())
+                    with open(fp, "rb") as fh:
+                        h.update(fh.read())
     return dict(
         timestamp=datetime.datetime.now().astimezone().isoformat(),
         commit=_git("rev-parse", "HEAD", cwd=root),
         branch=_git("rev-parse", "--abbrev-ref", "HEAD", cwd=root),
         dirty=bool(status),
-        dirty_files=(status or "").splitlines(),
-        # identifies WHICH uncommitted state produced a development run
-        diff_sha256=hashlib.sha256(diff.encode()).hexdigest() if diff else None,
+        dirty_files=status.splitlines(),
+        untracked_files=untracked,
+        # covers unstaged + staged + untracked content
+        dirty_manifest_sha256=h.hexdigest() if status else None,
         hostname=os.uname().nodename,
         slurm_job_id=os.environ.get("SLURM_JOB_ID"),
         jax_version=jax.__version__,
@@ -68,11 +95,16 @@ def provenance(repo_root=None):
 
 
 def make_run_dir(base, tag="run"):
-    """Unique run directory: <base>/<timestamp>-<tag>-<pid>."""
+    """Genuinely unique run directory.
+
+    A timestamp + pid name collides when the same tag is created twice within
+    one second in one process. `mkdtemp` creates the directory atomically and
+    never returns an existing one.
+    """
+    import tempfile
+    os.makedirs(base, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(base, f"{stamp}-{tag}-{os.getpid()}")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return tempfile.mkdtemp(prefix=f"{stamp}-{tag}-", dir=base)
 
 
 def _to_jsonable(obj):
@@ -114,7 +146,8 @@ def save_checkpoint(run_dir, name, state, epoch, step, config=None,
     Uses flax msgpack for the pytrees. Does NOT touch any PRNG.
     """
     os.makedirs(run_dir, exist_ok=True)
-    payload = dict(params=state.params, opt_state=state.opt_state)
+    payload = dict(params=state.params, opt_state=state.opt_state,
+                   step=np.asarray(state.step))
     if batch_stats is not None:
         payload["batch_stats"] = batch_stats
     blob = serialization.to_bytes(payload)
@@ -137,12 +170,16 @@ def restore_checkpoint(run_dir, name, state, batch_stats=None):
     """Restore into an existing state object of the right structure."""
     with open(os.path.join(run_dir, f"{name}.msgpack"), "rb") as fh:
         blob = fh.read()
-    target = dict(params=state.params, opt_state=state.opt_state)
+    target = dict(params=state.params, opt_state=state.opt_state,
+                  step=np.asarray(state.step))
     if batch_stats is not None:
         target["batch_stats"] = batch_stats
     restored = serialization.from_bytes(target, blob)
+    # `step` must be restored too: optax schedules and bias corrections read it,
+    # and leaving it at 0 silently rewinds the optimizer's notion of time.
     new_state = state.replace(params=restored["params"],
-                              opt_state=restored["opt_state"])
+                              opt_state=restored["opt_state"],
+                              step=int(np.asarray(restored["step"])))
     with open(os.path.join(run_dir, f"{name}.meta.json")) as fh:
         meta = json.load(fh)
     return new_state, restored.get("batch_stats"), meta

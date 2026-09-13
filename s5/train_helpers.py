@@ -67,10 +67,16 @@ def update_learning_rate_per_step(lr_params, state):
 
 
 # Generalized prospective response parameters are assigned to the "ssm" group:
-# optax.adam at ssm_lr with NO weight decay. This is deliberate. The "regular"
-# group is AdamW with weight_decay, which would shrink the response coefficient
-# toward zero - that is, toward the plain baseline - and would bias every
-# treatment/control comparison. Recorded in docs/GP_IMPLEMENTATION_REPORT.md.
+# optax.adam at ssm_lr with NO weight decay. Deliberate, and the reason matters.
+#
+# The stored parameter is RAW, with t = softplus(raw). AdamW decay pulls `raw`
+# toward 0, and softplus(0) = log 2 ~ 0.693 - so decay would drive the response
+# toward log(2), NOT toward zero. Starting from t = 0.05 the raw value is
+# negative, so decay alone would INCREASE the response. Either way the decay
+# imposes an arbitrary preferred response scale that has nothing to do with the
+# task, which is why the parameter is kept out of the decayed group.
+# (An earlier comment claimed decay drives the response to zero; that was
+# wrong. Corrected per coordinator review R7.3.)
 
 
 def map_nested_fn(fn):

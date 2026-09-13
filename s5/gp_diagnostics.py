@@ -125,21 +125,39 @@ def summarize(core, a=None, a_eff=None, n_impulse=256, n_hankel=48):
     return out
 
 
-def core_from_module(module, variables, conj_sym=True):
-    """Extract the realized core from a GPSSM or a plain S5SSM."""
-    p = variables["params"]
-    Lam = p["Lambda_re"] + 1j * p["Lambda_im"]
-    B_tilde = p["B"][..., 0] + 1j * p["B"][..., 1]
-    C_tilde = p["C"][..., 0] + 1j * p["C"][..., 1]
-    step = np.exp(p["log_step"][:, 0])
-    from .gp_coefficients import absorb_clock, gp_response_coefficients
-    a, b = absorb_clock(Lam, B_tilde, step)
-    if hasattr(module, "mechanism"):
-        from .gp_ssm import build_coefficients
-        from .gp_coefficients import softplus_response
-        t = softplus_response(p["gp_response_raw"])
-        c = build_coefficients(module.mechanism, a, b, t)
-    else:
-        c = gp_response_coefficients(a, b, np.zeros(a.shape[0]))
-    return (linear_core(c["a_bar"], c["b_bar"], c["d_x"], C_tilde, p["D"],
-                        conj_sym), a, c["a_eff"])
+def core_from_module(module, variables):
+    """Extract the realized core from the BOUND, EXECUTED module.
+
+    This runs the module's own `setup()` through `module.apply`, so the
+    coefficients are exactly those the forward pass uses. In particular
+    `clip_eigs` is honoured.
+
+    The previous implementation rebuilt Lambda from the raw parameters and
+    ignored clipping. With clip_eigs=True and raw real poles past the
+    boundary that reported max|a_bar| = 1.0175 - apparent instability - for a
+    model whose realized max|a_bar| was 0.99999977, and its impulse response
+    was wrong by 1.4e-2. Configuration is now read from the module, never
+    re-derived.
+    """
+    def _read(m):
+        C_tilde = m.C_tilde
+        D = m.D
+        conj = m.conj_sym
+        if hasattr(m, "mechanism"):
+            c = m.coefficients()
+            Lam = m.Lambda                      # already clipped by setup()
+            B_tilde = m.B[..., 0] + 1j * m.B[..., 1]
+            step = m.step_rescale * np.exp(m.log_step[:, 0])
+            a = step * Lam
+            return (c["a_bar"], c["b_bar"], c["d_x"], C_tilde, D, conj, a,
+                    c["a_eff"])
+        # plain S5SSM: the realized ZOH coefficients, no tied feedthrough
+        Lam = m.Lambda
+        step = m.step_rescale * np.exp(m.log_step[:, 0])
+        a = step * Lam
+        zeros = np.zeros_like(m.B[..., 0] + 1j * m.B[..., 1])
+        return (m.Lambda_bar, m.B_bar, zeros, C_tilde, D, conj, a, a)
+
+    a_bar, b_bar, d_x, C_tilde, D, conj, a, a_eff = module.apply(
+        variables, method=_read)
+    return linear_core(a_bar, b_bar, d_x, C_tilde, D, conj), a, a_eff
