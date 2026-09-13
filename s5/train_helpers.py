@@ -66,6 +66,13 @@ def update_learning_rate_per_step(lr_params, state):
     return state, step
 
 
+# Generalized prospective response parameters are assigned to the "ssm" group:
+# optax.adam at ssm_lr with NO weight decay. This is deliberate. The "regular"
+# group is AdamW with weight_decay, which would shrink the response coefficient
+# toward zero - that is, toward the plain baseline - and would bias every
+# treatment/control comparison. Recorded in docs/GP_IMPLEMENTATION_REPORT.md.
+
+
 def map_nested_fn(fn):
     """
     Recursively apply `fn to the key-value pairs of a nested dict / pytree.
@@ -149,14 +156,16 @@ def create_train_state(model_cls,
         if dt_global:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
-                if k in ["B", "Lambda_re", "Lambda_im", "norm"]
+                if k in ["B", "Lambda_re", "Lambda_im", "norm",
+                         "gp_response_raw"]
                 else ("none" if k in [] else "regular")
             )
 
         else:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
-                if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm"]
+                if k in ["B", "Lambda_re", "Lambda_im", "log_step", "norm",
+                         "gp_response_raw"]
                 else ("none" if k in [] else "regular")
             )
         tx = optax.multi_transform(
@@ -176,14 +185,16 @@ def create_train_state(model_cls,
         if dt_global:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
-                if k in ["Lambda_re", "Lambda_im", "norm"]
+                if k in ["Lambda_re", "Lambda_im", "norm",
+                         "gp_response_raw"]
                 else ("none" if k in ["B"] else "regular")
             )
 
         else:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
-                if k in ["Lambda_re", "Lambda_im", "log_step", "norm"]
+                if k in ["Lambda_re", "Lambda_im", "log_step", "norm",
+                         "gp_response_raw"]
                 else ("none" if k in ["B"] else "regular")
             )
         tx = optax.multi_transform(
@@ -205,13 +216,15 @@ def create_train_state(model_cls,
         if dt_global:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
-                if k in ["Lambda_re", "Lambda_im", "norm"]
+                if k in ["Lambda_re", "Lambda_im", "norm",
+                         "gp_response_raw"]
                 else ("none" if k in [] else "regular")
             )
         else:
             ssm_fn = map_nested_fn(
                 lambda k, _: "ssm"
-                if k in ["Lambda_re", "Lambda_im", "log_step", "norm"]
+                if k in ["Lambda_re", "Lambda_im", "log_step", "norm",
+                         "gp_response_raw"]
                 else ("none" if k in [] else "regular")
             )
         tx = optax.multi_transform(

@@ -48,6 +48,21 @@ if __name__ == "__main__":
 						help="whether to enforce the left-half plane condition")
 	parser.add_argument("--bidirectional", type=str2bool, default=False,
 						help="whether to use bidirectional model")
+	# Generalized prospective response (see docs/GP_IMPLEMENTATION_REPORT.md)
+	parser.add_argument("--ssm_mechanism", type=str, default="plain",
+						choices=["plain", "gp_scalar", "gp_diagonal",
+								 "prospective_input", "full_state_pc"],
+						help="plain: exact original S5 path and parameter tree \\" \
+							 "gp_scalar/gp_diagonal: generalized prospective response \\" \
+							 "prospective_input: input-side law, generator unchanged \\" \
+							 "full_state_pc: matched TSS negative control")
+	parser.add_argument("--gp_init_scale", type=float, default=0.05,
+						help="initial response coefficient t in sample-clock units; "
+							 "must be strictly positive (zero has zero tangent)")
+	parser.add_argument("--checkpoint_dir", type=str, default=None,
+						help="opt-in: directory for checkpoints and full-precision "
+							 "JSON metrics; a unique run subdirectory is created")
+
 	parser.add_argument("--dt_min", type=float, default=0.001,
 						help="min value to sample initial timescale params from")
 	parser.add_argument("--dt_max", type=float, default=0.1,

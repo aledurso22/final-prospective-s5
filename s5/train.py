@@ -8,6 +8,9 @@ from .train_helpers import create_train_state, reduce_lr_on_plateau,\
     linear_warmup, cosine_annealing, constant_lr, train_epoch, validate
 from .dataloading import Datasets
 from .seq_model import BatchClassificationModel, RetrievalModel
+from .checkpointing import (append_metrics, make_run_dir,
+                            save_checkpoint, write_config)
+from .gp_ssm import init_gp_ssm
 from .ssm import init_S5SSM
 from .ssm_init import make_DPLR_HiPPO
 
@@ -93,7 +96,13 @@ def train(args):
     print("V.shape={}".format(V.shape))
     print("Vinv.shape={}".format(Vinv.shape))
 
-    ssm_init_fn = init_S5SSM(H=args.d_model,
+    # Route through the generalized factory. For ssm_mechanism='plain' this
+    # returns the ORIGINAL init_S5SSM partial unchanged: same parameter tree,
+    # same random-key consumption, exact baseline identity by construction.
+    ssm_init_fn = init_gp_ssm(
+                             mechanism=getattr(args, "ssm_mechanism", "plain"),
+                             gp_init_scale=getattr(args, "gp_init_scale", 0.05),
+                             H=args.d_model,
                              P=ssm_size,
                              Lambda_re_init=Lambda.real,
                              Lambda_im_init=Lambda.imag,
@@ -161,6 +170,20 @@ def train(args):
     lr_count, opt_acc = 0, -100000000.0  # This line is for learning rate decay
     step = 0  # for per step learning rate decay
     steps_per_epoch = int(train_size/args.bsz)
+    # Opt-in checkpointing / full-precision metrics. Disabled by default, so
+    # the frozen plain configuration and its historical records are unchanged.
+    # Nothing here consumes training randomness.
+    gp_run_dir = None
+    if getattr(args, "checkpoint_dir", None):
+        gp_run_dir = make_run_dir(args.checkpoint_dir,
+                                  tag=getattr(args, "ssm_mechanism", "plain"))
+        write_config(gp_run_dir, args,
+                     extra=dict(n_params=sum(
+                         x.size for x in jax.tree_util.tree_leaves(state.params)),
+                         ssm_size=ssm_size, seq_len=seq_len, in_dim=in_dim,
+                         n_classes=n_classes))
+        print(f"[*] run directory: {gp_run_dir}")
+
     for epoch in range(args.epochs):
         print(f"[*] Starting Training Epoch {epoch + 1}...")
 
@@ -240,10 +263,29 @@ def train(args):
         else:
             count += 1
 
+        if gp_run_dir is not None:
+            append_metrics(gp_run_dir, dict(
+                epoch=int(epoch), step=int(step), train_loss=float(train_loss),
+                val_loss=float(val_loss), val_acc=float(val_acc),
+                test_loss=float(test_loss), test_acc=float(test_acc),
+                lr=float(lr), ssm_lr=float(ssm_lr)))
+            save_checkpoint(gp_run_dir, "last", state, epoch=epoch, step=step,
+                            config=args,
+                            batch_stats=(state.batch_stats
+                                         if args.batchnorm else None),
+                            data_seed=args.jax_seed)
+
         if val_acc > best_acc:
             # Increment counters etc.
             count = 0
             best_loss, best_acc, best_epoch = val_loss, val_acc, epoch
+            if gp_run_dir is not None:
+                save_checkpoint(gp_run_dir, "best", state, epoch=epoch,
+                                step=step, config=args,
+                                batch_stats=(state.batch_stats
+                                             if args.batchnorm else None),
+                                data_seed=args.jax_seed,
+                                notes="best validation accuracy")
             if valloader is not None:
                 best_test_loss, best_test_acc = test_loss, test_acc
             else:
