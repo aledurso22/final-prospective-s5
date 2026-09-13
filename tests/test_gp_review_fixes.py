@@ -209,7 +209,9 @@ def test_R4_step_and_optimizer_moments_restore_into_a_fresh_template():
     for a_, b_ in zip(jax.tree_util.tree_leaves(state.opt_state),
                       jax.tree_util.tree_leaves(restored.opt_state)):
         onp.testing.assert_array_equal(onp.asarray(a_), onp.asarray(b_))
-    # the NEXT update must agree too, which bias correction makes step-sensitive
+    # the NEXT update must agree too. Note optax Adam's bias correction uses
+    # its OWN count inside opt_state; restoring that is what preserves it.
+    # Restoring TrainState.step is a separate, independently necessary fix.
     n1, _ = train_step(state, jax.random.PRNGKey(9), x, y, ts, model, False)
     n2, _ = train_step(restored, jax.random.PRNGKey(9), x, y, ts, model, False)
     for k in flatten_dict(n1.params):
@@ -220,7 +222,8 @@ def test_R4_step_and_optimizer_moments_restore_into_a_fresh_template():
 def test_R4_deferred_scope_is_documented():
     import s5.checkpointing as ck
     doc = ck.__doc__
-    for phrase in ("DEFERRED", "epoch-resume entrypoint", "training RNG"):
+    for phrase in ("DEFERRED", "epoch-resume entrypoint", "training RNG",
+                   "does **not** resume a training loop"):
         assert phrase in doc, phrase
 
 
@@ -309,19 +312,48 @@ def test_R5_reset_mask_drops_the_carry_before_the_interval():
                                     atol=1e-11)
 
 
-def test_R5_optimizer_grouping_uses_the_PRODUCTION_rule():
-    """The old test rebuilt its own label rule and would pass if production
-    regressed. Read the real one from the training entrypoint instead."""
-    import inspect
+def test_R5_optimizer_grouping_is_verified_BEHAVIOURALLY():
+    """Exercise the REAL optimizer, not a source-text search.
 
-    import s5.train_helpers as th
-    src = inspect.getsource(th.create_train_state)
-    assert src.count("gp_response_raw") >= 4, "production rule lost the label"
-    # and confirm behaviourally that the parameter lands in a NO-DECAY group
-    for line in src.splitlines():
-        if "gp_response_raw" in line:
-            assert "none" not in line
-    assert '"ssm"' in src
+    With an all-zero gradient and fresh moments:
+      * an Adam (no-decay) group leaves its parameters exactly unchanged;
+      * an AdamW group still moves them by -lr * weight_decay * param.
+
+    So a zero-gradient step separates the two groups behaviourally. A text
+    search could not, and the previous version of this test was described as
+    behavioural when it was not.
+    """
+    from functools import partial
+
+    from s5.seq_model import BatchClassificationModel
+    from s5.train_helpers import create_train_state
+
+    fn = init_gp_ssm(mechanism="gp_diagonal", gp_init_scale=0.1,
+                     **ssm_kwargs(clip_eigs=True))
+    model_cls = partial(BatchClassificationModel, ssm=fn, d_output=5,
+                        d_model=H, n_layers=2, padded=False,
+                        activation="half_glu1", dropout=0.0, mode="pool",
+                        prenorm=True, batchnorm=False)
+    state = create_train_state(model_cls, jax.random.PRNGKey(0), padded=False,
+                               retrieval=False, in_dim=1, bsz=4, seq_len=16,
+                               batchnorm=False, weight_decay=0.05)
+
+    zero = jax.tree_util.tree_map(np.zeros_like, state.params)
+    updates, _ = state.tx.update(zero, state.opt_state, state.params)
+    moved = jax.tree_util.tree_map(lambda u: float(np.max(np.abs(u))), updates)
+
+    from flax.traverse_util import flatten_dict
+    flat = flatten_dict(moved)
+    resp = [v for k, v in flat.items() if k[-1] == "gp_response_raw"]
+    decayed = [v for k, v in flat.items() if k[-1] == "kernel"]
+
+    assert resp, "no response parameter found"
+    assert max(resp) == 0.0, (
+        f"response parameter moved on a ZERO gradient ({max(resp)}): it is in "
+        f"a weight-decayed group")
+    assert decayed and max(decayed) > 0.0, (
+        "control failed: no decayed parameter moved, so this test cannot "
+        "distinguish the groups")
 
 
 # =====================================================================
@@ -350,3 +382,15 @@ def test_R6_complex_mode_hankel_INCREASES_with_response():
     assert tops[0] < tops[1] < tops[2], tops
     onp.testing.assert_allclose(tops, [0.0024018766, 0.0060234289, 0.0147511988],
                                 rtol=1e-6)
+
+
+def test_R7_diagnostics_reject_unsupported_configurations():
+    """The causal diagnostic utility must not be advertised for bidirectional
+    or bilinear models (follow-up review, plain diagnostic scope)."""
+    for kw, match in ((dict(bidirectional=True), "bidirectional"),
+                      (dict(discretization="bilinear"), "ZOH")):
+        mod = init_gp_ssm(mechanism="plain",
+                          **ssm_kwargs(clip_eigs=True, **kw))(step_rescale=1.0)
+        v = mod.init(jax.random.PRNGKey(0), inputs())
+        with pytest.raises(NotImplementedError, match=match):
+            core_from_module(mod, v)

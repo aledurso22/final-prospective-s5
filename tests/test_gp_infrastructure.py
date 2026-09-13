@@ -91,7 +91,7 @@ def test_A_checkpoint_restore_reproduces_eval_and_next_update(mechanism):
     assert sorted(f1) == sorted(f2)
     for k in f1:
         onp.testing.assert_array_equal(f1[k], f2[k])          # next update
-    assert meta["resume_boundary"].startswith("epoch")
+    assert "NOT a training-loop resume" in meta["scope"]
 
 
 def test_A_checkpointing_consumes_no_randomness():

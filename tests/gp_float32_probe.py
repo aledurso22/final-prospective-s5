@@ -13,7 +13,13 @@ import numpy as onp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-assert not jax.config.jax_enable_x64, "probe must run without x64"
+# This probe ASSERTS that x64 is off; it deliberately does NOT force it off.
+# JAX_ENABLE_X64=1 in the environment would therefore make it fail loudly
+# rather than silently report float64 numbers as production evidence.
+# RUNBOOK: invoke with JAX_ENABLE_X64 unset (or 0).
+assert not jax.config.jax_enable_x64, (
+    "probe must run without x64; unset JAX_ENABLE_X64 (it is currently on, so "
+    "these would be float64 numbers mislabelled as production evidence)")
 print("X64_DISABLED_OK")
 
 from jax.scipy.linalg import block_diag                            # noqa: E402

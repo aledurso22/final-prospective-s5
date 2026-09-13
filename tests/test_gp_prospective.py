@@ -443,7 +443,12 @@ def test_6_unconstrained_gp_configuration_is_rejected():
         fn(step_rescale=1.0).init(jax.random.PRNGKey(0), inputs())
 
 
-def test_6_float32_production_parallel_vs_streaming():
+def test_6_parallel_vs_streaming_under_the_suite_x64_setting():
+    """NOT a float32 gate. This module enables x64, so this runs in
+    float64/complex128 like the rest of the suite. Genuine production
+    (complex64) coverage is tests/gp_float32_probe.py, executed as a separate
+    x64-disabled subprocess by test_gp_review_fixes.py.
+    """
     mod = build("gp_diagonal", gp_init_scale=0.3)
     v = mod.init(jax.random.PRNGKey(0), inputs())     # native float32 params
     u = inputs(31)

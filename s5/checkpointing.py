@@ -11,11 +11,15 @@ Design constraints, all deliberate:
   rounded console text, and not via any wandb summary file (offline wandb 0.29
   does not write one).
 
-DECLARED RESUME BOUNDARY
-------------------------
-Restore is supported and checked **at an epoch boundary, in-process, on the
-same host and backend**. Under those conditions a restored state reproduces a
-fixed-batch evaluation and the next optimizer update exactly.
+WHAT THIS MODULE DOES, PRECISELY
+--------------------------------
+It **serializes and restores training state**: parameters, optimizer state,
+mutable batch statistics and `TrainState.step`.
+It does **not** resume a training loop.
+
+What is checked: given externally supplied inputs and randomness, a restored
+state reproduces a fixed-batch evaluation and the next optimizer update
+exactly, in-process, on the same host and backend.
 
 DEFERRED, and explicitly NOT part of Milestone A:
   * a wired epoch-resume entrypoint (`--resume_from`) does not exist; this
@@ -157,7 +161,10 @@ def save_checkpoint(run_dir, name, state, epoch, step, config=None,
     meta = dict(name=name, epoch=int(epoch), step=int(step),
                 data_seed=None if data_seed is None else int(data_seed),
                 has_batch_stats=batch_stats is not None,
-                resume_boundary="epoch; in-process; same host and backend",
+                scope=("state serialization only; NOT a training-loop resume. "
+                       "Reproduces a fixed-batch eval and the next update given "
+                       "externally supplied inputs and randomness, in-process, "
+                       "same host and backend."),
                 notes=notes, provenance=provenance())
     if config is not None:
         meta["config"] = {k: _to_jsonable(v) for k, v in vars(config).items()}
@@ -175,8 +182,11 @@ def restore_checkpoint(run_dir, name, state, batch_stats=None):
     if batch_stats is not None:
         target["batch_stats"] = batch_stats
     restored = serialization.from_bytes(target, blob)
-    # `step` must be restored too: optax schedules and bias corrections read it,
-    # and leaving it at 0 silently rewinds the optimizer's notion of time.
+    # `step` must be restored too: schedules and any step-dependent logic read
+    # it, and leaving it at 0 silently rewinds the training loop's notion of
+    # time. NOTE: optax Adam keeps its OWN count inside opt_state, so restoring
+    # opt_state is what preserves Adam's bias correction; restoring
+    # TrainState.step is a separate, also necessary, fix.
     new_state = state.replace(params=restored["params"],
                               opt_state=restored["opt_state"],
                               step=int(np.asarray(restored["step"])))

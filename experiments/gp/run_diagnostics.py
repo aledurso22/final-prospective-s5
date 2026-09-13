@@ -44,7 +44,7 @@ def main():
           f"{'hist.frac':>11}{'imp.supp':>10}{'hankel_top':>12}{'DC':>10}")
     for m in MECHANISMS:
         scale = args.init_scale if m != "plain" else None
-        kw = dict(mechanism=m, **ssm_kwargs())
+        kw = dict(mechanism=m, **ssm_kwargs(clip_eigs=True))
         if m != "plain":
             kw["gp_init_scale"] = args.init_scale
         mod = init_gp_ssm(**kw)(step_rescale=1.0)

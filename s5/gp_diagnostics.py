@@ -140,6 +140,20 @@ def core_from_module(module, variables):
     re-derived.
     """
     def _read(m):
+        if getattr(m, "bidirectional", False):
+            raise NotImplementedError(
+                "this diagnostic utility is CAUSAL: it assumes a single "
+                "forward state and a C_tilde with P columns. A bidirectional "
+                "S5 concatenates a reverse scan, giving 2P columns, and needs "
+                "a separate formulation. Not advertised for bidirectional "
+                "models.")
+        if getattr(m, "discretization", "zoh") != "zoh":
+            raise NotImplementedError(
+                "diagnostics assume ZOH. Under bilinear discretization the "
+                "continuous generator rate is NOT log(discrete pole)/step, so "
+                "'effective_pole_real' would mix two different notions of "
+                "rate. Realized discrete poles remain well defined; a separate "
+                "bilinear formulation is required.")
         C_tilde = m.C_tilde
         D = m.D
         conj = m.conj_sym

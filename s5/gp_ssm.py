@@ -153,8 +153,10 @@ class GPSSM(S5SSM):
                 "generalized prospective response requires clip_eigs=True.\n"
                 "The stability identity Re(a_eff) = (sigma - t|a|^2)/|m|^2 < 0 "
                 "is CONDITIONAL on Re(a) < 0. A stable initialization does not "
-                "constrain later optimizer updates, and an unconstrained run "
-                "was measured to reach |a_bar| = 1.0035 > 1. The historical "
+                "constrain later optimizer updates: a CONSTRUCTED admissible-API "
+                "configuration with an unstable raw pole reaches "
+                "|a_bar| = 1.0035 > 1. (That was a constructed probe, not an "
+                "observed training run.) The historical "
                 "plain default (clip_eigs=False) is deliberately unchanged; "
                 "for a matched treatment/control comparison set clip_eigs=True "
                 "on BOTH arms.")

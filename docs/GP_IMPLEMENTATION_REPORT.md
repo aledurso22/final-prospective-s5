@@ -389,10 +389,16 @@ written against the corrected public behaviour.
 `test_gp_review_fixes`), plus the standalone x64-disabled probe.
 
 ```
-.venv/bin/python -m pytest tests/ -q            # 123 passed
+.venv/bin/python -m pytest tests/ -q            # 124 passed  (revision 3)
 .venv/bin/python tests/gp_float32_probe.py      # X64_DISABLED_OK / DTYPES_OK / PRODUCTION_OK
 .venv/bin/python -m experiments.gp.run_diagnostics
 ```
+
+**Correction.** On revision `88f8ad9` the third command **did not pass**: it
+printed the `plain` row and then exited 1, because the runner still built every
+mechanism with `ssm_kwargs()` (default `clip_eigs=False`) while the new R2 guard
+correctly rejects that for GP. The R2 fix broke the runner and it was not re-run
+before reporting. Fixed in revision 3; the actual output is in §8.
 
 ## R1 — complex64 arithmetic and its validation — **FIXED**
 
@@ -537,3 +543,104 @@ agreed with the independent calculation, so only the claim was wrong.
 - `prospective_input` is an **ingredient control**, not a reproduction of
   alpha-P-S5's gain scaling, pole constraints, preprocessing and tuning.
 - No benchmark or learning-advantage claim is made.
+
+
+---
+
+# 8. Follow-up review of 88f8ad9 — revision 3
+
+The coordinator independently reproduced all 123 tests on `88f8ad9`, the
+x64-disabled probe (`rel = 4.748e-8`), the small-pole derivative
+(`1.1233e-8` at `z = -0.000101`), and the CPU rejection of `gp_gpu_checks.sh`
+(exit 2). One functional defect and several wording/scope items were raised.
+
+**Test total after revision 3: 124 passed.**
+
+## F1 — diagnostics runner crashed — **FIXED**
+
+`experiments/gp/run_diagnostics.py:47` built every mechanism with
+`ssm_kwargs()`, whose default is `clip_eigs=False`; the R2 guard then rejected
+the first GP mechanism, so the documented command emitted only the `plain` row
+and exited 1. The coordinator's one-line patch (`ssm_kwargs(clip_eigs=True)`)
+was verified with `git apply --check`, applied unmodified, and the CLI re-run.
+
+**Actual output, revision 3, `--init-scale 0.3`, one random initialization:**
+
+| mechanism | max&#124;a_bar&#124; | margin | eff. e-fold | history frac | impulse supp | Hankel top | DC |
+|---|---|---|---|---|---|---|---|
+| `plain` | 0.999435 | 0.0006 | 1769.77 | 0.1144 | 512 | 5.9626e-01 | 1.9008 |
+| `gp_scalar` | 0.999435 | 0.0006 | 1769.70 | 0.1076 | 512 | 5.8219e-01 | 1.9008 |
+| `gp_diagonal` | 0.999435 | 0.0006 | 1769.70 | 0.1076 | 512 | 5.8219e-01 | 1.9008 |
+| `prospective_input` | 0.999435 | 0.0006 | 1769.77 | 0.1142 | 512 | 5.9432e-01 | 1.9008 |
+| `full_state_pc` | 0.035674 | 0.9643 | 0.30 | 0.0000 | **1** | **0.0000** | 1.9008 |
+
+All five mechanisms complete. The matched cancellation control retains zero
+history and impulse support 1. DC gain is invariant across all five.
+
+These values are **identical** to those recorded before the R2 guard, because
+the HiPPO-initialized poles are already strictly stable, so `clip_eigs=True`
+does not bind at initialization. It would bind only if training pushed a raw
+pole past the boundary — which is exactly the case the guard exists for.
+
+## F2 — resume wording — **CORRECTED**
+
+`s5/checkpointing.py` no longer says "DECLARED RESUME BOUNDARY". It now states
+that it **serializes and restores training state** and **does not resume a
+training loop**, with the checked property expressed as reproducing a
+fixed-batch evaluation and the next update *given externally supplied inputs
+and randomness*. The checkpoint metadata key `resume_boundary` is replaced by
+`scope` carrying the same sentence. Epoch-boundary resume stays deferred, which
+is acceptable for the short fresh runs planned.
+
+**Also corrected:** restoring `TrainState.step` was reported as what repaired
+Adam's bias correction. That is wrong — optax Adam keeps its own count inside
+`opt_state`, so restoring `opt_state` preserves the bias correction. Restoring
+`TrainState.step` is a separate, independently necessary fix. Both are done and
+the code comment now says so.
+
+## F3 — optimizer test was a text search — **FIXED**
+
+Replaced with a **behavioural** test that exercises the real optimizer built by
+`create_train_state`: with an all-zero gradient and fresh moments, an Adam
+(no-decay) group leaves parameters exactly unchanged, while an AdamW group
+still moves them by `-lr * weight_decay * param`. The test asserts the response
+parameter's update is **exactly 0.0** and includes a control asserting that a
+decayed parameter did move — otherwise the test could not distinguish the
+groups at all.
+
+## F4 — plain diagnostic scope — **FIXED**
+
+`core_from_module` now raises `NotImplementedError` for **bidirectional** models
+(a reverse scan gives `C_tilde` 2P columns and needs a separate formulation) and
+for **bilinear** discretization (the continuous rate is not `log(pole)/step`, so
+`effective_pole_real` would mix two notions of rate). The utility is causal-ZOH
+only and no longer advertised beyond that. The planned runs are unidirectional
+ZOH.
+
+## F5 — precision/backend wording — **CORRECTED**
+
+The misnamed test is renamed
+`test_6_parallel_vs_streaming_under_the_suite_x64_setting`, with a docstring
+saying it is **not** a float32 gate. Genuine complex64 coverage remains the
+separate subprocess. The probe asserts x64 is off and **does not force it off**,
+so `JAX_ENABLE_X64=1` makes it fail loudly rather than silently relabel float64
+numbers; the runbook note is in the probe itself: invoke with `JAX_ENABLE_X64`
+unset. Correcting the earlier over-broad statement: **GPU-side JAX x64 tests are
+not automatically CPU computations** — only the NumPy/SciPy references are
+CPU-only. Each process should record its observed backend.
+
+## F6 — instability probe wording — **CORRECTED**
+
+The `clip_eigs` rejection message said an unconstrained run "was measured to
+reach" `|a_bar| = 1.0035`. That value came from a **constructed
+admissible-API configuration with an unstable raw pole**, not an observed
+training run. The message now says so explicitly.
+
+## Evidence status, kept separate
+
+| Class | Status |
+|---|---|
+| CPU correctness | 124 tests + x64-disabled probe + diagnostics CLI, all passing locally |
+| **GPU correctness** | **not yet run** |
+| **Integration smokes** | **not yet run** (three short runs, purposes kept separate) |
+| **Benchmark / learning advantage** | **not attempted, not claimed** |
