@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Milestone D, step 2: the FROZEN plain sMNIST smoke, plus one nonzero-response
-# smoke at the identical configuration.
+# The FROZEN historical sMNIST smoke.
+#
+# Deliberately NO --checkpoint_dir: the E2-002/E2-004 records were produced
+# without checkpointing, so adding it here would make the "frozen" run not
+# actually frozen. Matched treatment/control runs use gp_matched_pair.sh,
+# which does enable it.
 #
 # Validates integration only. It is NOT evidence for the research claim and
 # must not be reported as a benchmark result.
@@ -24,5 +28,4 @@ exec python run_train.py \
   --jax_seed=1919 \
   --USE_WANDB=False \
   --ssm_mechanism="${MECH}" \
-  --checkpoint_dir="${OUT}/ckpt" \
   "$@"

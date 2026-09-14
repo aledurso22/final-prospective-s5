@@ -1,4 +1,6 @@
 from functools import partial
+
+import jax
 from jax import random
 import jax.numpy as np
 from jax.scipy.linalg import block_diag

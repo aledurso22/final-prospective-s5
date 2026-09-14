@@ -715,3 +715,52 @@ deviation is recorded here so any later effect size can be judged against it.
 Also fixed in this revision: `gp_gpu_checks.sh` used `set -e`, so a pytest
 failure aborted the script before its summary printed, leaving only an exit
 code. It now captures the status and always prints the log tail.
+
+## GPU correctness gate, re-run at `be225d4`: **PASSED**
+
+`backend=gpu devices=[CudaDevice(id=0)]`, `GPU_BACKEND_OK`, **124 passed in
+224.99s**, `pytest exit=0`. Probe on GPU:
+
+```
+parallel vs sequential, complex64, HIGHEST matmul:  rel = 4.748e-08   (gate 1e-5)
+parallel vs sequential, complex64, backend DEFAULT: rel = 7.498e-05   (recorded)
+```
+
+Artifacts: `/Users/durso/s5-runs/20260914-152851-gp/`.
+
+## Smoke attempt at `be225d4`: **CRASHED — my bug**
+
+Both smokes exited 1 after ~24 s, before the epoch loop:
+
+```
+File "s5/train.py", line 182, in train
+    x.size for x in jax.tree_util.tree_leaves(state.params)),
+NameError: name 'jax' is not defined
+```
+
+`s5/train.py` imports `jax.numpy as np` and `from jax import random` but never
+`import jax`, while the checkpoint hook I added calls
+`jax.tree_util.tree_leaves`.
+
+**Why the tests missed it.** `save_checkpoint`/`restore_checkpoint` were unit
+tested against a state built by `create_train_state`, but `run_train.py` was
+**never run with `--checkpoint_dir`** — the one path both smoke scripts use.
+Same class of gap as the diagnostics runner: a feature validated in isolation
+and never exercised through its documented entrypoint.
+
+**Fixes.** `import jax` added. A regression test
+(`test_F7_train_module_has_every_name_its_hooks_use`) asserts the names the
+hooks depend on are bound in `s5.train`. Reproduced end to end locally on CPU
+before pushing: `exit=0`, full epoch, checkpoint and metrics artifacts written
+(`config.json`, `best/last.msgpack`, `*.meta.json`, `metrics.jsonl` at full
+precision, `step=843`).
+
+**Separately:** `gp_smoke.sh` no longer passes `--checkpoint_dir`. The
+`E2-002`/`E2-004` records were produced without checkpointing, so supplying it
+made the "frozen" historical run not actually frozen. Matched runs
+(`gp_matched_pair.sh`) still enable it.
+
+*Local CPU end-to-end validation of the fix (integration evidence, NOT a
+benchmark and NOT comparable to the GPU records):* `gp_diagonal`,
+`gp_init_scale=0.05`, `clip_eigs=True`, seed 1919, 1 epoch — train loss
+1.41934, test accuracy 0.8906, 26,058 + P parameters.

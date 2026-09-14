@@ -394,3 +394,20 @@ def test_R7_diagnostics_reject_unsupported_configurations():
         v = mod.init(jax.random.PRNGKey(0), inputs())
         with pytest.raises(NotImplementedError, match=match):
             core_from_module(mod, v)
+
+
+def test_F7_train_module_has_every_name_its_hooks_use():
+    """Regression for a NameError that only the real entrypoint could catch.
+
+    `s5/train.py` imported `jax.numpy as np` and `from jax import random` but
+    not `jax` itself, while the checkpoint hook calls
+    `jax.tree_util.tree_leaves`. Unit tests exercised save/restore directly and
+    never went through run_train.py with --checkpoint_dir, so the crash only
+    appeared on the cluster. Compile the module and check the names its hooks
+    rely on are bound.
+    """
+    import s5.train as train_mod
+    for name in ("jax", "make_run_dir", "write_config", "append_metrics",
+                 "save_checkpoint", "init_gp_ssm"):
+        assert hasattr(train_mod, name), f"s5.train is missing `{name}`"
+    assert hasattr(train_mod.jax, "tree_util")
