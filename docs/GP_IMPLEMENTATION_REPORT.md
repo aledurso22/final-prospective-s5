@@ -764,3 +764,92 @@ made the "frozen" historical run not actually frozen. Matched runs
 benchmark and NOT comparable to the GPU records):* `gp_diagonal`,
 `gp_init_scale=0.05`, `clip_eigs=True`, seed 1919, 1 epoch — train loss
 1.41934, test accuracy 0.8906, 26,058 + P parameters.
+
+
+---
+
+# 10. Integration smokes — first successful execution
+
+Commit `91f4988`, RTX 3090 `pgi15-gpu3`, clean tree, artifacts
+`/Users/durso/s5-runs/20260914-154718-gp/`. Environment as in §9
+(`XLA_FLAGS=--xla_gpu_deterministic_ops=true`, backend default matmul
+precision). All three `exit=0`.
+
+| run | script | clip_eigs | params | train loss | val loss | val acc | test loss | test acc | wall |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 historical plain | `gp_smoke.sh` | False (historical) | 26,058 | 1.40522 | 0.36394 | 0.8950 | 0.33751 | 0.9001 | 67.4 s |
+| 2 matched plain | `gp_matched_pair.sh` | **True** | 26,058 | 1.40522 | 0.36394 | 0.8950 | 0.33751 | 0.9001 | 67.7 s |
+| 3 matched `gp_diagonal` | `gp_matched_pair.sh` | **True** | **26,122** | 1.41597 | 0.39181 | 0.8870 | 0.36801 | 0.8908 | 71.6 s |
+
+## Run 1 vs the historical record
+
+Run 1 reproduces `E2-004` on **every printed digit**. `E2-004`'s full-precision
+train loss `1.4052175283432007` prints as `1.40522`; val `0.36394 / 0.8950`,
+test `0.33751 / 0.9001` likewise.
+
+**Correction to an earlier instruction.** The expectation was stated as
+"Train Loss 1.40519". That is `E2-002`'s value — the *ordinary*,
+non-deterministic CPU-era run — not `E2-004`'s. The two differ in the fifth
+decimal and `E2-004` is the correct comparator for a deterministic GPU run.
+The mistake was in the instruction, not in the result.
+
+Per R7.1 this remains a **sanity check**, not a causal test: agreement is
+consistent with unchanged routing but does not by itself prove it.
+
+## Run 1 vs run 2 — does clipping bind?
+
+**Identical on every reported digit.** `clip_eigs=True` does not change the
+plain model here, because the HiPPO-initialized poles are already strictly
+stable, so the clip never activates. This matches the diagnostics observation
+in §8 and means the matched control is not disadvantaged by the stability
+setting it shares with the treatment.
+
+## Run 2 vs run 3 — the only comparable pair
+
+Identical seed, data order, architecture, clipping and flags. `gp_diagonal`
+adds **+64 parameters** (P = 32 complex modes x 2 layers), i.e. +0.25 %.
+
+| metric | matched plain | matched `gp_diagonal` | delta |
+|---|---|---|---|
+| train loss | 1.40522 | 1.41597 | **+0.01075** |
+| val loss | 0.36394 | 0.39181 | +0.02787 |
+| val accuracy | 0.8950 | 0.8870 | **-0.0080** |
+| test loss | 0.33751 | 0.36801 | +0.03050 |
+| test accuracy | 0.9001 | 0.8908 | **-0.0093** |
+| wall clock | 67.7 s | 71.6 s | +5.8 % |
+
+**On this smoke the generalized mechanism is WORSE than plain on every
+metric**, despite having more parameters. Stated plainly rather than buried.
+
+Every delta is two to three orders of magnitude above the 7.5e-5
+reduced-precision deviation recorded in §9, so the differences are resolvable
+and are not an artifact of TF32.
+
+## What this does and does not establish
+
+**Does:** the generalized recurrent mechanism trains end to end through the
+real S5 stack on GPU, with BPTT reaching the response parameters, under the
+deterministic protocol, at a cost of +0.25 % parameters and +5.8 % wall clock.
+That was the purpose of the integration smokes and it is met.
+
+**Does not:** anything about whether the mechanism helps. This is **one epoch,
+one seed, a deliberately tiny model (d_model 64, 2 layers), and an untuned
+`gp_init_scale = 0.05`**. A one-epoch result is dominated by early optimization
+transients; a mechanism that changes effective poles and adds a tied
+feedthrough would be expected to need a different learning-rate or
+initialization regime before any comparison is meaningful. No tuning effort was
+spent on either arm.
+
+**It is not evidence against the theory**, and it must not be reported as a
+benchmark comparison. The honest statement is: *integration works; the first
+untuned point is worse; the controlled temporal task and a matched tuning
+budget are the next steps, not a verdict.*
+
+## Evidence classes, kept distinct
+
+| Class | Status |
+|---|---|
+| CPU correctness | 125 tests + x64-disabled probe + diagnostics CLI |
+| GPU correctness | **PASSED** — 124 tests, exit 0, at `be225d4` (§9) |
+| Integration smokes | **PASSED** — three runs, exit 0, at `91f4988` (this section) |
+| Benchmark / learning advantage | **not attempted; the one untuned point is unfavourable** |
