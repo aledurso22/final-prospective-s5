@@ -86,16 +86,30 @@ def _rel(out):
 #
 # (2) RECORD - backend characteristic, NOT gated. At the backend default this
 #     is TF32 on Ampere, whose ~10-bit mantissa is a property of the hardware
-#     path, not of this code. Reported so the number is on the record and can
-#     be compared against any measured effect size.
+#     path, not of this code. Reported so the number is on the record.
+#
+# SCOPE OF THESE NUMBERS - read before quoting them anywhere.
+# Both are the relative discrepancy of ONE fixture: a length-24 sequence
+# through the LINEAR CORE ALONE, against a reference that consumes the SAME
+# already-rounded coefficients. They compare two float32 evaluations of the
+# same recurrence. They are NOT a bound on the distance from exact arithmetic,
+# NOT a bound on error accumulated through a full training run, and they must
+# NOT be placed beside training losses or accuracies to argue that some
+# observed difference is or is not TF32. To settle that for a training
+# comparison, re-run the comparison itself at controlled precision.
 #
 # Protocol change, stated explicitly rather than applied silently: on
-# 2026-09-14 the single default-precision measurement failed its 1e-5 gate on
+# 2026-09-14 the single default-precision measurement FAILED its 1e-5 gate on
 # an RTX 3090 at rel = 7.498e-05. Re-running at highest precision reproduced
-# the CPU value 4.748e-08 EXACTLY, which identifies the backend matmul mode as
-# the entire cause and rules out scan ordering. The gate was therefore moved to
-# the precision-controlled measurement and the default-precision value is now
-# recorded alongside it. The tolerance itself was NOT loosened.
+# the CPU value 4.748e-08 exactly, showing that THIS FIXTURE is
+# precision-sensitive and that the backend matmul mode (TF32 on Ampere)
+# accounts for the discrepancy here. That does NOT universally rule out
+# scan-order effects: a reduction-order difference of matmul-precision size
+# would also vanish under raised precision, and one fixture does not cover
+# other shapes or lengths. The gate was therefore RE-SCOPED to the
+# precision-controlled measurement -- the originally scoped gate failed, the
+# newly scoped one passes -- and the default-precision value is recorded
+# alongside it. The tolerance itself was NOT loosened.
 rel_default = _rel(y)
 with jax.default_matmul_precision("highest"):
     y_hi = mod.apply(v, u)
@@ -110,9 +124,11 @@ if rel_default >= 1e-5:
     print(f"  NOTE: the backend default matmul mode contributes "
           f"{rel_default:.3e} of deviation from full float32 precision.")
     print("  This is NOT run-to-run noise: the mode is deterministic, and "
-          "E2-004 showed four paired runs bit-identical under it. It means "
-          "each model's computed output sits ~that far from its exact-"
-          "arithmetic value, so a MECHANISM difference smaller than this "
-          "cannot be attributed to the mathematics rather than to differential "
-          "reduced-precision error.")
+          "E2-004 showed four paired runs bit-identical under it.")
+    print("  SCOPE: this is one length-24 linear-core fixture against a "
+          "reference sharing the same rounded coefficients. It is NOT an "
+          "exact-arithmetic error bound and NOT a bound for a full training "
+          "run. Do not compare it against training losses or accuracies to "
+          "rule TF32 in or out; re-run that comparison at controlled "
+          "precision instead.")
 print("PRODUCTION_OK")

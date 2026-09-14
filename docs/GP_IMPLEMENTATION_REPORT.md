@@ -306,6 +306,14 @@ from this selected setup.
   local-CPU float32 check, not a GPU check.
 - **No benchmark claim.** No comparison to the 2026 preprint, no sMNIST result,
   no Speech Commands result.
+- **On sMNIST's suitability.** sMNIST *is* a sequential task and a model may
+  well need history to solve it; an earlier phrasing implying otherwise is
+  withdrawn. The reason it is not the right instrument here is narrower: it
+  does not **isolate** current-input processing from delayed recall, because
+  the two are entangled in a single pooled classification target. The
+  cue/distractor/recall task in `tasks/cue_recall.py` separates them by
+  construction (a per-token current-input head and a recall target scored only
+  at the query token).
 - The one-epoch plain sMNIST regression was **not** completed locally (slow, and
   the harness raced the redirect). Plain identity is nonetheless established
   exactly at the parameter/gradient/update level. The end-to-end regression is
@@ -638,6 +646,10 @@ training run. The message now says so explicitly.
 
 ## Evidence status, kept separate
 
+> **HISTORICAL TABLE — state as of revision 3, superseded.** Retained as a
+> record of what was known then. The current status is the table at the end of
+> §10.
+
 | Class | Status |
 |---|---|
 | CPU correctness | 124 tests + x64-disabled probe + diagnostics CLI, all passing locally |
@@ -679,16 +691,32 @@ production parallel-vs-sequential comparison.
 | **GPU, backend default** | **7.498e-05** |
 | **GPU, `JAX_DEFAULT_MATMUL_PRECISION=highest`** | **4.748e-08** |
 
-At controlled precision the GPU reproduces the CPU value **exactly, digit for
-digit**. That identifies the backend's default float32 matmul mode (TF32 on
-Ampere) as the entire cause and **rules out scan ordering**, which would not
-have vanished under a precision change. `--xla_gpu_deterministic_ops=true` was
-set throughout and does not affect TF32.
+**What this number is.** It is the relative discrepancy of **one fixture**: a
+length-24 sequence through the **linear core alone**, compared against a NumPy
+complex64 reference that consumes the **same already-rounded coefficients**.
+It is therefore a comparison of two float32 evaluations of the same recurrence,
+not a bound on the distance between the implementation and exact arithmetic,
+and not a bound on error accumulated through a full training run (different
+length, different magnitudes, nonlinearities, normalization, optimizer state).
+
+At controlled precision the GPU reproduces the CPU value exactly, digit for
+digit. That establishes that **this fixture is precision-sensitive** and that
+the backend's default float32 matmul mode (TF32 on Ampere) accounts for the
+discrepancy **here**. It does **not** universally rule out scan-order effects:
+a reduction-order difference whose effect is itself of matmul-precision size
+would also be removed by raising precision, and other shapes or lengths are not
+covered by this single fixture. `--xla_gpu_deterministic_ops=true` was set
+throughout and does not affect TF32.
 
 ## Protocol change, stated explicitly
 
-The tolerance was **not** loosened. The probe now makes two distinct
-measurements:
+Stated plainly: **the original gate, evaluated at the backend default
+precision, FAILED** (7.498e-05 against a `1e-5` tolerance). It was not
+retroactively loosened — the tolerance is unchanged — but the gate was
+**re-scoped** to a different measurement condition, and **the newly scoped
+highest-precision gate is the one that passed**. Both facts are reported.
+
+The probe now makes two distinct measurements:
 
 1. **GATE — implementation correctness**, evaluated under
    `jax.default_matmul_precision("highest")`, tolerance unchanged at `1e-5`.
@@ -702,10 +730,14 @@ measurements:
 TF32 here is **deterministic**: `E2-004` showed four paired runs bit-identical
 under it. So this is **not** run-to-run noise and does not reintroduce `F-002`.
 
-What it does mean: each model's computed output sits ~7.5e-5 (relative) from
-its exact-arithmetic value on this device. A *mechanism* difference smaller
-than that cannot be attributed to the mathematics rather than to differential
-reduced-precision error.
+What it does mean is narrow: on **this fixture**, two float32 evaluations of
+the same linear recurrence differ by ~7.5e-5 relative when TF32 is enabled.
+It is **not** an exact-arithmetic error bar for a trained model, and it must
+**not** be placed next to training losses or accuracies to argue that some
+observed difference is or is not TF32. Ruling TF32 in or out for a training
+comparison requires re-running that comparison at controlled precision, which
+is why the new controlled experiment (`docs/GP_EXPERIMENT_PROTOCOL.md` §7)
+fixes highest precision on both arms.
 
 **Recommendation for the three integration smokes: keep the backend default.**
 The historical `E2-002`/`E2-004` records were produced under it, and changing
@@ -789,7 +821,10 @@ test `0.33751 / 0.9001` likewise.
 
 **Correction to an earlier instruction.** The expectation was stated as
 "Train Loss 1.40519". That is `E2-002`'s value — the *ordinary*,
-non-deterministic CPU-era run — not `E2-004`'s. The two differ in the fifth
+non-deterministic run — not `E2-004`'s. **`E2-002` was itself a GPU run**, not
+a CPU-era one; an earlier version of this paragraph said otherwise and is
+corrected here. The two records differ in their determinism protocol, not in
+their backend. The two differ in the fifth
 decimal and `E2-004` is the correct comparator for a deterministic GPU run.
 The mistake was in the instruction, not in the result.
 
@@ -798,11 +833,15 @@ consistent with unchanged routing but does not by itself prove it.
 
 ## Run 1 vs run 2 — does clipping bind?
 
-**Identical on every reported digit.** `clip_eigs=True` does not change the
-plain model here, because the HiPPO-initialized poles are already strictly
-stable, so the clip never activates. This matches the diagnostics observation
-in §8 and means the matched control is not disadvantaged by the stability
-setting it shares with the treatment.
+**No difference is visible at the reported precision** on any logged metric.
+That is consistent with the clip never activating — the HiPPO-initialized poles
+are strictly stable, and the diagnostics in §8 saw no active clipping — but
+matching rounded metrics is **not proof** that clipping never activated during
+training: a clip that bound briefly, or bound on modes that barely affect the
+loss, could leave the five-digit summaries unchanged. The runs did not log
+clipping statistics, so the question is **unresolved by this evidence**.
+New runs under `docs/GP_EXPERIMENT_PROTOCOL.md` §6 log per-step clipping and
+stability statistics so this can be answered directly instead of inferred.
 
 ## Run 2 vs run 3 — the only comparable pair
 
@@ -828,28 +867,293 @@ and are not an artifact of TF32.
 ## What this does and does not establish
 
 **Does:** the generalized recurrent mechanism trains end to end through the
-real S5 stack on GPU, with BPTT reaching the response parameters, under the
-deterministic protocol, at a cost of +0.25 % parameters and +5.8 % wall clock.
+real S5 stack on GPU under the deterministic protocol, at a cost of
++0.25 % parameters and the wall-clock difference recorded below.
+
+**Withdrawn from this paragraph:** "with BPTT reaching the response
+parameters". That is true of the *gradient* — it is established by the CPU
+directional-gradient tests in §3, Check 3 — but it was **not** demonstrated
+*from this GPU smoke*, which saved no initial/final checkpoints and logged no
+response values. Attributing it to the smoke was unsupported. The new runner
+records initial and final response parameters per run
+(`docs/GP_EXPERIMENT_PROTOCOL.md` §6), so the next runs can show the change
+directly rather than assert it.
 That was the purpose of the integration smokes and it is met.
 
-**Does not:** anything about whether the mechanism helps. This is **one epoch,
-one seed, a deliberately tiny model (d_model 64, 2 layers), and an untuned
-`gp_init_scale = 0.05`**. A one-epoch result is dominated by early optimization
-transients; a mechanism that changes effective poles and adds a tied
-feedthrough would be expected to need a different learning-rate or
-initialization regime before any comparison is meaningful. No tuning effort was
-spent on either arm.
+The **+5.8 % wall clock is a single pair of timings** from one run each on a
+shared cluster node. It is an observation about these two runs, not a measured
+overhead of the mechanism; no repeated timing, no isolation of the node, and no
+variance estimate were obtained.
 
-**It is not evidence against the theory**, and it must not be reported as a
-benchmark comparison. The honest statement is: *integration works; the first
-untuned point is worse; the controlled temporal task and a matched tuning
-budget are the next steps, not a verdict.*
+**Does not:** support a general claim about whether the mechanism helps. But
+the earlier wording here was too strong in the other direction, and is
+withdrawn. This run **is** evidence — **unfavourable evidence for the
+configuration actually tested**: at one epoch, one seed, d_model 64, 2 layers,
+`gp_init_scale = 0.05`, sMNIST, `gp_diagonal` was worse than the matched plain
+control on every recorded metric.
+
+What limits it is **scope, not direction**: it is a single configuration with
+no tuning on either arm, so it does not generalize to other sizes, budgets or
+initializations. The following claims are **removed** as unsupported:
+
+- that it "is not evidence" about whether the mechanism helps — it is, for this
+  configuration;
+- that the result is *necessarily* an early-optimization transient — no
+  longer-horizon run was performed to establish that;
+- that the mechanism *would be expected* to need a different learning-rate or
+  initialization regime — that is a hypothesis, and it is precisely what the
+  predeclared development budget in `docs/GP_EXPERIMENT_PROTOCOL.md` §4 tests,
+  not something this run establishes.
+
+The honest statement is: *integration works; the one configuration tested is
+unfavourable to the mechanism; a controlled temporal task with a predeclared,
+equal tuning budget is the next step, and its outcome is not prejudged.*
 
 ## Evidence classes, kept distinct
 
-| Class | Status |
+Each row names the commit the evidence was actually produced at. These are
+**different commits** and the counts are **not interchangeable**: the GPU suite
+was 124 tests at `be225d4`. It has **not** been re-run at any later commit, so
+nothing here may be relabelled as a larger GPU test count at HEAD.
+
+| Class | Count | Commit evidence was produced at | Status |
+|---|---|---|---|
+| CPU correctness (revision 3) | 125 tests + x64-disabled probe + diagnostics CLI | `2b454ed` | PASSED, local CPU |
+| **GPU correctness** | **124 tests** | **`be225d4`** | **PASSED**, exit 0, user-executed on RTX 3090 (§9) |
+| Integration smokes | 3 runs | `91f4988` | **PASSED**, exit 0, user-executed (this section) |
+| Benchmark / learning advantage | — | — | not attempted; the one configuration tested is unfavourable |
+
+The report text describing these results is committed separately at `2b454ed`;
+a report commit is not evidence of a re-run.
+
+---
+
+# 11. Revision 4 — controlled task, matched control, finite-inertia prototype
+
+Implementing `NEXT_CODING_BRIEF_2026_09_14.md`. Nothing in this section is GPU
+evidence; every number below is a **local CPU** result.
+
+## 11.1 Implementation checkout
+
+| item | value |
 |---|---|
-| CPU correctness | 125 tests + x64-disabled probe + diagnostics CLI |
-| GPU correctness | **PASSED** — 124 tests, exit 0, at `be225d4` (§9) |
-| Integration smokes | **PASSED** — three runs, exit 0, at `91f4988` (this section) |
-| Benchmark / learning advantage | **not attempted; the one untuned point is unfavourable** |
+| checkout | `/Users/alessandrodurso/Documents/final-prospective-s5` |
+| branch | `generalized-prospective-s5` |
+| base commit | `2b454ed273a8621e8599a42b28dd16516fb86039` |
+| public repo | `https://github.com/aledurso22/final-prospective-s5` |
+| backend | CPU (`darwin`), x64 enabled unless a probe disables it |
+| Python / JAX / Flax / optax | 3.14.4 / 0.11.1 / 0.12.9 / 0.2.8 |
+
+`gp_diagonal` is **unchanged**. It remains the valid `M = 0, gamma = 1` member
+of the extended family, and full BPTT is retained everywhere. Nothing added in
+this revision replaces it.
+
+## 11.2 Equations as implemented
+
+**Clock absorption**, applied exactly once, `a_i = Delta_i lambda_i`,
+`b_i = Delta_i Btilde_i`, so native S5 is the unit-interval ZOH of
+`sdot = F0 s + B0 x`.
+
+**Generalized first order** (`s5/gp_coefficients.py`, unchanged):
+
+```
+(I - T F0) sdot = F0 s + B0 x + T B0 xdot
+m      = 1 - t a          a_eff = a / m        b_hist = b / m^2
+d_x    = t b / m          abar  = exp(a_eff)   bbar   = phi1(a_eff) b_hist
+h_k    = abar h_{k-1} + bbar x_k ,  h_{-1} = 0
+s_k    = h_k + d_x x_k
+y_k    = 2 Re{ Ctilde s_k } + D x_k
+Re(a_eff) = (sigma - t |a|^2) / |m|^2  < 0  whenever sigma < 0, t >= 0
+```
+
+**Matched conventional modal SSM** (`s5/modal_ssm.py`, NEW). Same ODE class as
+ordinary S5 written in modal form, with a **static** input feedthrough inside
+the readout so the parameter count matches exactly:
+
+```
+d   = 1 - t a
+alpha = a / d        B_h = b / d^2        z = t d
+hdot  = alpha h + B_h x
+y     = 2 Re{ C [ h + diag(z) B_h x ] } + D x
+```
+
+Parameters are `alpha_re, alpha_im, z_re, z_im, B, C, D` — **no `log_step`**;
+the clock is absorbed at initialization, so this arm has the same temporal
+degrees of freedom as `gp_diagonal` but **no prospective coupling**: `z` is a
+free static gain, not `t` tied to the recurrence.
+
+**Finite inertia, second order** (`s5/gp_second_order.py`, NEW prototype):
+
+```
+mu sddot + (1 + t j) sdot + j s = b x + t b xdot ,   j = -a ,   0 < mu <= t
+w = mu sdot + t (j s - b x)
+d/dt [s; w] = F [s; w] + B x ,
+F = [[ -t j / mu , 1/mu ], [ (t/mu - 1) j , -1/mu ]] ,
+B = [ t b / mu , (1 - t/mu) b ]
+```
+
+Discretized by **`expm` on the augmented matrix** under `jax.vmap` — never by
+eigendecomposition, so defective/near-defective blocks are handled. The scan is
+a 2x2 block affine associative scan with
+`(A_i, b_i) o (A_j, b_j) = (A_j A_i, A_j b_i + b_j)`. The readout takes the
+first component `s`; at positive mass there is **no `D_x` term**, because the
+derivative feedthrough is produced by the dynamics rather than added
+algebraically.
+
+## 11.3 Controlled task
+
+`tasks/cue_recall.py`: length 256, 12 channels — `[0:8]` payload +-1 resampled
+at every token, `[8:10]` two current +-1 bits, `[10]` cue flag, `[11]` query
+flag. Cue ~ U{8..31}; delay bucket uniform over
+`(16,31) (32,63) (64,95) (96,128)`; query = cue + delay, max 159 < 256.
+Recall target = the 8 cue bits, scored **only at the query token**. Current
+target = XOR of the two current bits, scored at **every** token.
+`L = L_recall + L_current`, separately averaged. Splits TRAIN/DEV/TEST/EXTRAP
+use disjoint folded key domains; `EXTRAP_DELAYS = (192, 256, 384)` at length
+512 and is **never** used for selection.
+
+`s5/tokenwise_model.py` wraps the existing `StackedEncoderModel` with an
+8-logit recall head and a 1-logit current head, token-wise — **no pooling and
+no temporal batchnorm**, so no information crosses tokens outside the SSM.
+
+## 11.4 Actual test results (local CPU)
+
+```
+.venv/bin/python -m pytest tests/ -q     ->  178 passed in 162.66s
+.venv/bin/python tests/gp_float32_probe.py  ->  X64_DISABLED_OK DTYPES_OK PRODUCTION_OK
+.venv/bin/python tests/so_float32_probe.py  ->  SO_PRODUCTION_OK
+```
+
+| file | tests |
+|---|---|
+| `tests/test_s5_baseline.py` (and pre-existing) | 13 |
+| `tests/test_gp_prospective.py` | 44 |
+| `tests/test_gp_infrastructure.py` | 14 |
+| `tests/test_gp_review_fixes.py` | 53 |
+| `tests/test_cue_recall_task.py` (NEW) | 38 |
+| `tests/test_gp_second_order.py` (NEW) | 15 |
+| **total** | **178** |
+
+Previous total was 125; this revision adds 53. (An intermediate run of this
+suite gave 163; the extra 15 are the runner entry-point tests added after the
+bug in 11.4a was found.)
+
+### 11.4a Two bugs found by running the entry point, not the units
+
+**The runner crashed on every mechanism.** `_update` was `jit`-ed with only
+`model` static; the optax `GradientTransformation` `tx` — a NamedTuple of
+functions — was passed as a traced argument, so jit tried to abstractify it:
+`TypeError: Cannot interpret value of type <class 'function'> as an abstract
+array ... at path tx.init`. Every component test passed while the entry point
+could not complete a single update. Fixed by `static_argnums=(3, 4)`, and the
+eval path is now jitted the same way. `tests/test_cue_recall_task.py` now runs
+`main()` end-to-end for all six mechanisms. This is the **same class of miss**
+as the earlier `import jax` crash: units tested, entry point never run.
+
+**The diagnostic described a different system than the one that ran** — review
+item R3 recurring in new code. My first `spectral_stats` read `alpha_re`
+directly for `modal_ssm` and reported `|abar| = 1.00076`, i.e. a marginally
+*unstable* control arm. `ModalSSM.coefficients()` applies the same
+`Re(alpha) <= -1e-4` clip as the GP arms, so the executed model was strictly
+stable throughout; the *diagnostic* was wrong, not the model. Fixed to read the
+clipped pole, with a regression test asserting no arm is ever reported with
+`|abar| >= 1`.
+
+**A finding this produced.** With the corrected diagnostic, `clip_eigs`
+**does** activate for `modal_ssm`: after two updates, 1 of 16 modes in layer 1
+is clipped (`clipped_fraction = 0.0625`), while the GP arms show `0` clipped at
+the same point. This is exactly the statistic §10 could not answer from rounded
+metrics, and it is now logged per run. It is also an asymmetry to watch: the
+control arm reaches the stability boundary and the treatment arm does not, and
+that must be reported alongside any difference in loss rather than discovered
+afterwards.
+
+Measured checks worth naming:
+
+- **Parameter match.** `gp_diagonal` 2,144 params vs `modal_ssm` 2,144;
+  temporal parameters 64 vs 64 (4P at P = 16). Exact, not approximate.
+- **Conversion fidelity.** `gp_to_modal` reproduces the generalized coefficients
+  to `abar` error `0.0`, `bbar` error `0.0`, `d_x` error `2.42e-19` (float64).
+- **Every arm runs the entry point.** `plain`, `modal_ssm`, `gp_diagonal`,
+  `gp_scalar`, `prospective_input`, `full_state_pc` and
+  `gp_diagonal --freeze_response` each complete updates and write
+  `summary.json`. `--freeze_response` is verified to leave the response
+  bit-identical while other parameters move.
+- **Task/oracle agreement.** The generator is verified against an independent
+  oracle; cue and query flags sum to 1; maximum query index 159 < 256.
+- **Second order vs first order.** The `mu -> 0` limit recovers the
+  generalized first-order response, with the measured breakdown table below.
+- **Block scan vs sequential.** The associative block scan matches `lax.scan`.
+
+**Measured tiny-mass breakdown** (this is why `MU_RATIO_MIN = 1e-4`):
+
+| `mu/t` | 1e-1 | 1e-2 | 1e-3 | 1e-4 | 1e-5 | 1e-6 |
+|---|---|---|---|---|---|---|
+| error vs first order | 1.5e-2 | 1.5e-3 | 1.4e-4 | 1.4e-5 | 1.4e-6 | **NaN** |
+
+The `1/mu` entries of `F` overflow before the limit is reached. The floor is
+set at `1e-4`, one decade inside the last value that was measured to work, and
+it is a **measured** bound, not a guess.
+
+## 11.5 Limitations of this revision — stated, not deferred
+
+- **No GPU evidence for anything in this section.** All 178 tests are local
+  CPU. The GPU suite remains 124 tests at `be225d4` and has not been re-run.
+- **No learning result on the new task.** Not one training run has been
+  executed on `cue_recall`, on any arm. The protocol is predeclared precisely
+  so that it cannot be adjusted after seeing one.
+- **The second-order model is a prototype and is NOT wired into the
+  comparison.** It has correctness tests and a measured numerical floor; it has
+  no training evidence, no stability analysis across the full admissible
+  region, and no gates of its own yet. It must not enter the primary
+  comparison until it does.
+- **`modal_ssm` is parameter-matched, not capability-matched.** Matching counts
+  does not prove the two arms have equal expressive capacity on this task; it
+  removes the crudest confound, nothing more.
+- **Scalar `prospective_input` is not capacity-matched to `gp_diagonal`** and
+  is compared only against `gp_scalar`. It remains an ingredient/placement
+  control, not a reproduction of the preprint's full alpha-P-S5 recipe.
+- **Peak memory is not recorded on CPU.** `memory_stats()` returns `None` on
+  the CPU backend, so `peak_memory_bytes` is `null` in every local run. The
+  protocol requires it; it will only be populated on the GPU runs.
+- **Coupled `T`** (brief §6) is still not implemented; its diagonal-scan cost
+  claim is still not made.
+- **The development budget is deliberately unequal in one respect**, stated in
+  advance: `gp_diagonal` spends half its four configurations on response
+  initialization and therefore explores two learning rates where the other arms
+  explore four. Declared in `docs/GP_EXPERIMENT_PROTOCOL.md` §4 before any run.
+
+## 11.6 Short cluster commands (prepared, NOT executed)
+
+I have no cluster access; these are for the user to run. One line each.
+
+```bash
+git fetch origin && git checkout generalized-prospective-s5 && git pull
+```
+```bash
+export XLA_FLAGS=--xla_gpu_deterministic_ops=true
+```
+```bash
+.venv/bin/python -m pytest tests/ -q 2>&1 | tail -5
+```
+```bash
+.venv/bin/python tests/gp_float32_probe.py 2>&1 | tail -8
+```
+```bash
+.venv/bin/python tests/so_float32_probe.py 2>&1 | tail -5
+```
+```bash
+.venv/bin/python -m experiments.gp.cue_recall_runner --mechanism plain --updates 750 --seed 0 --lr 1e-3 --ssm_lr 1e-3 --matmul_precision highest
+```
+```bash
+.venv/bin/python -m experiments.gp.cue_recall_runner --mechanism modal_ssm --updates 750 --seed 0 --lr 1e-3 --ssm_lr 1e-3 --matmul_precision highest
+```
+```bash
+.venv/bin/python -m experiments.gp.cue_recall_runner --mechanism gp_diagonal --updates 750 --seed 0 --lr 1e-3 --ssm_lr 1e-3 --gp_init_scale 0.05 --matmul_precision highest
+```
+
+Remaining development candidates are the rest of the table in
+`docs/GP_EXPERIMENT_PROTOCOL.md` §4 — same command, changed `--lr`, `--ssm_lr`,
+`--gp_init_scale`. Confirmation runs use `--updates 2000 --batch 64 --seed 1..5`
+on each primary arm. **Report every configuration that is run, including the
+ones that lose.**
