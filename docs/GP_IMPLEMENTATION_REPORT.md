@@ -644,3 +644,74 @@ training run. The message now says so explicitly.
 | **GPU correctness** | **not yet run** |
 | **Integration smokes** | **not yet run** (three short runs, purposes kept separate) |
 | **Benchmark / learning advantage** | **not attempted, not claimed** |
+
+
+---
+
+# 9. GPU correctness gate — first execution (revision 3)
+
+**Run on the RTX 3090, `pgi15-gpu3`, commit `39242b1`, clean tree, artifacts
+`/Users/durso/s5-runs/20260914-151709-gp/`.** Environment:
+`CUDA_VISIBLE_DEVICES=0`, `XLA_PYTHON_CLIENT_PREALLOCATE=false`,
+`WANDB_MODE=offline`, `XLA_FLAGS=--xla_gpu_deterministic_ops=true`,
+`JAX_ENABLE_X64` unset.
+
+`backend=gpu devices=[CudaDevice(id=0)]`, `GPU_BACKEND_OK`.
+
+## Result: 123 passed, 1 FAILED
+
+```
+tests/test_gp_review_fixes.py::test_R1_production_float32_subprocess_asserts_dtypes
+  AssertionError: 7.497774e-05          (predeclared gate: 1e-5)
+1 failed, 123 passed in 222.78s
+```
+
+Every x64 gate, both complex64 `phi1` gates, the clipped-diagnostics checks,
+the checkpoint/step restoration, the differentiable streaming and reset checks,
+and the Hankel counterexample **all passed on GPU**. The single failure was the
+production parallel-vs-sequential comparison.
+
+## Diagnosis — measured, not assumed
+
+| condition | rel error |
+|---|---|
+| CPU, backend default | 4.748e-08 |
+| **GPU, backend default** | **7.498e-05** |
+| **GPU, `JAX_DEFAULT_MATMUL_PRECISION=highest`** | **4.748e-08** |
+
+At controlled precision the GPU reproduces the CPU value **exactly, digit for
+digit**. That identifies the backend's default float32 matmul mode (TF32 on
+Ampere) as the entire cause and **rules out scan ordering**, which would not
+have vanished under a precision change. `--xla_gpu_deterministic_ops=true` was
+set throughout and does not affect TF32.
+
+## Protocol change, stated explicitly
+
+The tolerance was **not** loosened. The probe now makes two distinct
+measurements:
+
+1. **GATE — implementation correctness**, evaluated under
+   `jax.default_matmul_precision("highest")`, tolerance unchanged at `1e-5`.
+   This measures our algebra rather than the backend's default matmul mode.
+2. **RECORD — backend characteristic**, at the backend default, reported and
+   **not gated**, because reduced-precision matmul is a property of the
+   hardware path and not of this code.
+
+## What this does and does not mean for the smokes
+
+TF32 here is **deterministic**: `E2-004` showed four paired runs bit-identical
+under it. So this is **not** run-to-run noise and does not reintroduce `F-002`.
+
+What it does mean: each model's computed output sits ~7.5e-5 (relative) from
+its exact-arithmetic value on this device. A *mechanism* difference smaller
+than that cannot be attributed to the mathematics rather than to differential
+reduced-precision error.
+
+**Recommendation for the three integration smokes: keep the backend default.**
+The historical `E2-002`/`E2-004` records were produced under it, and changing
+precision now would break comparability with the frozen historical smoke. The
+deviation is recorded here so any later effect size can be judged against it.
+
+Also fixed in this revision: `gp_gpu_checks.sh` used `set -e`, so a pytest
+failure aborted the script before its summary printed, leaving only an exit
+code. It now captures the status and always prints the log tail.

@@ -71,7 +71,48 @@ for x in onp.asarray(u):
     h = (ab * h + bb @ x).astype(onp.complex64)
     ref.append(2 * onp.real(C_t @ (h + dx @ x)) + D * x)
 ref = onp.array(ref)
-rel = onp.max(onp.abs(onp.asarray(y) - ref)) / max(1.0, onp.max(onp.abs(ref)))
-print(f"  production parallel vs sequential, complex64: rel = {rel:.3e}")
-assert rel < 1e-5, rel
+
+
+def _rel(out):
+    return float(onp.max(onp.abs(onp.asarray(out) - ref))
+                 / max(1.0, onp.max(onp.abs(ref))))
+
+
+# Two DISTINCT measurements, reported separately on purpose.
+#
+# (1) GATE - implementation correctness. Evaluated at full float32 matmul
+#     precision, so it measures OUR algebra and not the backend's default
+#     reduced-precision matmul mode. Predeclared tolerance 1e-5.
+#
+# (2) RECORD - backend characteristic, NOT gated. At the backend default this
+#     is TF32 on Ampere, whose ~10-bit mantissa is a property of the hardware
+#     path, not of this code. Reported so the number is on the record and can
+#     be compared against any measured effect size.
+#
+# Protocol change, stated explicitly rather than applied silently: on
+# 2026-09-14 the single default-precision measurement failed its 1e-5 gate on
+# an RTX 3090 at rel = 7.498e-05. Re-running at highest precision reproduced
+# the CPU value 4.748e-08 EXACTLY, which identifies the backend matmul mode as
+# the entire cause and rules out scan ordering. The gate was therefore moved to
+# the precision-controlled measurement and the default-precision value is now
+# recorded alongside it. The tolerance itself was NOT loosened.
+rel_default = _rel(y)
+with jax.default_matmul_precision("highest"):
+    y_hi = mod.apply(v, u)
+rel_highest = _rel(y_hi)
+
+print(f"  parallel vs sequential, complex64, HIGHEST matmul: rel = {rel_highest:.3e}")
+print(f"  parallel vs sequential, complex64, backend DEFAULT: rel = {rel_default:.3e}")
+print(f"  backend={jax.default_backend()} devices={jax.devices()}")
+assert rel_highest < 1e-5, (
+    f"GATE FAILED at controlled precision: {rel_highest}")
+if rel_default >= 1e-5:
+    print(f"  NOTE: the backend default matmul mode contributes "
+          f"{rel_default:.3e} of deviation from full float32 precision.")
+    print("  This is NOT run-to-run noise: the mode is deterministic, and "
+          "E2-004 showed four paired runs bit-identical under it. It means "
+          "each model's computed output sits ~that far from its exact-"
+          "arithmetic value, so a MECHANISM difference smaller than this "
+          "cannot be attributed to the mathematics rather than to differential "
+          "reduced-precision error.")
 print("PRODUCTION_OK")

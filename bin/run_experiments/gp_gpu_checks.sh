@@ -22,11 +22,15 @@ if backend == "cpu" or not any(d.platform in ("gpu", "cuda") for d in devs):
 print("GPU_BACKEND_OK")
 PY
 
+# `set -e` would abort here on a pytest failure BEFORE the summary is printed,
+# leaving the operator with a bare exit code. Guard it so a failing run still
+# shows its tail.
+rc=0
 python -m pytest tests/test_gp_prospective.py tests/test_gp_infrastructure.py \
        tests/test_gp_review_fixes.py tests/test_s5_baseline.py \
-       -q > "$OUT/gpu_checks.log" 2>&1
-rc=$?
-echo "pytest exit=$rc"; tail -5 "$OUT/gpu_checks.log"
+       -q > "$OUT/gpu_checks.log" 2>&1 || rc=$?
+echo "pytest exit=$rc"
+tail -15 "$OUT/gpu_checks.log"
 
 echo "--- genuine complex64 production probe (separate x64-disabled process) ---"
 python tests/gp_float32_probe.py | tee "$OUT/float32_probe.log"
