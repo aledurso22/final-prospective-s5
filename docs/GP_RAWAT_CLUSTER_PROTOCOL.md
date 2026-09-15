@@ -177,6 +177,37 @@ which are part of the published recipe. If several GPUs are free, the supported
 use is **one whole run per GPU** (different arm or seed), which changes no
 recipe — noting that the GPU-hour caps in s4 and s5 are summed across devices.
 
+## 9a. Frozen data identity
+
+Produced by `cluster_prepare_data.sh` on `pgi15-gpu3`, 15 September 2026,
+SLURM job 65870, BEFORE any training. Recorded here so the exact data a result
+was produced from is pinned in public git, not only in artifact storage.
+
+| split | examples | SHA-256 of the filename+label list |
+|---|---|---|
+| train | 26,984 | `73caf4e4cd760aa4972a3f1553c37260a357dd0eb06f17bcddafc4847e37a345` |
+| val | 5,783 | `dc4f65d666d832303364553d36f3a90c3e70e6b42aefa443fc7ad203407202e4` |
+| test | 5,779 | `d458e62d0e40fcc25bcc62e214702a4e6c9f311539eb3e4967cdb9ad845c9568` |
+
+Total 38,546 clips across the ten words, matching the Speech Commands v0.02
+10-word counts (yes 4044, no 3941, up 3723, down 3917, left 3801, right 3778,
+on 3845, off 3745, stop 3872, go 3880). Proportions are 70.0 / 15.0 / 15.0 as
+published. MFCC: 20 coefficients, 200-sample FFT window, 64 mel bands,
+100-sample hop, split seed 0.
+
+**843 optimizer steps per epoch** at the published batch size of 32.
+
+Feature arrays and per-coefficient standardization statistics live with the
+run artifacts at `/Users/durso/s5-runs/sc10_cache/manifest.json`, which also
+carries a SHA-256 of every cached array; `SC.load` refuses to return data whose
+digests do not match, so a corrupted or silently regenerated cache cannot be
+trained on unnoticed.
+
+The expected `UserWarning` about mel filterbanks with all-zero values appeared,
+as documented in `docs/RAWAT_BASELINE_MAP.md` s5: it is a property of the
+published configuration (2 of 64 filters empty at `n_fft = 200`), reproduced
+rather than corrected.
+
 ## 10. Cluster commands
 
 Short, one line each. Run in order. Nothing below has been executed.
