@@ -12,6 +12,8 @@ Protocol: `docs/TSS_PILOT_PROTOCOL.md`.
 |---|---|
 | preparation parent | `cce550b5cc16d5c5d20857359f1ad8a30a4f7741` |
 | branch | `tss-pilot` (prepared in a separate worktree) |
+| first preparation | `abe49708f4df251802d932acc7f6ab940e24021e` |
+| repaired after review | this commit; R1-R9 dispositions in the protocol s9 |
 | cluster runs dispatched | **none** |
 | focused checks executed | **none** |
 | budget consumed | **0 s** |
@@ -43,7 +45,9 @@ and are enforced in code:
 
 * our declared circuit point has an **exact adaptation twin**
   (`tau_m = 12, eps = 4, tau_p = 4`), used as an implementation check on both
-  the forward trajectory and its gradients;
+  the forward trajectory and its gradients. The arms share a **matched
+  open-loop denominator**, which does *not* equalize closed-loop poles once the
+  drive depends on the state;
 * TSS's own matching prescription `tau_p = tau_m` maps to **`gamma = 0`**, so
   `M <= gamma T` fails for any `M > 0`.
 

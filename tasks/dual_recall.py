@@ -140,27 +140,80 @@ def query_step_inputs(batch):
     return x[rows, tq], cls
 
 
-def leakage_probe(batch, ridge=1e-3):
-    """Best LINEAR predictor of the cue class from the query-step input alone.
-
-    A check against leakage, NOT a competitive baseline. By construction the
-    query-step input is independent of the cue class, so this should sit at the
-    1/8 chance level; if it does not, the task leaks and the recall scores mean
-    something else. Fitted in closed form on the same data it is scored on,
-    which makes it an UPPER bound on what a linear reader could extract.
-    """
-    xq, cls = query_step_inputs(batch)
+def _ridge_fit(xq, cls, ridge):
     n, d = xq.shape
     Phi = onp.concatenate([xq, onp.ones((n, 1), dtype=xq.dtype)], axis=1)
     Y = onp.eye(N_CLASSES, dtype=xq.dtype)[cls]
     A = Phi.T @ Phi + ridge * onp.eye(d + 1, dtype=xq.dtype)
-    Wl = onp.linalg.solve(A, Phi.T @ Y)
-    pred = onp.argmax(Phi @ Wl, axis=1)
-    return dict(accuracy=float(onp.mean(pred == cls)),
-                chance=1.0 / N_CLASSES, n=int(n),
-                note=("closed-form ridge classifier fitted AND scored on the "
-                      "same query-step inputs, so this is an upper bound on "
-                      "linear leakage, not a held-out score"))
+    return onp.linalg.solve(A, Phi.T @ Y)
+
+
+def _ridge_score(W, xq, cls):
+    n = xq.shape[0]
+    Phi = onp.concatenate([xq, onp.ones((n, 1), dtype=xq.dtype)], axis=1)
+    return float(onp.mean(onp.argmax(Phi @ W, axis=1) == cls))
+
+
+def leakage_probe(batch, fit_batch=None, ridge=1e-3, n_permutations=64,
+                  seed=4242, quantile=0.99):
+    """Can a linear reader recover the cue from the QUERY-STEP input alone?
+
+    R6. The previous version fitted and scored on the same 192 examples and
+    compared the result with `chance + 0.06`. In-sample ridge can exploit
+    accidental label associations even when the generator is independent, and a
+    ridge solution does not maximize accuracy, so it was neither a fair
+    estimate nor the "upper bound on linear leakage" it was described as. Both
+    claims are withdrawn.
+
+    What is measured now:
+
+    * the classifier is fitted on a SEPARATE generated set and scored on the
+      evaluation set, so the number is held out;
+    * a PERMUTATION NULL is built by refitting on shuffled labels and scoring
+      the same held-out set, which calibrates what this estimator returns when
+      there is by construction nothing to find;
+    * the declared criterion is that the held-out score does not exceed the
+      null's upper quantile.
+
+    This measures what THIS linear reader extracts. It is not a bound over all
+    classifiers and not a bound on information.
+    """
+    rng = onp.random.RandomState(seed)
+    if fit_batch is None:
+        fit_batch = generate(rng, 4 * batch[0].shape[0])
+    xq_fit, cls_fit = query_step_inputs(fit_batch)
+    xq_ev, cls_ev = query_step_inputs(batch)
+    acc = _ridge_score(_ridge_fit(xq_fit, cls_fit, ridge), xq_ev, cls_ev)
+    null = []
+    for _ in range(n_permutations):
+        perm = rng.permutation(cls_fit.size)
+        null.append(_ridge_score(_ridge_fit(xq_fit, cls_fit[perm], ridge),
+                                 xq_ev, cls_ev))
+    null = onp.asarray(null)
+    thresh = float(onp.quantile(null, quantile))
+    return dict(held_out_accuracy=acc, chance=1.0 / N_CLASSES,
+                n_fit=int(cls_fit.size), n_eval=int(cls_ev.size),
+                null_mean=float(null.mean()), null_max=float(null.max()),
+                null_quantile=quantile, null_threshold=thresh,
+                passed=bool(acc <= thresh),
+                note=("held-out score of a ridge reader on the query-step "
+                      "input, calibrated against a label-permutation null. "
+                      "Not a bound over all classifiers and not a bound on "
+                      "information."))
+
+
+def make_leaking_batch(batch, strength=1.0):
+    """A deliberately LEAKING fixture: the cue is written into the query step.
+
+    R6 asks for a positive control, so that a leakage probe which always passes
+    is distinguishable from one that works. `leakage_probe` must fail on this.
+    """
+    x, u, cls, tq, meta = batch
+    x2 = x.copy()
+    rows = onp.arange(cls.size)
+    x2[rows, tq, IDX_CONTENT] = 0.0
+    x2[rows, tq, 1 + cls] = strength
+    return x2, u, cls, tq, meta
 
 
 def structure_check(batch):

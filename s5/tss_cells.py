@@ -44,10 +44,24 @@ Two consequences are used throughout this pilot.
    TSS-matched sector. `tss_gamma_equivalent` returns that gamma so the claim
    is measured rather than asserted.
 
-To keep the comparison about response SHAPE rather than about who was handed
-the longer memory, arm 2 is given the same two poles as arm 4 (tau_m = 3T/2,
-eps = T/2). The arms then differ only in the prospective zero: arm 4's drive is
-f + T f', arm 2's is f + 2T f'.
+R7. To keep the comparison about response SHAPE rather than about who was
+handed the longer memory, arm 2 is given the same MATCHED OPEN-LOOP DENOMINATOR
+as arm 4 (tau_m = 3T/2, eps = T/2), and the arms then differ only in the
+prospective zero: arm 4's drive is f + T f', arm 2's is f + 2T f'.
+
+That matching is open-loop, i.e. it holds when f is an EXTERNAL drive. Part A
+closes the loop with f = W tanh(s) + U x + b, and for a scalar eigenvalue `a`
+of the frozen local recurrent Jacobian the characteristic polynomials are
+
+    retained:        M p^2 + (gamma + T - a T) p + (1 - a)
+                     = 48 p^2 + (16 - 8 a) p + (1 - a)
+    TSS adaptation:  48 p^2 + (16 - 16 a) p + (1 - a)
+
+so EQUAL OPEN-LOOP DENOMINATORS DO NOT GIVE EQUAL CLOSED-LOOP POLES OR EQUAL
+MEMORY, even before training. `closed_loop_polynomial` computes both, and the
+runner reports the local Jacobian spectra descriptively. The open-loop matching
+remains useful - it removes one gross asymmetry - but it is not a claim that
+the arms have the same memory.
 
 INTEGRATION
 -----------
@@ -75,15 +89,50 @@ DT = 1.0
 T_HORIZON = 8.0
 
 
+#: reporting metadata, kept OUT of anything that reaches a jitted call
+REFERENCE_LABEL = "symmetric-reference"
+
+
 def symmetric_reference(T=T_HORIZON):
     """The declared positive circuit point: gamma = T, M = 3T^2/4.
 
-    This is the same symmetric reference used by the SSM studies, restated in
-    UNNORMALIZED form: rho = M/(gamma T) = 3/4, so M <= gamma T holds strictly.
-    No independent fit of M, gamma and T is performed anywhere in this pilot.
+    NUMERIC ONLY. R1: an earlier revision carried `label="symmetric-reference"`
+    in this dict, and the dict is passed as a dynamic pytree into the jitted
+    training and evaluation steps. A string is not a valid dynamic JAX leaf, so
+    the first production call would have been blocked by the configuration's
+    structure even though no mathematics reads the string. Metadata now lives
+    in `reference_metadata()` and never enters a traced call.
+
+    Restated in UNNORMALIZED form: rho = M/(gamma T) = 3/4, so M <= gamma T
+    holds strictly. No independent fit of M, gamma and T anywhere in this pilot.
     """
     return dict(T=float(T), gamma=float(T), M=0.75 * float(T) ** 2,
-                rho=0.75, label="symmetric-reference")
+                rho=0.75)
+
+
+def reference_metadata(T=T_HORIZON):
+    """Reporting-only description of the coefficient point."""
+    r = symmetric_reference(T)
+    return dict(label=REFERENCE_LABEL, dt=DT,
+                clock="one input step is one unit of model time", **r)
+
+
+def assert_numeric_pytree(tree, where=""):
+    """Refuse a configuration that cannot be a dynamic JIT argument.
+
+    R1 again, as an executable guard rather than a convention: any non-numeric
+    leaf reaching a traced call is an error at construction time, not a
+    surprise at the first production step.
+    """
+    import jax as _jax
+    bad = []
+    for path, leaf in _jax.tree_util.tree_flatten_with_path(tree)[0]:
+        if isinstance(leaf, (str, bytes)) or leaf is None:
+            bad.append((_jax.tree_util.keystr(path), type(leaf).__name__))
+    if bad:
+        raise TypeError(f"non-numeric leaves in {where or 'config'}: {bad}. "
+                        f"Metadata must not travel into a jitted call.")
+    return tree
 
 
 def q_roots(gamma, T, M):
@@ -100,6 +149,19 @@ def q_roots(gamma, T, M):
                          f"violated or the coefficients are inadmissible")
     r = disc ** 0.5
     return (a0 - r) / 2.0, (a0 + r) / 2.0
+
+
+def closed_loop_polynomial(a, gamma=None, T=None, M=None, tau_m=None,
+                           eps=None, tau_p=None):
+    """Closed-loop characteristic coefficients [p^2, p^1, p^0] at Jacobian `a`.
+
+    R7: the matched quantity is the OPEN-LOOP denominator Q. Closing the loop
+    with f = a s moves the linear coefficient differently in the two sectors,
+    because the prospective zero multiplies the drive.
+    """
+    if gamma is not None:
+        return [M, (gamma + T) - a * T, 1.0 - a]
+    return [tau_m * eps, (tau_m + eps) - a * (eps + tau_p), 1.0 - a]
 
 
 def equivalent_adaptation(gamma, T, M):
@@ -270,3 +332,72 @@ def refinement_error(vf, z0, xs, n_sub, factor=4):
     fine, _ = rollout_ode(vf, z0, xs, n_sub * factor)
     num = jnp.max(jnp.abs(coarse - fine))
     return num / (jnp.max(jnp.abs(fine)) + 1.0)
+
+
+# ------------------------------- TSS-style linear complex leaky memory -----
+#: declared initial memory timescale, in steps: the same slow open-loop
+#: timescale as the other arms' t_+ = 3T/2 = 12
+MEMORY_TAU_INIT = 12.0
+
+
+def _phi1(a):
+    """(exp(a) - 1)/a, with the removable singularity handled at small |a|."""
+    small = jnp.abs(a) < 1e-6
+    safe = jnp.where(small, jnp.ones_like(a), a)
+    return jnp.where(small, 1.0 + a / 2.0, (jnp.exp(safe) - 1.0) / safe)
+
+
+def complex_memory_lambda(params):
+    """lambda = -exp(log_decay) + i omega, stable by construction."""
+    return -jnp.exp(params["log_decay"]) + 1j * params["omega"]
+
+
+def complex_memory_step(params, z, u, dt=DT):
+    """EXACT zero-order-hold update of an independent complex leaky unit.
+
+    R2. This is the small version of TSS Section 3.3's memory structure:
+    INDEPENDENT COMPLEX LINEAR leaky units, not a dense nonlinear tanh
+    recurrence. Being linear with constant coefficients over the step, it gets
+    the exact discretization the design asks for where one is available, so no
+    integration error is introduced on this arm at all.
+    """
+    lam = complex_memory_lambda(params) * dt
+    return jnp.exp(lam) * z + _phi1(lam) * u * dt
+
+
+def complex_memory_rollout(params, es, dt=DT):
+    """Run the memory bank over an encoded sequence. Returns (L, 2*P) REAL.
+
+    The readout is the real and imaginary parts, which is why P complex units
+    cost exactly 2P real temporal coordinates.
+    """
+    Wr, Wi = params["W_in_re"], params["W_in_im"]
+
+    def step(z, e):
+        u = (Wr @ e) + 1j * (Wi @ e)
+        z = complex_memory_step(params, z, u, dt)
+        return z, jnp.concatenate([jnp.real(z), jnp.imag(z)])
+
+    z0 = jnp.zeros((params["log_decay"].shape[0],), dtype=jnp.complex64)
+    _, out = jax.lax.scan(step, z0, es)
+    return out
+
+
+# --------------------------------------- discrete transpose convolution ----
+def discrete_transpose(rollout_fn, c):
+    """The EXACT discrete adjoint of a causal LTI rollout, by reversal.
+
+    R5. For a causal linear map s = K * f with zero initial state, the
+    derivative of sum_t c_t s_t with respect to f is
+
+        (K^T c)_t = sum_{sigma >= t} K_{sigma - t} c_sigma
+                  = reverse( K * reverse(c) )_t
+
+    so reversing the input, applying THE SAME EXECUTED discrete operator and
+    reversing the output is the transpose convolution exactly - no sample/hold
+    or end-of-step timing mismatch, and no continuous-time transfer function
+    involved. The previous revision compared a sampled operator against a
+    CONTINUOUS H(-i omega) at a tight tolerance, which mixes two different
+    transfer functions; refining RK4 substeps cannot remove that difference.
+    """
+    return rollout_fn(c[::-1])[::-1]

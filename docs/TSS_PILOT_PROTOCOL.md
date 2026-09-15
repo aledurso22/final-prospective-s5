@@ -7,11 +7,14 @@ Committed **before** any numerical execution. Coordinator sources:
 and `.../CAUSAL_LEARNING_AGENT.md` (s11).
 
 Prepared on branch `tss-pilot`, in a worktree, from
-`cce550b5cc16d5c5d20857359f1ad8a30a4f7741`. The SSM studies and the running
+`cce550b5cc16d5c5d20857359f1ad8a30a4f7741`. The SSM studies and the completed
 learned-timescale experiment are untouched: this pilot adds files and changes
 none of theirs.
 
-**Nothing here has been executed.** No result is recorded until after a run.
+**AMENDED 16 September 2026** after the coordinator's static review of
+`abe4970` (`TSS_PILOT_REVIEW_abe4970_2026_09_16.md`). Nine issues, R1-R9;
+dispositions in s9. **Nothing here has been executed.** No result is recorded
+until after a run.
 
 ## 0. What the two parts can and cannot establish
 
@@ -79,11 +82,26 @@ Two consequences are enforced in code and checked:
    and not different model classes, and the circuit inequality excludes the
    TSS-matched sector. Measured by `tss_gamma_equivalent`, not asserted.
 
-To keep the comparison about response **shape**, arm 2 is given the **same two
-poles** as arm 4 (`tau_m = 12`, `eps = 4`). The arms then differ only in the
-prospective zero: `f + T f'` against `f + 2T f'`. Arm 3's memory leak is set to
-the same slow pole, `tau_mem = 12`, so no arm starts with a longer intrinsic
-memory than another.
+To keep the comparison about response **shape**, arm 2 is given the **same
+matched OPEN-LOOP denominator** as arm 4 (`tau_m = 12`, `eps = 4`), so the arms
+differ only in the prospective zero: `f + T f'` against `f + 2T f'`. Arm 3's
+memory is initialized at the same slow timescale, 12 steps.
+
+**R7: that matching is open-loop, and does not equalize memory.** It holds when
+`f` is an external drive. Part A closes the loop with
+`f = W tanh(s) + U x + b`, and for a scalar eigenvalue `a` of the frozen local
+recurrent Jacobian the characteristic polynomials are
+
+```
+retained:        48 p^2 + (16 -  8a) p + (1 - a)
+TSS adaptation:  48 p^2 + (16 - 16a) p + (1 - a)
+```
+
+so **equal open-loop denominators give different closed-loop poles and
+different memory, even before training.** The matching is kept because it
+removes one gross asymmetry, but the earlier phrase "the same two poles" was
+wrong and is withdrawn. `closed_loop_report` tabulates both polynomials and the
+runner records each arm's local Jacobian spectrum descriptively.
 
 ## 2. Part A — task
 
@@ -128,7 +146,7 @@ Primary budget: **16 real temporal coordinates**.
 |---|---|---|---|---|
 | 1 | `ideal_prospective` | **0** | 16 | the memory-**cancellation** control: `s = f(s,x)` solved as a fixed point |
 | 2 | `tss_finite_adaptation` | 16 (8×2) | 8 | TSS Eqs. 6–7 with its own `tau_p = tau_m` matching |
-| 3 | `memory_then_prospective` | 16 (16×1) + 0 | 16+16 | memory-bearing leaky layer, then prospective processing |
+| 3 | `tss_memory_then_prospective` | 16 (8 complex × 2) + 0 | 8 + 16 | independent complex **linear** leaky memory, then prospective processing |
 | 4 | `retained_compartment` | 16 (8×2) | 8 | our circuit law with its coefficient ties intact |
 
 Arm 1 is **not** artificially enlarged to look state-matched: having no driven
@@ -136,10 +154,25 @@ temporal state after its residual transient is the property it exists to
 exhibit. It is given 16 units so its parameter count is not the smallest of the
 set, which makes it a *stronger* control.
 
-**Arm 3's processing stage is the ideal (stateless) prospective map**, which
-lets the comparator keep the full 16 coordinates as *memory*. This is a
-declared choice in the comparator's favour; a finite-adaptation processing
-stage (which would cost states and shrink the memory layer) was **not** run.
+**Arm 3's memory is a bank of independent complex linear leaky units** —
+`z' = lambda z + w.e` with `lambda = -exp(nu) + i omega`, exactly
+zero-order-held, eight complex units costing sixteen real coordinates. R2: this
+is the small version of TSS Section 3.3's structure. An earlier revision used a
+dense nonlinear `tanh` recurrence, which is a different object and was being
+described as the literature comparator; that is corrected, and the arm is named
+for what it is.
+
+**Its processing stage is the ideal (stateless) prospective map**, which lets
+the comparator keep the full 16 coordinates as *memory*. That remains a declared
+reduction, in the comparator's favour; a finite-adaptation processing stage
+(which would cost states and shrink the memory layer) was **not** run.
+
+**The processing stage sees the memory only.** R2: an earlier revision added a
+direct `Vx e_t` path from the current encoded input into the processing fixed
+point, which would have let this arm alone reconstruct the fast signal with its
+memory ignored — precisely the bypass this protocol forbids. It is removed, and
+a test measures the derivative of the processing output with respect to the
+current encoded input at fixed memory state, which must be exactly zero.
 
 **Parameter counts differ at this state budget.** They are recorded per arm.
 State matching and parameter matching are not claimed simultaneously: if a
@@ -189,8 +222,19 @@ stability, and this pilot is not entitled to assume it. The witness is
 reproduced in the audit output. **Recurrent error dynamics are out of scope.**
 
 32 trajectories × 64 steps, parameters frozen, initial states fixed.
-Predeclared input bandwidths `Ω ∈ {0.05, 0.15, 0.40}` rad/step, band-limited
-and unit-variance; targets generated the same way.
+
+**Predeclared input bands, as intervals:** `(0.03, 0.08)`, `(0.12, 0.25)`,
+`(0.35, 0.60)` rad/step. Four random-phase sinusoids per channel at
+**continuous** frequencies drawn inside the band, normalized to unit variance.
+R4: the earlier revision masked the rFFT of white noise at a single cutoff, and
+for 64 samples at `dt = 1` the first nonzero bin is `2π/64 ≈ 0.0982` — so the
+declared `Ω = 0.05` band retained **only DC** and every "slow" trajectory was
+constant in time, while `Ω = 0.15` kept a single bin. The drawn frequencies and
+the realized temporal variance are both recorded, and a test requires genuine
+temporal variation in every band. A band of the *generating process* is not the
+DFT of a finite observation window, and **input bandwidth does not bound the
+adjoint drive's bandwidth** after a nonlinear layer — the drive's own spectral
+centroid and 90 % frequency are measured for both layers.
 
 **Reference.** Each layer's per-step drive carries an additive perturbation
 `d_t` held over the step exactly as the drive is; then `rho_exact(t) = dJ/d(d_t)`
@@ -204,9 +248,13 @@ forward-mode sensitivities (`jacfwd`), and central finite differences,
 discretized **exactly** (ZOH) so the comparison is not polluted by their own
 integration error:
 
-* **(i) reciprocal / GLE-style ordinary-prospective baseline** — `E_eps` of
-  (C2)-(C3) cascaded with `R_delta` of (C5)-(C6) so the path is strictly
-  proper. Same phase as the adjoint, different magnitude, `O(ω²)` error.
+* **(i) GLE-INSPIRED ordinary-prospective baseline** — `E_eps` of (C2)-(C3)
+  cascaded with `R_delta` of (C5)-(C6) so the path is strictly proper. R7: it
+  is **not** a verbatim TSS or GLE learning rule and is labelled GLE-inspired
+  everywhere it is reported. The *unregularized* `1/H` shares the adjoint's
+  phase on the Fourier axis for real coefficients; the **executed**
+  `E_eps · R_delta` generally does not, so the earlier exact-phase claim is
+  withdrawn. `O(ω²)` low-frequency error.
 * **(ii) moment-matched** — `K_eps` of (M2)-(M3): three low-pass states, weights
   summing to one with `w2 < 0` supplying the extrapolation, `O(ω³)` error.
 
@@ -217,8 +265,24 @@ approximation is presented at a selected operating point.
 **Metrics**: gradient cosine similarity, relative error, fraction of negative
 cosines across trajectories, and the actual objective change after a small
 **norm-matched** update at `‖step‖ ∈ {1e-3, 1e-2}`. Absolute error is reported
-and the cosine flagged undefined whenever the reference gradient is below
-`1e-12`. Assessed parameters: `W1, b1, W2, b2`.
+and the cosine flagged **undefined** — distinctly from a numerical failure —
+whenever the reference gradient is below `1e-12`. Assessed parameters:
+`W1, b1, W2, b2`.
+
+**R3: every gradient and every loss change refers to the SAME objective**, the
+mean over all 32 trajectories. The earlier revision averaged gradients over the
+batch and then measured the resulting step against trajectory 0's loss alone;
+an exact gradient of a mean need not decrease one member's loss, so that
+mismatch could have rejected the exact reference itself. A test builds a
+fixture whose per-example gradients genuinely conflict, so the distinction is
+observable.
+
+**R5: teaching-variable diagnostics** are reported for **both** layers, split
+into predeclared start / interior / end windows, because the causal filters
+start from zero states while the exact adjoint is terminal-valued and the ends
+disagree by construction. These are diagnostics on the teaching variable; a
+truncated gradient sum is **not** the gradient of an interior-only loss and is
+not presented as one.
 
 **Audited before use, and reported**: the executed filter poles, the peak-gain
 bound (M6) and the small-`eps` peak estimate `2c₂/(3√3 eps²)`, the exact
@@ -301,3 +365,106 @@ cluster. This launcher must not run alongside another cluster batch.
 11. **Recurrent error-loop stability is not tested.** Part B is feedforward by
     construction, and nothing here licenses applying either filter around a
     recurrent loop.
+
+
+## 9. Dispositions for the review of `abe4970` (R1-R9)
+
+Static review, 16 September 2026. Every repair below is in the pushed commit;
+none has been executed.
+
+**R1 — text metadata in a dynamic JIT argument (P1). Fixed.**
+`symmetric_reference()` carried `label="symmetric-reference"`, and the whole
+configuration is passed as a dynamic pytree into the jitted `train_step` and
+`eval_all`. A string is not a valid dynamic leaf, so the first production call
+would have been blocked by the configuration's structure while every existing
+test passed. Numeric coefficients and reporting metadata are now separate
+(`coefficients()` / `coefficient_metadata()`, `symmetric_reference()` /
+`reference_metadata()`), and `assert_numeric_pytree` refuses a non-numeric leaf
+at construction time. `tests/tss_production_probe.py` calls the **actual**
+jitted entrypoints for **every** arm with **x64 OFF**, which is Part A's real
+dtype configuration; the float64 fixtures are not treated as covering it.
+
+**R2 — the memory comparator bypassed its temporal layer (P1). Fixed, twice
+over.** The `Vx e_t` path into the processing fixed point is removed, and a
+test measures that the processing output's derivative with respect to the
+current encoded input is exactly zero at fixed memory state. Separately, the
+comparator's memory is now a bank of **independent complex linear leaky
+units** — the small version of TSS Section 3.3's structure — instead of a dense
+nonlinear `tanh` recurrence, and the arm is renamed
+`tss_memory_then_prospective`. Tests check independence (unit 0's state has
+zero gradient to every other unit's parameters), linearity and stability.
+
+**R3 — batch gradient against the wrong objective (P1). Fixed.** `batch_loss`
+is the objective; every reference gradient, every assembled approximation and
+every loss change refers to it. A test with conflicting per-example gradients
+locks the distinction in.
+
+**R4 — the lowest band contained only DC (P1). Fixed.** Bands are intervals and
+frequencies are drawn continuously inside them; drawn frequencies and realized
+temporal variance are recorded, and a test requires genuine variation in every
+band. The adjoint drive's own spectrum is measured rather than inherited from
+the input's.
+
+**R5 — discrete adjoint compared against a continuous target, and absent
+diagnostics (P1). Fixed.** The continuous comparison is withdrawn. The test is
+now the exact discrete transpose: reverse, apply the **same executed** operator,
+reverse — an identity for a causal LTI map with zero initial state, checked at
+`1e-10` with no tolerance argument. Start / interior / end window diagnostics
+are computed in the runner for **both** layers' teaching variables, and are
+labelled diagnostics rather than interior-only gradients.
+
+**R6 — the leakage check could falsely diagnose leakage (P1). Fixed.** The
+ridge reader is fitted on a **separate** generated set and scored held out,
+calibrated against a **label-permutation null**, with the criterion being the
+null's upper quantile. A deliberately leaking fixture is the positive control
+and must fail. The "upper bound on linear leakage" language is withdrawn: this
+measures what one linear reader extracts, not a bound over classifiers or on
+information.
+
+**R7 — pole and literature claims narrowed (P2). Done.** The matched quantity
+is described as the **matched open-loop denominator** throughout; the
+closed-loop polynomials are tabulated and shown to differ. The error baseline
+is labelled **GLE-inspired**; the exact-phase claim is withdrawn, because the
+executed `E_eps · R_delta` does not retain it. Measured band errors are
+described as **sampled maxima on a finite grid**, not continuum suprema.
+
+**R8 — correctness and scientific verdicts now have distinct enforced outcomes
+(P1). Done.** Predeclared correctness tolerances gate the reference **actually
+used**: identity `1e-9`, forward-vs-reverse `1e-9`, finite differences `1e-5`,
+plus finiteness. A failure sets `FAILED` and refuses dependent interpretation.
+Part A checks finiteness of training and evaluation output, saves final
+parameters and provenance, and re-verifies the fixed-point residual, the RK4
+refinement **and the gradient's drift when the fixed-point iteration count is
+doubled** on the **trained** parameters, not only at seed 100's initialization.
+The scientific rule is committed numerically: *usable* requires mean cosine
+`> 0`, negative-cosine fraction **exactly 0**, and a decrease in the batch
+objective at **both** step norms for **every** seed and band; *preferable*
+additionally requires lower relative error than the GLE-inspired baseline at
+**every** band. An unfavourable verdict leaves the execution status `PASS`.
+Initial-state gradients stay outside the approximate comparison — those initial
+conditions are fixed — and that is recorded, not hidden.
+
+**R9 — the preflight did not cover the actual work (P2). Done.** One cached
+optimizer transform is reused by every arm and seed, so a fresh closure
+identity cannot silently force a retrace, and the production probe checks the
+jit cache does not grow on a second seed. Part B now has a **measured**
+preflight: one full `(seed, band)` evaluation timed with compilation and again
+without it. Its references are jitted and vmapped over trajectories, and the
+error filters are discretized once and advanced over all trajectories in one
+pass. Part A enforces its own sub-deadline **inside** the update loop, the
+launcher gives it an explicit earlier deadline, and a Part A correctness
+failure stops the run instead of letting Part B print a partial comparison
+beside it.
+
+### Parameter counts at the repaired configuration
+
+Recorded, and unequal by construction at a matched state budget:
+`ideal_prospective` 1,145, `tss_finite_adaptation` 689,
+`tss_memory_then_prospective` 1,417, `retained_compartment` 689. No
+capacity-efficiency claim is available from this batch, and a parameter-matched
+comparison remains a prerequisite for one.
+
+### What none of this changes
+
+No issue found in the review is evidence about either model's outcome. These
+are preparation defects; the pilot's question is unchanged and unprejudiced.

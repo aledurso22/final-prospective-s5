@@ -4,7 +4,7 @@ Run by `bin/run_experiments/cluster_tss_pilot.sh` inside the same 600 s cap as
 the pilot itself.
 
 PREDECLARED TOLERANCES:
-    EXACT    1e-10  algebraic identities of the coefficient map, float64
+    EXACT    1e-10  algebraic identities, and the DISCRETE transpose identity
     EQUIV    1e-8   our law against its adaptation twin, forward AND gradient
     IDENT    1e-9   the drive-adjoint identity G_W = sum_t rho_t r_t^T
     FWDREV   1e-9   forward-mode against reverse-mode reference gradients
@@ -14,6 +14,7 @@ PREDECLARED TOLERANCES:
 """
 
 import os
+import subprocess
 import sys
 
 import jax
@@ -28,9 +29,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tasks.dual_recall as TK                                     # noqa: E402
 from s5 import causal_error as CE                                  # noqa: E402
 from s5 import tss_models as TM                                    # noqa: E402
-from s5.tss_cells import (DT, T_HORIZON, drive,                    # noqa: E402
-                          equivalent_adaptation, ideal_fixed_point,
-                          project_contraction, q_roots,
+from s5.tss_cells import (DT, T_HORIZON, assert_numeric_pytree,    # noqa: E402
+                          closed_loop_polynomial, discrete_transpose,
+                          drive, equivalent_adaptation, ideal_fixed_point,
+                          project_contraction, q_roots, reference_metadata,
                           refinement_error, retained_vector_field,
                           rollout_ode, symmetric_reference,
                           tss_gamma_equivalent, tss_vector_field)
@@ -171,10 +173,13 @@ def test_the_fixed_point_solve_converges_under_the_declared_cap():
 
 
 @pytest.mark.parametrize("arm", ["tss_finite_adaptation",
-                                 "retained_compartment",
-                                 "memory_then_prospective"])
+                                 "retained_compartment"])
 def test_the_integrator_has_converged_at_the_declared_substep_count(arm):
-    """Declared method plus a step-refinement check, as the design requires."""
+    """Declared method plus a step-refinement check, as the design requires.
+
+    The memory comparator is absent by construction: its complex linear memory
+    uses an EXACT zero-order hold, so it has no integration step to refine.
+    """
     cfg = TM.coefficients()
     p = TM.init_params(arm, 100)
     xs = jnp.asarray(onp.random.RandomState(6).randn(64, TM.D_ENC))
@@ -182,25 +187,103 @@ def test_the_integrator_has_converged_at_the_declared_substep_count(arm):
     if arm == "tss_finite_adaptation":
         vf = tss_vector_field(p["cell"], cfg["tss"]["tau_m"],
                               cfg["tss"]["eps"], cfg["tss"]["tau_p"])
-        z0 = jnp.zeros((2, n))
-    elif arm == "retained_compartment":
+    else:
         c = cfg["retained"]
         vf = retained_vector_field(p["cell"], c["gamma"], c["T"], c["M"])
-        z0 = jnp.zeros((2, n))
-    else:
-        from s5.tss_cells import leaky_vector_field
-        vf = leaky_vector_field(p["mem"], cfg["memory"]["tau_mem"])
-        z0 = jnp.zeros((n,))
-    err = float(refinement_error(vf, z0, xs, TM.N_SUB))
+    err = float(refinement_error(vf, jnp.zeros((2, n)), xs, TM.N_SUB))
     print(f"  {arm}: refinement error at n_sub={TM.N_SUB} -> {err:.3e}")
     assert err < REFINE, (arm, err)
+
+
+def test_the_execution_config_carries_no_metadata():
+    """R1: a string in the jitted configuration would block production."""
+    assert_numeric_pytree(TM.coefficients(), "coefficients")
+    assert_numeric_pytree(symmetric_reference(), "symmetric_reference")
+    assert "label" not in symmetric_reference()
+    assert reference_metadata()["label"] == "symmetric-reference"
+    with pytest.raises(TypeError, match="non-numeric"):
+        assert_numeric_pytree({"a": 1.0, "b": "text"})
+
+
+def test_the_memory_comparator_cannot_bypass_its_temporal_layer():
+    """R2: the processing stage must see the MEMORY ONLY.
+
+    An earlier revision fed the current encoded input straight into the
+    processing fixed point, so this arm alone could reconstruct the fast signal
+    with its memory ignored. Measured as a DERIVATIVE, not read off the source:
+    holding the memory state fixed, the processing output must not depend on
+    the current encoded input at all.
+    """
+    arm = "tss_memory_then_prospective"
+    p = TM.init_params(arm, 100)
+    sm = jnp.asarray(onp.random.RandomState(1).randn(2 * TM.UNITS[arm]))
+
+    def pros_out(e_t):
+        def it(st, _):
+            return (p["pros"]["W"] @ jnp.tanh(st)
+                    + p["pros"]["Vm"] @ sm + p["pros"]["b"]), None
+        st, _ = jax.lax.scan(it, jnp.zeros((TM.PROCESSING_UNITS,)), None,
+                             length=8)
+        return jnp.sum(st ** 2)
+
+    g = jax.grad(pros_out)(
+        jnp.asarray(onp.random.RandomState(2).randn(TM.D_ENC)))
+    assert float(jnp.max(jnp.abs(g))) == 0.0
+    assert "Vx" not in p["pros"]
+
+
+def test_the_memory_comparator_is_independent_complex_linear_units():
+    """R2: the small version of TSS's memory structure, not a dense tanh net."""
+    from s5.tss_cells import complex_memory_lambda, complex_memory_rollout
+    arm = "tss_memory_then_prospective"
+    p = TM.init_params(arm, 100)
+    lam = complex_memory_lambda(p["mem"])
+    assert lam.shape == (TM.UNITS[arm],)
+    assert float(jnp.max(jnp.real(lam))) < 0.0, "memory must be stable"
+    es = jnp.asarray(onp.random.RandomState(3).randn(24, TM.D_ENC))
+
+    # INDEPENDENT: unit 0's state must not depend on any other unit's parameters
+    def unit0(mem):
+        return jnp.sum(complex_memory_rollout(mem, es)[:, 0] ** 2)
+
+    g = jax.grad(unit0)(p["mem"])
+    for key in ("log_decay", "omega", "W_in_re", "W_in_im"):
+        rest = onp.asarray(g[key])[1:]
+        assert float(onp.max(onp.abs(rest))) == 0.0, key
+    # LINEAR in the encoded input
+    a = complex_memory_rollout(p["mem"], es)
+    b = complex_memory_rollout(p["mem"], 2.0 * es)
+    assert float(jnp.max(jnp.abs(b - 2.0 * a))) < 1e-5
+
+
+def test_closed_loop_poles_differ_even_though_Q_is_matched():
+    """R7: the matched quantity is the OPEN-LOOP denominator.
+
+    Equal Q does not give equal closed-loop poles once f depends on s, so the
+    arms do not start with equal memory and the report must not say they do.
+    """
+    cfg = TM.coefficients()
+    ref, tss = cfg["retained"], cfg["tss"]
+    for a in (-0.5, 0.2, 0.5):
+        r = closed_loop_polynomial(a, gamma=ref["gamma"], T=ref["T"],
+                                   M=ref["M"])
+        t = closed_loop_polynomial(a, tau_m=tss["tau_m"], eps=tss["eps"],
+                                   tau_p=tss["tau_p"])
+        assert abs(r[0] - t[0]) < EXACT and abs(r[2] - t[2]) < EXACT
+        assert abs(r[1] - t[1]) > 1e-6, (a, r, t)
+    # at a = 0 the loop is open and they coincide
+    r0 = closed_loop_polynomial(0.0, gamma=ref["gamma"], T=ref["T"],
+                                M=ref["M"])
+    t0 = closed_loop_polynomial(0.0, tau_m=tss["tau_m"], eps=tss["eps"],
+                                tau_p=tss["tau_p"])
+    assert max(abs(x - y) for x, y in zip(r0, t0)) < EXACT
 
 
 def test_the_state_budget_is_what_is_declared():
     counts = {a: TM.temporal_state_count(a) for a in TM.ARMS}
     assert counts["ideal_prospective"]["total"] == 0
     for a in ("tss_finite_adaptation", "retained_compartment",
-              "memory_then_prospective"):
+              "tss_memory_then_prospective"):
         assert counts[a]["total"] == TM.STATE_BUDGET, (a, counts[a])
 
 
@@ -212,7 +295,7 @@ def test_shared_tensors_are_identical_across_arms_where_shapes_permit():
 
 
 # ------------------------------------------------------------- the task ----
-def test_the_task_is_structured_as_declared_and_does_not_leak():
+def test_the_task_is_structured_as_declared():
     batch = TK.balanced_eval_set()
     st = TK.structure_check(batch)
     for key in ("one_content_symbol_per_step", "exactly_one_write",
@@ -223,10 +306,35 @@ def test_the_task_is_structured_as_declared_and_does_not_leak():
     assert set(st["delay_counts"].values()) == {64}       # 8 classes x 8 reps
     assert set(st["class_counts"].values()) == {24}       # 3 delays x 8 reps
     assert abs(st["signal_variance"] - 1.0) < 0.15, st["signal_variance"]
+
+
+def test_the_leakage_probe_is_held_out_and_calibrated():
+    """R6: a held-out score against a label-permutation null.
+
+    The previous version fitted and scored on the same 192 examples and
+    compared with chance + 0.06. In-sample ridge exploits accidental label
+    associations even under an independent generator, and a ridge solution does
+    not maximize accuracy, so it was neither fair nor the "upper bound" it was
+    called.
+    """
+    batch = TK.balanced_eval_set()
     leak = TK.leakage_probe(batch)
-    print(f"  leakage probe: {leak['accuracy']:.4f} vs chance "
-          f"{leak['chance']:.4f}")
-    assert leak["accuracy"] < leak["chance"] + 0.06, leak
+    print(f"  leakage: held-out {leak['held_out_accuracy']:.4f}  null mean "
+          f"{leak['null_mean']:.4f}  threshold {leak['null_threshold']:.4f}")
+    assert leak["n_fit"] > leak["n_eval"], "the fit set must be separate"
+    assert leak["passed"], leak
+
+
+def test_the_leakage_probe_CATCHES_a_deliberately_leaking_task():
+    """The positive control: a probe that always passes tests nothing."""
+    batch = TK.balanced_eval_set()
+    leaky = TK.make_leaking_batch(batch)
+    fit = TK.make_leaking_batch(TK.generate(onp.random.RandomState(5), 768))
+    res = TK.leakage_probe(leaky, fit_batch=fit)
+    print(f"  leaking fixture: held-out {res['held_out_accuracy']:.4f} vs "
+          f"threshold {res['null_threshold']:.4f}")
+    assert res["held_out_accuracy"] > 0.9, res
+    assert not res["passed"], res
 
 
 def test_the_interventions_change_the_cue_and_preserve_everything_else():
@@ -320,42 +428,76 @@ def test_the_remainder_coefficients_obey_their_stated_inequalities():
 
 
 # ----------------------------------------------------- Part B references ---
+def _pb_setup(seed=0, band=None):
+    from experiments.tss import pilot_b as PB
+    coef = symmetric_reference()
+    params = {k: jnp.asarray(v) for k, v in PB.init_params(seed).items()}
+    rng = onp.random.RandomState(11 + seed)
+    band = band or PB.BANDS[1]
+    xs, fx = PB.band_signals(rng, 4, PB.SEQ_LEN, PB.D_IN, band)
+    ys, _ = PB.band_signals(rng, 4, PB.SEQ_LEN, PB.N_UNITS, band)
+    return PB, coef, params, jnp.asarray(xs), jnp.asarray(ys), fx, band
+
+
+def test_the_declared_bands_actually_vary_in_time():
+    """R4: the previous DFT mask left the lowest band CONSTANT.
+
+    For 64 samples at dt = 1 the first nonzero bin is 2*pi/64 = 0.0982, so a
+    0.05 cutoff retained only DC. Frequencies are now drawn continuously inside
+    each band, and every band must produce genuinely varying signals.
+    """
+    from experiments.tss import pilot_b as PB
+    rng = onp.random.RandomState(7)
+    for band in PB.BANDS:
+        xs, fx = PB.band_signals(rng, 8, PB.SEQ_LEN, PB.D_IN, band)
+        rep = PB.signal_report(xs, fx, band)
+        print(f"  band {band}: temporal variance {rep['temporal_variance']:.4f}"
+              f"  freq [{rep['frequency_min']:.4f}, {rep['frequency_max']:.4f}]")
+        assert rep["temporal_variance"] > 0.05, (band, rep)
+        assert band[0] <= rep["frequency_min"] <= rep["frequency_max"] <= band[1]
+        # not constant in time, per trajectory and channel
+        assert float(onp.min(onp.var(xs, axis=1))) > 1e-6, band
+
+
 def test_the_drive_adjoint_identity_reproduces_the_exact_parameter_gradient():
     """G_W = sum_t rho_t r_t^T must be EXACT for this cascade, not approximate.
 
     If it were not, every approximation would be measured against a reference
     that already disagreed with the true gradient.
     """
-    from experiments.tss import pilot_b as PB
-    coef = symmetric_reference()
-    params = {k: jnp.asarray(v) for k, v in PB.init_params(0).items()}
-    rng = onp.random.RandomState(11)
-    xs = jnp.asarray(PB.band_limited(rng, 1, PB.SEQ_LEN, PB.D_IN, 0.3)[0])
-    ys = jnp.asarray(PB.band_limited(rng, 1, PB.SEQ_LEN, PB.N_UNITS, 0.3)[0])
-    r1, r2 = PB.exact_drive_adjoints(params, xs, ys, coef)
-    _, _, s1, _ = PB.teaching_inputs(params, xs, ys, coef, r2)
-    g_id = PB.assemble_grads(params, xs, s1, r1, r2)
-    g_ref = PB.exact_param_grad(params, xs, ys, coef)
+    PB, coef, params, xs, ys, _, _ = _pb_setup()
+    refs = PB.references(params, xs, ys, coef)
+    g_id = PB.assemble_grads(params, onp.asarray(xs), refs["s1"],
+                             refs["rho1"], refs["rho2"])
     for b in ("W1", "b1", "W2", "b2"):
-        num = float(onp.max(onp.abs(onp.asarray(g_id[b])
-                                    - onp.asarray(g_ref[b]))))
-        den = float(onp.max(onp.abs(onp.asarray(g_ref[b])))) + 1e-12
+        a = onp.asarray(g_id[b]); r = onp.asarray(refs["g_per"][b])
+        num = float(onp.max(onp.abs(a - r)))
+        den = float(onp.max(onp.abs(r))) + 1e-12
         print(f"  identity {b}: rel {num / den:.3e}")
         assert num / den < IDENT, (b, num / den)
+
+
+def test_the_reference_validator_gates_its_own_tolerances():
+    """R8: the reference ACTUALLY used must pass, and the gate must be real."""
+    PB, coef, params, xs, ys, _, _ = _pb_setup(seed=1)
+    refs = PB.references(params, xs, ys, coef)
+    val = PB.validate_reference(params, xs, ys, coef, refs)
+    print("  identity rel:", val["drive_adjoint_identity"]["relative_error"],
+          " fwd/rev:", max(val["forward_vs_reverse_max_abs"].values()),
+          " fd:", max(r["relative"] for r in val["finite_difference_checks"]))
+    assert val["passed"], val
+    # the gate is not vacuous: a corrupted reference must fail it
+    bad = dict(refs, g_per={k: v * 1.5 for k, v in refs["g_per"].items()})
+    assert not PB.validate_reference(params, xs, ys, coef, bad)["passed"]
 
 
 def test_forward_sensitivities_and_finite_differences_confirm_the_reference():
     """Three independent routes to the same gradient, INCLUDING the initial
     states: reverse mode, forward mode, and central differences."""
-    from experiments.tss import pilot_b as PB
-    coef = symmetric_reference()
-    params = {k: jnp.asarray(v) for k, v in PB.init_params(1).items()}
-    rng = onp.random.RandomState(12)
-    xs = jnp.asarray(PB.band_limited(rng, 1, PB.SEQ_LEN, PB.D_IN, 0.3)[0])
-    ys = jnp.asarray(PB.band_limited(rng, 1, PB.SEQ_LEN, PB.N_UNITS, 0.3)[0])
+    PB, coef, params, xs, ys, _, _ = _pb_setup(seed=2)
     d1, d2 = PB.zero_drives()
-    rev = jax.grad(PB.loss)(params, xs, ys, d1, d2, coef)
-    fwd = jax.jacfwd(PB.loss)(params, xs, ys, d1, d2, coef)
+    rev = jax.grad(PB.batch_loss)(params, xs, ys, d1, d2, coef)
+    fwd = jax.jacfwd(PB.batch_loss)(params, xs, ys, d1, d2, coef)
     for b in params:
         assert float(onp.max(onp.abs(onp.asarray(rev[b])
                                      - onp.asarray(fwd[b])))) < FWDREV, b
@@ -366,48 +508,115 @@ def test_forward_sensitivities_and_finite_differences_confirm_the_reference():
         h = 1e-6
         pp = dict(params); pp[b] = params[b] + h * v
         pm = dict(params); pm[b] = params[b] - h * v
-        num = (float(PB.loss(pp, xs, ys, d1, d2, coef))
-               - float(PB.loss(pm, xs, ys, d1, d2, coef))) / (2 * h)
+        num = (float(PB.batch_loss(pp, xs, ys, d1, d2, coef))
+               - float(PB.batch_loss(pm, xs, ys, d1, d2, coef))) / (2 * h)
         ana = float(onp.sum(onp.asarray(rev[b]) * v))
         rel = abs(num - ana) / max(abs(ana), 1e-12)
         print(f"  finite difference {b}: rel {rel:.3e}")
         assert rel < FD, (b, rel, num, ana)
 
 
+def test_loss_change_uses_the_SAME_objective_the_gradient_came_from():
+    """R3: a batch-mean gradient measured against one member's loss.
+
+    The exact gradient of a mean need not decrease an individual member's loss,
+    so the previous mismatch could have rejected the exact reference itself.
+    The fixture below is built so that trajectory 0 DISAGREES with the mean:
+    the exact batch step must decrease the batch objective, and is allowed not
+    to decrease trajectory 0's.
+    """
+    PB, coef, params, xs, ys, _, _ = _pb_setup(seed=3)
+    d1, d2 = PB.zero_drives()
+    g = jax.grad(PB.batch_loss)(params, xs, ys, d1, d2, coef)
+    for sn in PB.STEP_NORMS:
+        dl = PB.loss_change(params, xs, ys, coef, g, sn)
+        print(f"  batch objective change at |step|={sn}: {dl:.3e}")
+        assert dl is not None and dl < 0.0, (sn, dl)
+    # per-example gradients genuinely conflict here, which is what makes the
+    # distinction between the two objectives observable at all
+    per = PB._per_traj_param_grad(params, xs, ys, d1, d2, coef)
+    flat = onp.stack([PB._flat(per, ("W1", "b1", "W2", "b2"), i)
+                      for i in range(xs.shape[0])])
+    cos = (flat @ flat.T) / onp.outer(onp.linalg.norm(flat, axis=1),
+                                      onp.linalg.norm(flat, axis=1))
+    print(f"  min pairwise per-example gradient cosine: {cos.min():.4f}")
+    assert cos.min() < 0.999, "the fixture must not have identical gradients"
+
+
 def test_part_B_is_spatially_feedforward_so_no_backward_loop_exists():
     """Layer 1's drive must not depend on any state, and layer 2's only on s1.
 
-    Measured, not asserted from the source: perturbing a state must not change
-    layer 1's drive.
+    Measured, not asserted from the source.
     """
-    from experiments.tss import pilot_b as PB
-    coef = symmetric_reference()
-    params = {k: jnp.asarray(v) for k, v in PB.init_params(2).items()}
-    rng = onp.random.RandomState(14)
-    xs = jnp.asarray(PB.band_limited(rng, 1, PB.SEQ_LEN, PB.D_IN, 0.3)[0])
-    ys = jnp.asarray(PB.band_limited(rng, 1, PB.SEQ_LEN, PB.N_UNITS, 0.3)[0])
-    # layer 2's drive perturbation must NOT affect layer 1's states
+    PB, coef, params, xs, ys, _, _ = _pb_setup(seed=4)
     d1, d2 = PB.zero_drives()
-    s1a, _ = PB.forward(params, xs, d1, d2, coef)
-    s1b, _ = PB.forward(params, xs, d1, d2.at[10].add(1.0), coef)
+    f = jax.vmap(PB.forward, in_axes=(None, 0, None, None, None))
+    s1a, _ = f(params, xs, d1, d2, coef)
+    s1b, _ = f(params, xs, d1, d2.at[10].add(1.0), coef)
     assert float(jnp.max(jnp.abs(s1a - s1b))) == 0.0
-    del ys
 
 
-def test_the_exact_backward_filter_reproduces_the_adjoint_transfer():
-    """Running H backward in time is H_A, checked against its closed form."""
+def test_the_discrete_transpose_is_the_EXACT_adjoint_of_the_executed_cell():
+    """R5: reverse, apply THE SAME discrete operator, reverse.
+
+    The previous test compared a sampled operator against the CONTINUOUS
+    H(-i omega) at a tight tolerance, which mixes two different transfer
+    functions; refining RK4 substeps cannot remove a sample-and-hold timing
+    difference. For a causal LTI map with zero initial state the reversal
+    identity is exact, so this is checked at 1e-10 and needs no tolerance
+    argument at all.
+    """
+    PB, coef, params, xs, ys, _, _ = _pb_setup(seed=6)
+    rng = onp.random.RandomState(21)
+    L, n = PB.SEQ_LEN, PB.N_UNITS
+    f = jnp.asarray(rng.randn(L, n))
+    c = jnp.asarray(rng.randn(L, n))
+
+    def roll(ff):
+        return PB.cell_rollout(ff, coef, n)
+
+    def J(ff):
+        return jnp.sum(c * roll(ff))
+
+    exact = onp.asarray(jax.grad(J)(f))
+    viarev = onp.asarray(discrete_transpose(roll, c))
+    num = float(onp.max(onp.abs(exact - viarev)))
+    den = float(onp.max(onp.abs(exact))) + 1e-12
+    print(f"  discrete transpose vs autodiff: rel {num / den:.3e}")
+    assert num / den < EXACT, num / den
+
+
+def test_the_verdict_rule_is_applied_mechanically():
+    """R8: the predeclared scientific rule, exercised on synthetic rows."""
     from experiments.tss import pilot_b as PB
-    coef = symmetric_reference()
-    g, T, M = coef["gamma"], coef["T"], coef["M"]
-    L = 512
-    om = 2.0 * onp.pi * 7.0 / L
-    t = onp.arange(L)
-    k = jnp.asarray(onp.cos(om * t)[:, None])
-    out = onp.asarray(PB.exact_backward_filter(k, coef, n_sub=8))[:, 0]
-    mid = slice(L // 4, 3 * L // 4)             # away from both boundaries
-    Href = complex(CE.exact_adjoint_transfer(g, T, M, onp.array([om]))[0])
-    want = onp.real(Href * onp.exp(1j * om * t))[mid]
-    rel = float(onp.max(onp.abs(out[mid] - want))
-                / (onp.max(onp.abs(want)) + 1e-12))
-    print(f"  backward-filter vs H_A: rel {rel:.3e}")
-    assert rel < 5e-3, rel
+    good = dict(mean_cosine=0.9, negative_cosine_fraction=0.0,
+                mean_relative_error=0.1,
+                loss_change={str(sn): dict(approximation=-1e-4,
+                                           reference=-2e-4)
+                             for sn in PB.STEP_NORMS})
+    bad = dict(good, negative_cosine_fraction=0.05)
+    worse = dict(good, loss_change={str(sn): dict(approximation=+1e-4,
+                                                  reference=-2e-4)
+                                    for sn in PB.STEP_NORMS})
+    v = PB.verdict([dict(approximations={"moment_eps0.5": good,
+                                         "reciprocal_eps0.5": bad,
+                                         "x": worse})])
+    assert v["per_filter"]["moment_eps0.5"]["usable"] is True
+    assert v["per_filter"]["reciprocal_eps0.5"]["usable"] is False
+    assert v["per_filter"]["x"]["usable"] is False
+
+
+def test_production_entrypoints_in_the_production_dtype():
+    """R1: x64 is process-global, so the production probe runs separately.
+
+    It calls the ACTUAL jitted `train_step` and `eval_all` for every arm with
+    x64 OFF, which is the configuration Part A runs in and which no float64
+    fixture can stand in for.
+    """
+    probe = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "tss_production_probe.py")
+    env = dict(os.environ, JAX_ENABLE_X64="0")
+    r = subprocess.run([sys.executable, probe], env=env,
+                       capture_output=True, text=True)
+    print(r.stdout[-4000:]); print(r.stderr[-4000:])
+    assert r.returncode == 0, r.stdout + r.stderr

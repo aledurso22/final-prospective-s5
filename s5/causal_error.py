@@ -12,11 +12,15 @@ expansion matches H_A; the phase lead that the true adjoint gets from looking
 forward is supplied here by a lead numerator, and the price is the truncation
 error quantified exactly by `remainder_bound`.
 
-(i) `reciprocal` - the ordinary-prospective / GLE-style baseline, Sections 4-6
+(i) `reciprocal` - a GLE-INSPIRED ordinary-prospective baseline, Sections 4-6
     of CAUSAL_LEARNING_AGENT: the regularized causal inverse E_eps, cascaded
     with R_delta so the error path is strictly proper and carries no algebraic
-    feedthrough. It has the adjoint's phase but NOT its magnitude, with an
-    O(omega^2) low-frequency error.
+    feedthrough. R7: it is NOT a verbatim TSS or GLE learning rule, and it must
+    be labelled GLE-inspired wherever it is reported. The exact UNREGULARIZED
+    inverse 1/H shares the adjoint's phase on the Fourier axis for real
+    coefficients; the EXECUTED product E_eps * R_delta generally does not, so
+    no exact-phase claim is made for what actually runs. Its low-frequency
+    error is O(omega^2).
 
 (ii) `moment_matched` - Section 11, the preferred construction: a stable
      strictly proper filter matching H_A through second order in frequency,
@@ -27,6 +31,8 @@ AUDIT POINTS CARRIED IN CODE, NOT ONLY IN PROSE
 * Cubic asymptotic order does NOT imply a smaller error at every bandwidth.
   `remainder_bound` returns the exact finite-band figure for both, and the
   pilot reports both across predeclared bandwidths rather than choosing one.
+  `measured_band_error` evaluates on a FINITE GRID and therefore returns a
+  SAMPLED maximum, not a proven continuum supremum.
 * Small eps buys accuracy at the cost of gain: the peak can grow like
   2 c2 / (3 sqrt 3 eps^2). `peak_gain_bound` returns (M6); the pilot reports it
   alongside the executed filter poles.
@@ -109,22 +115,38 @@ def zoh(A, B, dt=1.0):
     return E[:n, :n], E[:n, n:]
 
 
-def run_filter(A, B, w, k, dt=1.0):
-    """rhohat over a sequence. `k` is (L, n_units); states start at ZERO.
-
-    Zero initial error states are the causal prescription. The exact adjoint
-    instead has a TERMINAL condition, so the two disagree near the sequence
-    ends by construction; the pilot reports windowed metrics so that this
-    boundary mismatch is visible rather than folded into the total.
-    """
+def discretize(kind, gamma, tau, M, eps, delta, dt=1.0):
+    """Precompute (Ad, Bd, w) once. R9: the pilot reuses these across every
+    trajectory, bandwidth and seed instead of exponentiating per call."""
+    A, B, w = (moment_matched_system(gamma, tau, M, eps) if kind == "moment"
+               else reciprocal_system(gamma, tau, M, eps, delta))
     Ad, Bd = zoh(A, B, dt)
-    L, n_units = k.shape
-    z = onp.zeros((A.shape[0], n_units))
-    out = onp.zeros((L, n_units))
+    return Ad, Bd, w
+
+
+def run_filter_d(Ad, Bd, w, k):
+    """rhohat over a sequence, from PRECOMPUTED discrete matrices.
+
+    `k` is (L, ...): every axis after the first is treated as an independent
+    channel, so a whole batch of trajectories advances in one pass. States
+    start at ZERO, which is the causal prescription; the exact adjoint instead
+    has a TERMINAL condition, so the two disagree near the sequence ends by
+    construction and the pilot reports start/interior/end windows separately.
+    """
+    L = k.shape[0]
+    flat = onp.asarray(k).reshape(L, -1)
+    z = onp.zeros((Ad.shape[0], flat.shape[1]))
+    out = onp.zeros_like(flat)
     for t in range(L):
-        z = Ad @ z + Bd @ k[t][None, :]
+        z = Ad @ z + Bd @ flat[t][None, :]
         out[t] = w @ z
-    return out
+    return out.reshape(k.shape)
+
+
+def run_filter(A, B, w, k, dt=1.0):
+    """Convenience wrapper that discretizes then runs. Prefer `run_filter_d`."""
+    Ad, Bd = zoh(A, B, dt)
+    return run_filter_d(Ad, Bd, w, k)
 
 
 # ------------------------------------------------------------- the audit ---
@@ -186,7 +208,11 @@ def filter_poles(kind, gamma, tau, M, eps, delta):
 
 
 def measured_band_error(kind, gamma, tau, M, eps, delta, Omega, n=513):
-    """sup |K(i w) - H_A(i w)| over |w| <= Omega, MEASURED not bounded."""
+    """SAMPLED max of |K(i w) - H_A(i w)| on a finite grid over |w| <= Omega.
+
+    R7: a finite grid gives a sampled maximum, not a proven supremum over the
+    continuum. It is reported as such.
+    """
     w = onp.linspace(0.0, Omega, n)
     return float(onp.max(onp.abs(transfer(kind, gamma, tau, M, eps, delta, w)
                                  - exact_adjoint_transfer(gamma, tau, M, w))))

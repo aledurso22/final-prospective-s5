@@ -71,6 +71,13 @@ if [ "$rc" -ne 0 ]; then finish FAILED 4 "focused checks did not pass"; fi
 RUN_ID="$STAMP"
 rc_a=0; rc_b=0
 
+# R9: an explicit sub-deadline per part. Part A is capped before the end of the
+# budget so that Part B cannot be squeezed into a partial comparison, and each
+# runner enforces its own deadline in its inner loop rather than relying on the
+# outer watchdog. PART_B_RESERVE_S is measured against Part B's own preflight.
+PART_B_RESERVE_S=${PART_B_RESERVE_S:-200}
+DEADLINE_A=$(( DEADLINE - PART_B_RESERVE_S ))
+
 # ---- 3. Part A: forward-model comparison under exact BPTT
 LEFT=$(( $(remaining) - RESERVE_S ))
 if [ "$LEFT" -le 40 ]; then
@@ -80,12 +87,19 @@ else
   timeout --kill-after="${RESERVE_S}s" --signal=TERM "${LEFT}s" \
     "$PY" -u -m experiments.tss.pilot_a \
       --out_root "$OUT_ROOT" --run_id "$RUN_ID" \
-      --deadline "$(( DEADLINE - 120 ))" --reserve_s "$RESERVE_S" \
+      --deadline "$DEADLINE_A" --reserve_s "$RESERVE_S" \
       > "$LOG_DIR/part_a.log" 2>&1 || rc_a=$?
   echo "--- Part A tail ---"; tail -30 "$LOG_DIR/part_a.log"
   grep -E "TSS_A_STATUS|PREFLIGHT_A_PROJECTED|leakage|\[INCOMPLETE\]" \
     "$LOG_DIR/part_a.log" || true
   echo "Part A raw exit: $rc_a"
+fi
+
+# R9: fail FAST. A correctness or runtime failure in Part A must not be
+# followed by Part B producing a misleading partial comparison beside it.
+if [ "$rc_a" -eq 4 ]; then
+  finish FAILED 4 "Part A failed a correctness check or produced non-finite \
+output; Part B was NOT started"
 fi
 
 # ---- 4. Part B: credit-assignment probe on a frozen forward model
@@ -111,6 +125,8 @@ for rc in "$rc_a" "$rc_b"; do
     *) finish FAILED 4 "a part failed with exit $rc" ;;
   esac
 done
+# An unfavourable SCIENTIFIC verdict is a result and leaves the status PASS;
+# only execution faults change it. The two are reported separately.
 if [ "$rc_a" -eq 0 ] && [ "$rc_b" -eq 0 ]; then
   finish PASS 0 ""
 fi

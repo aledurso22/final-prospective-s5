@@ -24,9 +24,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import tasks.dual_recall as TK                                     # noqa: E402
 from s5 import tss_models as TM                                    # noqa: E402
-from s5.tss_cells import (DT, T_HORIZON, equivalent_adaptation,    # noqa: E402
-                          retained_vector_field, rollout_ode,
-                          symmetric_reference, tss_gamma_equivalent)
+from s5.checkpointing import provenance                            # noqa: E402
+from s5.tss_cells import (DT, IDEAL_ITERS, T_HORIZON,             # noqa: E402
+                          assert_numeric_pytree, equivalent_adaptation,
+                          refinement_error, retained_vector_field,
+                          rollout_ode, symmetric_reference,
+                          tss_gamma_equivalent, tss_vector_field)
 
 SEEDS = (100, 101, 102)
 UPDATES = 300
@@ -36,6 +39,31 @@ BATCH = 16
 #: choosing a rate for the new model alone is exactly what this avoids.
 LR = 3e-3
 GRAD_CLIP = 1.0
+
+#: R8, predeclared CORRECTNESS tolerances. These gate execution validity, not
+#: the scientific verdict: a scientific loss is a result, a NaN or a failed
+#: reference is not valid completed evidence.
+MAX_FIXED_POINT_RESIDUAL = 1e-3      # on the TRAINED parameters
+MAX_REFINEMENT_ERROR = 1e-4          # RK4 factor-4 refinement, relative
+MAX_GRAD_ITER_DRIFT = 1e-3           # gradient at 40 vs 80 fixed-point iters
+
+#: R9: ONE optimizer transform, built once and reused by every arm and seed.
+#: `tx` is a static jit argument, so a fresh `optax.chain(...)` per arm/seed
+#: would have a new object identity and force a retrace each time - which is
+#: exactly what a "one compilation per arm" projection assumes does not happen.
+_TX = None
+
+
+def get_tx():
+    global _TX
+    if _TX is None:
+        _TX = optax.chain(optax.clip_by_global_norm(GRAD_CLIP), optax.adam(LR))
+    return _TX
+
+
+def all_finite(tree):
+    return bool(jax.tree_util.tree_all(jax.tree_util.tree_map(
+        lambda v: bool(onp.all(onp.isfinite(onp.asarray(v)))), tree)))
 
 
 def loss_terms(arm, p, xs, y_sig, y_cls, q_idx, cfg):
@@ -113,6 +141,75 @@ def interventions(arm, p, base, cfg, seed):
               "the distractor stream should not"))
 
 
+def trained_correctness(arm, p, cfg, es, seed):
+    """R8: verify the integrator and the fixed-point solve on the TRAINED
+    parameters actually used for the scores, not only at initialization.
+
+    Three things are checked and all three are gated:
+
+    * the fixed-point residual at the learned weights, for the arms that solve
+      one (a converged residual at seed 100's initialization says nothing about
+      the learned nonlinear map);
+    * the RK4 step-refinement error at the learned vector field;
+    * the drift of the GRADIENT when the fixed-point iteration count is
+      doubled. A small residual does not establish that derivatives through 40
+      unrolled iterations have converged, which is a different question.
+    """
+    out = dict(arm=arm, seed=seed)
+    if arm in ("ideal_prospective", "tss_memory_then_prospective"):
+        _, diag = TM.temporal(arm, p, es, cfg)
+        out["fixed_point_residual_trained"] = float(
+            diag["fixed_point_residual"])
+        out["fixed_point_ok"] = bool(out["fixed_point_residual_trained"]
+                                     < MAX_FIXED_POINT_RESIDUAL)
+
+        def head(pp, iters):
+            s_out, _ = TM.temporal(arm, pp, es[:16], cfg, iters=iters)
+            return jnp.sum(s_out ** 2)
+
+        g40 = jax.grad(head)(p, IDEAL_ITERS)
+        g80 = jax.grad(head)(p, 2 * IDEAL_ITERS)
+        num = float(optax.global_norm(
+            jax.tree_util.tree_map(lambda a, b: a - b, g40, g80)))
+        den = float(optax.global_norm(g40)) + 1e-12
+        out["gradient_iteration_drift"] = num / den
+        out["gradient_iteration_ok"] = bool(num / den < MAX_GRAD_ITER_DRIFT)
+    else:
+        out["fixed_point_ok"] = True
+        out["gradient_iteration_ok"] = True
+
+    if arm in ("tss_finite_adaptation", "retained_compartment"):
+        n = TM.UNITS[arm]
+        if arm == "tss_finite_adaptation":
+            c = cfg["tss"]
+            vf = tss_vector_field(p["cell"], c["tau_m"], c["eps"], c["tau_p"])
+        else:
+            c = cfg["retained"]
+            vf = retained_vector_field(p["cell"], c["gamma"], c["T"], c["M"])
+        err = float(refinement_error(vf, jnp.zeros((2, n)), es, TM.N_SUB))
+        out["refinement_error_trained"] = err
+        out["refinement_ok"] = bool(err < MAX_REFINEMENT_ERROR)
+    else:
+        out["refinement_ok"] = True
+        out["refinement_error_trained"] = None
+        if arm == "tss_memory_then_prospective":
+            out["refinement_note"] = ("the complex linear memory uses EXACT "
+                                      "zero-order hold; there is no "
+                                      "integration step to refine")
+    out["passed"] = bool(out["fixed_point_ok"] and out["refinement_ok"]
+                         and out["gradient_iteration_ok"])
+    return out
+
+
+def save_tree(path, tree):
+    from flax import serialization
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(serialization.to_bytes(
+            jax.tree_util.tree_map(lambda v: onp.asarray(v), tree)))
+    return path
+
+
 def jsonable(o):
     if isinstance(o, onp.integer):
         return int(o)
@@ -149,7 +246,7 @@ def preflight(cfg, status):
     rows, total = [], 0.0
     for arm in TM.ARMS:
         p = TM.init_params(arm, SEEDS[0])
-        tx = optax.chain(optax.clip_by_global_norm(GRAD_CLIP), optax.adam(LR))
+        tx = get_tx()
         opt = tx.init(p)
         t0 = time.time()
         p2, opt2, loss, aux, gn = train_step(arm, tx, p, opt, *args, cfg)
@@ -160,7 +257,7 @@ def preflight(cfg, status):
             p2, opt2, loss, aux, gn = train_step(arm, tx, p2, opt2, *args, cfg)
         loss.block_until_ready()
         step_s = (time.time() - t1) / 3.0
-        arm_s = len(SEEDS) * (compile_s * 0 + UPDATES * step_s) + compile_s
+        arm_s = compile_s + len(SEEDS) * UPDATES * step_s
         total += arm_s
         rows.append(dict(arm=arm, compile_s=compile_s, step_s=step_s,
                          arm_total_s=arm_s,
@@ -171,11 +268,17 @@ def preflight(cfg, status):
               f"params {TM.parameter_count(p):5d}  "
               f"states {TM.temporal_state_count(arm)['total']:3d}")
         del p2, opt2
-    host_s = 45.0          # evaluation, interventions and probes
+    # evaluation, interventions, probes, checkpoints and the post-training
+    # correctness checks. An allowance, measured only as such.
+    host_s = 60.0
     total += host_s
-    status["preflight"] = dict(rows=rows, host_allowance_s=host_s,
-                               projected_total_s=total,
-                               scope="compile once per arm plus seeds x updates")
+    status["preflight"] = dict(
+        rows=rows, host_allowance_s=host_s, projected_total_s=total,
+        optimizer_transform_reused=True,
+        scope=("compile once per arm - the optimizer transform is a single "
+               "cached object, so a new closure identity cannot silently "
+               "force a retrace - plus seeds x updates, evaluation, "
+               "interventions, checkpoints and the post-training checks"))
     print(f"PREFLIGHT_A_PROJECTED_TOTAL_S={total:.1f}")
     return total
 
@@ -203,7 +306,8 @@ def main():
         raise SystemExit(f"REFUSING: backend is {backend!r}, not 'gpu'.")
     jax.config.update("jax_default_matmul_precision", args.matmul_precision)
 
-    cfg = TM.coefficients()
+    cfg = assert_numeric_pytree(TM.coefficients(), "Part A cfg")
+    meta = TM.coefficient_metadata()
     seeds = [int(s) for s in args.seeds.split(",")]
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     out = os.path.join(args.out_root, run_id, "part_a")
@@ -220,7 +324,8 @@ def main():
         part="A", run_id=run_id, out=out, backend=backend, seeds=seeds,
         arms=list(TM.ARMS), updates=args.updates, batch=BATCH, lr=LR,
         grad_clip=GRAD_CLIP, dt=DT, clock="one input step = one unit of time",
-        coefficients=cfg, symmetric_reference=ref,
+        coefficients=cfg, coefficient_metadata=meta,
+        closed_loop=TM.closed_loop_report(cfg), symmetric_reference=ref,
         state_budget=TM.STATE_BUDGET,
         state_counts={a: TM.temporal_state_count(a) for a in TM.ARMS},
         task=dict(structure=struct, leakage_probe=leak,
@@ -234,9 +339,25 @@ def main():
                    "circuit inequality excludes the TSS-matched sector. They "
                    "are not equivalent realizations and not different model "
                    "classes."),
-            shared_poles=("arms 2 and 4 are given the same Q roots, so they "
-                          "differ only in the prospective zero: f + T f' "
-                          "against f + 2T f'")),
+            matched_open_loop_denominator=(
+                "arms 2 and 4 share the OPEN-LOOP denominator Q, so they "
+                "differ only in the prospective zero: f + T f' against "
+                "f + 2T f'. R7: this does NOT equalize closed-loop poles once "
+                "f = W tanh(s) + Ux + b; see `closed_loop` for the "
+                "characteristic polynomials at frozen Jacobian eigenvalues."),
+            memory_comparator=(
+                "arm 3's memory is a bank of INDEPENDENT COMPLEX LINEAR leaky "
+                "units - the small version of TSS Section 3.3's structure - "
+                "with an exact zero-order hold and NO direct encoded-input "
+                "path into its processing stage. Its stateless processing "
+                "stage remains a declared reduction.")),
+        correctness_tolerances=dict(
+            fixed_point_residual=MAX_FIXED_POINT_RESIDUAL,
+            refinement_error=MAX_REFINEMENT_ERROR,
+            gradient_iteration_drift=MAX_GRAD_ITER_DRIFT,
+            note=("R8: these gate EXECUTION VALIDITY. A scientific loss is a "
+                  "result and leaves the status PASS; a NaN or a failed "
+                  "reference is not valid completed evidence and sets FAILED.")),
         interpretation=dict(
             what_this_tests="usefulness of the temporal FORWARD model under a "
                             "common accurate optimizer (exact BPTT)",
@@ -251,8 +372,21 @@ def main():
         results=[], incomplete=[])
     print(f"[*] out={out} backend={backend} seeds={seeds}")
     print(f"[*] task structure: {struct}")
-    print(f"[*] leakage probe (must be near {leak['chance']:.3f}): "
-          f"{leak['accuracy']:.4f}")
+    print(f"[*] leakage probe: held-out {leak['held_out_accuracy']:.4f} vs "
+          f"permutation null {leak['null_threshold']:.4f} "
+          f"(chance {leak['chance']:.4f}) -> "
+          f"{'PASS' if leak['passed'] else 'FAIL'}")
+    if not leak["passed"]:
+        # R6/R8: a leaking task would make every recall number mean something
+        # else, so this invalidates the run rather than being noted in passing.
+        status["failed"] = (f"leakage probe FAILED: held-out "
+                            f"{leak['held_out_accuracy']:.4f} exceeds the "
+                            f"permutation null threshold "
+                            f"{leak['null_threshold']:.4f}")
+        write(os.path.join(out, "status.json"), status)
+        print(f"[FAIL] {status['failed']}")
+        print(f"TSS_A_STATUS=FAILED out={out}")
+        return 4
     print(f"[*] TSS matched point maps to gamma={tss_eq['gamma']:.6g}, "
           f"admissible under M<=gamma*T: {tss_eq['admissible']}")
     write(os.path.join(out, "status.json"), status)
@@ -271,7 +405,7 @@ def main():
         print(f"TSS_A_STATUS=INCOMPLETE out={out}")
         return 3
 
-    rows = []
+    rows, checks = [], []
     init_by_arm = {}
     for seed in seeds:
         if left() < 20:
@@ -286,27 +420,70 @@ def main():
                 continue
             p = TM.init_params(arm, seed)
             init_by_arm.setdefault(seed, {})[arm] = p
-            tx = optax.chain(optax.clip_by_global_norm(GRAD_CLIP),
-                             optax.adam(LR))
+            tx = get_tx()
             opt = tx.init(p)
-            curve, t_a = [], time.time()
+            curve, t_a, stopped = [], time.time(), None
             for i, (xs, ysig, ycls, q, _m) in enumerate(stream):
+                # R9: the INNER loop honours this part's own sub-deadline.
+                # Relying on the outer watchdog would let Part A eat the whole
+                # budget and leave Part B a partial comparison.
+                if i % 25 == 0 and left() < 5:
+                    stopped = i
+                    break
                 p, opt, loss, aux, gn = train_step(
                     arm, tx, p, opt, jnp.asarray(xs), jnp.asarray(ysig),
                     jnp.asarray(ycls), jnp.asarray(q), cfg)
                 if i % 25 == 0 or i == args.updates - 1:
-                    curve.append(dict(update=i, loss=float(loss),
-                                      mse=float(aux["mse"]),
-                                      ce=float(aux["ce"]),
-                                      train_acc=float(aux["acc"]),
-                                      grad_norm=float(gn)))
+                    rec = dict(update=i, loss=float(loss),
+                               mse=float(aux["mse"]), ce=float(aux["ce"]),
+                               train_acc=float(aux["acc"]),
+                               grad_norm=float(gn))
+                    if not all(onp.isfinite(v) for v in rec.values()):
+                        status["failed"] = (f"seed {seed} arm {arm}: "
+                                            f"non-finite training output at "
+                                            f"update {i}: {rec}")
+                        write(os.path.join(out, "status.json"), status)
+                        print(f"[FAIL] {status['failed']}")
+                        print(f"TSS_A_STATUS=FAILED out={out}")
+                        return 4
+                    curve.append(rec)
             wall = time.time() - t_a
+            if stopped is not None:
+                status["incomplete"].append(
+                    f"seed {seed} arm {arm}: stopped at update {stopped} "
+                    f"(budget); NOT scored")
+                write(os.path.join(out, "status.json"), status)
+                continue
             ev = evaluate(arm, p, eval_batch, cfg)
             iv = interventions(arm, p, eval_batch, cfg, seed)
             ev.pop("logits", None)
+            # R8: correctness on the TRAINED parameters, and finite metrics
+            es_probe = TM.encode(p, jnp.asarray(eval_batch[0][0]))
+            chk = trained_correctness(arm, p, cfg, es_probe, seed)
+            checks.append(chk)
+            if not chk["passed"]:
+                status["failed"] = (f"seed {seed} arm {arm}: trained-parameter "
+                                    f"correctness check FAILED: {chk}")
+                status["checks"] = checks
+                write(os.path.join(out, "status.json"), status)
+                print(f"[FAIL] {status['failed']}")
+                print(f"TSS_A_STATUS=FAILED out={out}")
+                return 4
+            numeric = {k: v for k, v in ev.items()
+                       if isinstance(v, (int, float))}
+            if not all(onp.isfinite(v) for v in numeric.values()):
+                status["failed"] = (f"seed {seed} arm {arm}: non-finite "
+                                    f"evaluation metric: {numeric}")
+                write(os.path.join(out, "status.json"), status)
+                print(f"TSS_A_STATUS=FAILED out={out}")
+                return 4
+            save_tree(os.path.join(out, "params",
+                                   f"final_seed{seed}_{arm}.msgpack"), p)
             row = dict(seed=seed, arm=arm, wall_s=wall, curve=curve,
                        params=TM.parameter_count(p),
                        state_counts=TM.temporal_state_count(arm),
+                       local_jacobian=TM.local_jacobian_report(arm, p),
+                       trained_checks=chk,
                        **ev, interventions=iv)
             rows.append(row)
             status["results"] = rows
@@ -321,6 +498,8 @@ def main():
         s0 = sorted(init_by_arm)[0]
         status["shared_tensors_at_seed_%d" % s0] = TM.shared_tensor_report(
             init_by_arm[s0])
+    status["checks"] = checks
+    status["provenance"] = provenance()
 
     # paired differences, per seed, against every other arm
     by = {(r["seed"], r["arm"]): r for r in rows}
