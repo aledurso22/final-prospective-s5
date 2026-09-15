@@ -444,6 +444,35 @@ additionally requires lower relative error than the GLE-inspired baseline at
 Initial-state gradients stay outside the approximate comparison — those initial
 conditions are fixed — and that is recorded, not hidden.
 
+**Amendment, 16 September 2026: the model is batch-native, with no `vmap`
+around the temporal layer.** The component breakdown added for exactly this
+purpose settled it in one run (`17f009e`, logs `20260916-014155`):
+
+```
+tss_memory_then_prospective   step 2942.87 ms
+   components temporal_forward=0.49ms  temporal_grad=1.61ms
+              memory_forward=0.18ms    processing_forward=0.45ms
+```
+
+The temporal layer is **fast**. A single sequence's temporal gradient is
+1.61 ms, and the ODE arms scale from their single-sequence cost as expected
+(1.74 ms x 16 ~ 27 ms). This arm did not: 1.61 ms to 2943 ms is a factor of
+about 1800. The pathology was the **nested `vmap` over the batch**, not the
+recurrence, and both earlier performance fixes were aimed at the wrong thing.
+That is what a measured breakdown buys over a plausible hypothesis, and it is
+why the breakdown was added instead of a third guess.
+
+Every temporal law here contracts on trailing axes, so `batched_forward` now
+moves time to the front and runs the batch through the model directly, with
+**no `vmap` at all**. `drive` is written `tanh(s) @ W.T + x @ U.T + b`, the same
+function on a single sequence and on a batch, and the ODE carries take shape
+`(2, <batch dims>, units)`. A test checks every arm's batched path against its
+one-sequence path, outputs **and** gradients.
+
+The earlier associative-scan and vectorized-fixed-point changes are kept: they
+were not the bottleneck, but they are correct, cheaper, and independently
+tested against sequential references.
+
 **Amendment, 16 September 2026: the memory bank is a real block associative
 scan.** The second preflight (`e60522d`, logs `20260916-013216`) confirmed the
 fixed-point fix — the ideal control fell from 94.06 ms to **2.83 ms** per
