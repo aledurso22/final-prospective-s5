@@ -245,13 +245,14 @@ def _time(fn, *a, n=3):
     return compile_s, (time.time() - t1) / n
 
 
-def component_timing(arm, p, cfg, es):
-    """Where an arm's time actually goes: forward vs backward, and for the
-    memory comparator, memory against processing.
+def component_timing(arm, p, cfg, es, args=None, tx=None, opt=None):
+    """Bisect the training step, stage by stage.
 
-    Added after a preflight measured the memory arm 54x slower than the ODE
-    arms and a first fix moved it barely at all: guessing at a cost twice is
-    one guess too many, so the breakdown is measured and printed.
+    The first breakdown showed the temporal layer was fast while the step was
+    not, which ruled out the recurrence but did not locate the cost. This
+    version times EVERY stage the step performs - encode, temporal forward and
+    gradient, readout, the full loss gradient, the optimizer update and the
+    projection - so the remainder is not somewhere unmeasured.
     """
     out = {}
     # `es` arrives BATCHED and time-first, exactly as production supplies it,
@@ -274,6 +275,33 @@ def component_timing(arm, p, cfg, es):
         pro = jax.jit(lambda pp: TM.processing_fixed_point(pp["pros"], sm)[0])
         _, tp = _time(pro, p)
         out["processing_forward_ms"] = 1e3 * tp
+
+    if args is not None:
+        enc = jax.jit(lambda pp: TM.encode(pp, args[0]))
+        _, te = _time(enc, p)
+        out["encode_ms"] = 1e3 * te
+        s_out = TM.temporal(arm, p, es, cfg)[0]
+        s_bt = jnp.swapaxes(s_out, 0, 1)
+        ro = jax.jit(lambda pp: TM.readout(pp, s_bt)[1])
+        _, tr = _time(ro, p)
+        out["readout_ms"] = 1e3 * tr
+        lg = jax.jit(jax.value_and_grad(
+            lambda pp: loss_terms(arm, pp, *args, cfg)[0]))
+        _, tl = _time(lg, p)
+        out["loss_value_and_grad_ms"] = 1e3 * tl
+        proj = jax.jit(lambda pp: TM.project_params(arm, pp))
+        _, tj = _time(proj, p)
+        out["project_params_ms"] = 1e3 * tj
+        if tx is not None and opt is not None:
+            g = jax.grad(lambda pp: loss_terms(arm, pp, *args, cfg)[0])(p)
+
+            def upd(pp, gg, oo):
+                u, oo = tx.update(gg, oo, pp)
+                return optax.apply_updates(pp, u)
+
+            jupd = jax.jit(upd)
+            _, tu = _time(jupd, p, g, opt)
+            out["optimizer_update_ms"] = 1e3 * tu
     return out
 
 
@@ -309,7 +337,7 @@ def preflight(cfg, status):
                          params=TM.parameter_count(p),
                          state=TM.temporal_state_count(arm)))
         es = jnp.swapaxes(TM.encode(p, args[0]), 0, 1)   # (L, B, D_ENC)
-        comp = component_timing(arm, p, cfg, es)
+        comp = component_timing(arm, p, cfg, es, args=args, tx=tx, opt=opt)
         rows[-1]["components_ms"] = comp
         print(f"[preflight] {arm:24s} compile {compile_s:6.1f}s  "
               f"step {step_s * 1e3:7.2f}ms  arm {arm_s:6.1f}s  "
