@@ -107,6 +107,28 @@ and the excluded corner is kept as a regression test asserting it really is
 non-finite, so the bound stays a measured limit rather than unnecessary
 caution.
 
+**Second amendment, same date, also from measurement: the float32 probe's
+matmul precision.** Its first cluster run reported a 17% discrepancy for
+`log_response_gamma` against a 5e-3 gate. The cause was the probe, not the
+gradient: it never set the matmul precision, so it ran at the GPU's TF32
+default while training runs at `highest`. TF32's ~10-bit mantissa puts a
+relative error of order `1e-4`-`1e-3` on the loss, and the finite-difference
+signal here is `2 h g / loss ~ 6e-5` — **the same order as the noise**, so the
+difference measured the matmul mode rather than the derivative. Measured
+float32 error at `highest` precision:
+
+| step | 1e-1 | 3e-2 | **1e-2** | 3e-3 | 1e-3 | 1e-4 |
+|---|---|---|---|---|---|---|
+| `log_response_gamma` | 5.9e-2 | 5.4e-3 | **2.3e-3** | 3.4e-3 | 3.9e-2 | 5.8e-2 |
+| `log_response_rho` | 1.0e-2 | 1.0e-3 | **1.6e-3** | 7.2e-3 | 7.2e-3 | 8.8e-2 |
+
+The probe now sets `highest` precision, matching production, and reports three
+steps so a future failure is diagnosable. **The 5e-3 tolerance is unchanged**;
+the step 1e-2 is declared from the measured minimum region, where both leaves
+sit under it. The other float32 probes in the repository already scoped their
+measurement this way; this new one did not, and the same fix was applied to the
+superseded adaptive probe.
+
 **Gradient correctness was checked, not assumed.** The same probe compared the
 analytic directional derivative against central differences at six step sizes
 in float64: the relative error falls `8.9e-3 -> 8.0e-4 -> 9.4e-5 -> 1.9e-5` as

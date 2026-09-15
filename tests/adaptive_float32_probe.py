@@ -19,6 +19,12 @@ import jax.numpy as jnp                                          # noqa: E402
 import numpy as onp                                              # noqa: E402
 
 assert not jax.config.read("jax_enable_x64"), "x64 must be OFF in this probe"
+
+# Match production precision, for the same reason as the constrained probe: at
+# the GPU's TF32 default the loss carries a relative error of order 1e-4..1e-3,
+# which swamps a finite-difference signal of order 1e-4 and makes the check
+# measure the matmul mode rather than the gradient.
+jax.config.update("jax_default_matmul_precision", "highest")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from jax.scipy.linalg import block_diag                          # noqa: E402
