@@ -308,6 +308,38 @@ def test_closed_loop_poles_differ_even_though_Q_is_matched():
     assert max(abs(x - y) for x, y in zip(r0, t0)) < EXACT
 
 
+@pytest.mark.parametrize("arm", list(TM.ARMS))
+def test_the_batched_path_equals_the_single_sequence_path(arm):
+    """The batch-native rewrite must not change any arm's function.
+
+    `batched_forward` no longer wraps the model in `vmap`; every temporal law
+    contracts on trailing axes and the batch axis rides along. That is a
+    performance change with an identical-mathematics claim attached, so it is
+    checked against the one-sequence path for every arm, outputs AND gradients.
+    """
+    cfg = TM.coefficients()
+    p = TM.init_params(arm, 100)
+    rs = onp.random.RandomState(41)
+    xs = jnp.asarray(rs.randn(3, 24, TK.N_CHANNELS))
+    y_sig, y_cls, diag = TM.batched_forward(arm, p, xs, cfg)
+    assert y_sig.shape == (3, 24) and y_cls.shape == (3, 24, TK.N_CLASSES)
+    for i in range(3):
+        a_sig, a_cls, _ = TM.forward(arm, p, xs[i], cfg)
+        assert float(jnp.max(jnp.abs(a_sig - y_sig[i]))) < EQUIV, (arm, i)
+        assert float(jnp.max(jnp.abs(a_cls - y_cls[i]))) < EQUIV, (arm, i)
+    w = jnp.asarray(rs.randn(*y_cls.shape))
+    gb = jax.grad(lambda pp: jnp.sum(
+        w * TM.batched_forward(arm, pp, xs, cfg)[1]))(p)
+    gs = jax.grad(lambda pp: sum(
+        jnp.sum(w[i] * TM.forward(arm, pp, xs[i], cfg)[1]) for i in range(3)))(p)
+    flat_b = jax.tree_util.tree_leaves(gb)
+    flat_s = jax.tree_util.tree_leaves(gs)
+    for a_, b_ in zip(flat_b, flat_s):
+        d = float(jnp.max(jnp.abs(a_ - b_)))
+        sc = float(jnp.max(jnp.abs(b_))) + 1.0
+        assert d / sc < EQUIV, (arm, d / sc)
+
+
 def test_the_state_budget_is_what_is_declared():
     counts = {a: TM.temporal_state_count(a) for a in TM.ARMS}
     assert counts["ideal_prospective"]["total"] == 0

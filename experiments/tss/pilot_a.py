@@ -254,6 +254,10 @@ def component_timing(arm, p, cfg, es):
     one guess too many, so the breakdown is measured and printed.
     """
     out = {}
+    # `es` arrives BATCHED and time-first, exactly as production supplies it,
+    # so these numbers are comparable with the full step rather than with a
+    # single sequence. Measuring one sequence is what previously made the
+    # temporal layer look fast while the step took three seconds.
     fwd = jax.jit(lambda pp: TM.temporal(arm, pp, es, cfg)[0])
     c, t = _time(fwd, p)
     out["temporal_forward_ms"] = 1e3 * t
@@ -304,7 +308,7 @@ def preflight(cfg, status):
                          arm_total_s=arm_s,
                          params=TM.parameter_count(p),
                          state=TM.temporal_state_count(arm)))
-        es = TM.encode(p, args[0][0])
+        es = jnp.swapaxes(TM.encode(p, args[0]), 0, 1)   # (L, B, D_ENC)
         comp = component_timing(arm, p, cfg, es)
         rows[-1]["components_ms"] = comp
         print(f"[preflight] {arm:24s} compile {compile_s:6.1f}s  "

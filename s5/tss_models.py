@@ -282,19 +282,18 @@ def temporal(arm, p, es, cfg, n_sub=N_SUB, iters=IDEAL_ITERS):
         ss, res = fixed_point_over_time(p["cell"]["W"], base, iters)
         return ss, dict(fixed_point_residual=res)
 
-    if arm == "tss_finite_adaptation":
-        c = cfg["tss"]
-        vf = tss_vector_field(p["cell"], c["tau_m"], c["eps"], c["tau_p"])
-        z0 = jnp.zeros((2, UNITS[arm]))
+    if arm in ("tss_finite_adaptation", "retained_compartment"):
+        if arm == "tss_finite_adaptation":
+            c = cfg["tss"]
+            vf = tss_vector_field(p["cell"], c["tau_m"], c["eps"], c["tau_p"])
+        else:
+            c = cfg["retained"]
+            vf = retained_vector_field(p["cell"], c["gamma"], c["T"], c["M"])
+        # carry shape (2, <batch dims>, units): the leading 2 is the (s, v) or
+        # (s, p) pair, everything between is whatever batch axes `es` carries
+        z0 = jnp.zeros((2,) + es.shape[1:-1] + (UNITS[arm],))
         zs, _ = rollout_ode(vf, z0, es, n_sub)
-        return zs[:, 0, :], dict(fixed_point_residual=jnp.asarray(0.0))
-
-    if arm == "retained_compartment":
-        c = cfg["retained"]
-        vf = retained_vector_field(p["cell"], c["gamma"], c["T"], c["M"])
-        z0 = jnp.zeros((2, UNITS[arm]))
-        zs, _ = rollout_ode(vf, z0, es, n_sub)
-        return zs[:, 0, :], dict(fixed_point_residual=jnp.asarray(0.0))
+        return zs[:, 0], dict(fixed_point_residual=jnp.asarray(0.0))
 
     if arm == "tss_memory_then_prospective":
         # exact ZOH on the linear complex memory; no integration error here
@@ -319,8 +318,23 @@ def forward(arm, p, xs, cfg, n_sub=N_SUB, iters=IDEAL_ITERS):
 
 
 def batched_forward(arm, p, xs, cfg, n_sub=N_SUB, iters=IDEAL_ITERS):
-    f = lambda x: forward(arm, p, x, cfg, n_sub, iters)      # noqa: E731
-    y_sig, y_cls, diag = jax.vmap(f)(xs)
+    """The whole batch through the model with NO `vmap` around the temporal
+    layer.
+
+    Every temporal law here contracts on trailing axes, so a batch axis can
+    simply ride along. That is not cosmetic. Wrapping the model in `vmap`, the
+    memory comparator measured 2943 ms per training update while a SINGLE
+    sequence's temporal gradient measured 1.61 ms - a factor of about 1800,
+    where the ODE arms scaled as expected (1.74 ms x 16 ~ 27 ms). The
+    pathology was the nested `vmap` over an associative scan, not the
+    recurrence, which the preflight's component breakdown is what established.
+
+    Time leads inside the temporal layer because the scans are over time; the
+    batch axis is moved in and back out around it.
+    """
+    es = jnp.swapaxes(encode(p, xs), 0, 1)                  # (L, B, D_ENC)
+    s_out, diag = temporal(arm, p, es, cfg, n_sub, iters)   # (L, B, n_out)
+    y_sig, y_cls = readout(p, jnp.swapaxes(s_out, 0, 1))
     return y_sig, y_cls, jax.tree_util.tree_map(jnp.max, diag)
 
 

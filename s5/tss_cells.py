@@ -199,8 +199,13 @@ def drive(params, s, x):
 
     The arms differ ONLY in the temporal operator applied to this same drive,
     which is what makes the comparison about the temporal law.
+
+    Written with trailing-axis contractions (`@ W.T`) so the SAME code runs on
+    one sequence, shape (n,), and on a batch, shape (B, n). That is what lets
+    the model be batch-native instead of wrapped in `vmap`; see
+    `tss_models.batched_forward` for why that matters.
     """
-    return params["W"] @ jnp.tanh(s) + params["U"] @ x + params["b"]
+    return (jnp.tanh(s) @ params["W"].T + x @ params["U"].T + params["b"])
 
 
 def _rk4(vf, z, x, n_sub, dt=DT):
@@ -411,8 +416,7 @@ def complex_memory_rollout(params, es, dt=DT):
     br = (pr * ur - pi * ui) * dt                    # Re(Phi u) dt
     bi = (pr * ui + pi * ur) * dt
     b = jnp.stack([br, bi], axis=-1)                 # (L,P,2)
-    L = es.shape[0]
-    A_elems = jnp.broadcast_to(A_block, (L,) + A_block.shape)
+    A_elems = jnp.broadcast_to(A_block, es.shape[:-1] + A_block.shape)
     _, zs = jax.lax.associative_scan(block_binary_operator, (A_elems, b))
     return jnp.concatenate([zs[..., 0], zs[..., 1]], axis=-1)      # (L, 2P)
 
