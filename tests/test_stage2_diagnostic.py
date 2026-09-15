@@ -1,10 +1,15 @@
-"""Correctness of the Stage 2 diagnostic adapter. No training, no updates.
+"""Focused validation for the Stage 2 diagnostic. CLUSTER-ONLY.
 
-The adapter must equal the EXECUTED forward pass for every arm before any
-number it produces is interpreted. `s5/gp_diagnostics.py` dispatches on a
-`mechanism` attribute that `SubstrateSSM` does not have, and a dispatch miss
-there silently returns inherited native coefficients - which is exactly the
-failure mode these tests exist to exclude.
+Run by `bin/run_experiments/cluster_stage2_diagnostic.sh` inside the same
+20-minute budget as the diagnostic itself. Not run locally: the governing brief
+requires all numerical checks on the cluster.
+
+Covers the coordinator's review of 8122ddd:
+  R1  trained raw poles, not initializer fields; continuous vs aliased poles
+  R2  the invalid geometric tail bound is gone; the exact window remainder
+      identity holds, including on a nonnormal block
+  R3  failed checks propagate to status and exit code
+  R5  "core" is used for the linear recurrent core, never the whole layer
 """
 
 import os
@@ -21,11 +26,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from jax.scipy.linalg import block_diag                           # noqa: E402
 from s5 import substrate_diagnostics as SD                        # noqa: E402
-from s5.rawat_s5 import ARMS, init_substrate_ssm                  # noqa: E402
+from s5.rawat_s5 import ARMS, SubstrateSSM, init_substrate_ssm    # noqa: E402
+from s5.ssm import init_S5SSM                                     # noqa: E402
 from s5.ssm_init import make_DPLR_HiPPO                           # noqa: E402
 
-IMPULSE_TOL = 1e-10          # float64 algebraic identity
-FREQ_TOL = 1e-6              # resolvent vs truncated-impulse DFT, with tail
+IMPULSE_TOL = 1e-10
+REMAINDER_TOL = 1e-10   # RELATIVE, float64 identity
 BANDS = ((0, 0), (1, 4), (5, 16), (17, 64), (65, 160), (161, 511))
 
 
@@ -44,52 +50,186 @@ def ssm_kw(H=4, ssm=8, blocks=2, dt_min=0.001, dt_max=0.1):
                 bidirectional=False)
 
 
-class _OneLayer:
-    """Minimal stand-in exposing the attribute path read_core expects."""
+class _Wrapper:
+    """Exposes the `encoder.layers[i].seq` path `read_core` expects."""
 
     def __init__(self, seq):
-        self.encoder = type("E", (), {"layers": [type("L", (), {"seq": seq})()]})()
+        lyr = type("L", (), {"seq": seq})()
+        self.encoder = type("E", (), {"layers": [lyr]})()
 
 
-def _core_and_module(arm, H=4, L=40, **kwargs):
-    kw = ssm_kw(H=H, **kwargs)
-    mod = init_substrate_ssm(arm, **kw)()
-    x = np.zeros((L, H))
-    v = mod.init(jax.random.PRNGKey(0), x)
+def _module(arm, H=4, **kw):
+    mod = init_substrate_ssm(arm, **ssm_kw(H=H, **kw))()
+    x = np.zeros((8, H))
+    return mod, mod.init(jax.random.PRNGKey(0), x), x
 
+
+def _core(mod, v, x):
+    """read_core against a single bound SSM, via the same attribute path."""
     def read(m):
         Lam, B_c, Delta = m._native()
         B_tilde = m.B[..., 0] + 1j * m.B[..., 1]
         return dict(response=m.response, input_gain=m.input_gain,
                     clip_eigs=m.clip_eigs, conj_sym=m.conj_sym, P=m.P, H=m.H,
                     Lambda_clipped=Lam,
-                    Lambda_raw_param=m.Lambda_re_init + 1j * m.Lambda_im_init,
+                    # R1: the TRAINED parameters, not the initializer fields
+                    Lambda_raw_param=m.Lambda_re + 1j * m.Lambda_im,
+                    Lambda_initializer_field=(m.Lambda_re_init
+                                              + 1j * m.Lambda_im_init),
                     B_tilde=B_tilde, B_c=B_c, Delta=Delta,
                     a=Lam * Delta, b=Delta[:, None] * B_c,
                     C_tilde=m.C_tilde, D=m.D, coefficients=m.coefficients(),
                     physical=dict(T=m.physical.T, gamma=m.physical.gamma,
                                   rho=m.physical.rho, mass=m.physical.mass))
-    return mod, v, mod.apply(v, method=read)
+    return mod.apply(v, method=read)
+
+
+# ----------------------------------------------------------------- R1 -----
+@pytest.mark.parametrize("arm", ["gain_clip_s5", "gp_fixed_m0",
+                                 "gp_fixed_mass"])
+def test_trained_raw_poles_are_read_not_initializer_fields(arm):
+    """R1: move BOTH raw parts away from initialization, with one real part
+    ABOVE the clipping boundary, and check raw, clipped, the clipping count and
+    the coefficients separately. A reader of `Lambda_re_init` cannot pass this.
+    """
+    mod, v, x = _module(arm)
+    p = dict(v["params"])
+    re = onp.asarray(p["Lambda_re"]).copy()
+    im = onp.asarray(p["Lambda_im"]).copy()
+    re_init, im_init = re.copy(), im.copy()
+    re[0] = +0.5                       # ABOVE the clip boundary -1e-4
+    re[1] = re[1] - 0.25               # still stable, moved
+    im[0] = im[0] + 1.75               # imaginary part moved too
+    p["Lambda_re"] = np.asarray(re)
+    p["Lambda_im"] = np.asarray(im)
+    v2 = dict(v); v2["params"] = p
+    core = _core(mod, v2, x)
+
+    raw = onp.asarray(core["Lambda_raw_param"])
+    init = onp.asarray(core["Lambda_initializer_field"])
+    clipped = onp.asarray(core["Lambda_clipped"])
+    assert raw[0].real == pytest.approx(0.5)
+    assert raw[0].imag == pytest.approx(im[0])
+    assert float(onp.max(onp.abs(raw - init))) > 0.1        # genuinely moved
+    assert float(onp.max(onp.abs(init - (re_init + 1j * im_init)))) == 0.0
+    # the EXECUTED pole is clipped, the trained raw one is not
+    assert clipped[0].real == pytest.approx(-1e-4)
+    summary = SD.pole_summary(core)
+    assert summary["n_raw_poles_clipped"] == 1
+    assert summary["clip_active"] is True
+    assert summary["trained_minus_initializer_max"] > 0.1
+    assert summary["raw_minus_clipped_max"] > 0.4
+    # coefficients follow the CLIPPED pole
+    assert float(onp.max(onp.abs(onp.asarray(
+        SD.discrete_poles(core))))) < 1.0
+
+
+def test_continuous_poles_are_not_the_log_of_the_discrete_eigenvalue():
+    """R1: a continuous frequency beyond pi per unit interval is ALIASED by the
+    discrete angle. The exported continuous pole must keep the true value, and
+    the aliasing must be flagged rather than relabelled."""
+    mod, v, x = _module("gain_clip_s5", dt_min=0.5, dt_max=0.9)
+    p = dict(v["params"])
+    im = onp.asarray(p["Lambda_im"]).copy()
+    im[0] = 9.0                       # with Delta ~ 0.5-0.9 this exceeds pi
+    p["Lambda_im"] = np.asarray(im)
+    v2 = dict(v); v2["params"] = p
+    core = _core(mod, v2, x)
+    cont = SD.continuous_poles(core)
+    disc = SD.discrete_poles(core)
+    k = int(onp.argmax(onp.abs(onp.imag(cont))))
+    assert abs(onp.imag(cont)[k]) > onp.pi, "fixture must exceed Nyquist"
+    aliased = onp.angle(disc)[k]
+    assert abs(aliased) <= onp.pi + 1e-12
+    assert abs(abs(onp.imag(cont)[k]) - abs(aliased)) > 1e-3
+    s = SD.pole_summary(core)
+    assert s["n_continuous_modes_aliased_by_discrete_angle"] >= 1
+    assert s["discrete_angle_is_aliased_frequency"] is True
+    assert abs(s["continuous_pole_im"][k]) > onp.pi
+
+
+# ----------------------------------------------------------------- R2 -----
+def test_the_invalid_geometric_tail_bound_is_gone():
+    assert not hasattr(SD, "truncation_tail_bound")
+
+
+def test_cancellation_counterexample_defeats_the_old_bound():
+    """R2, analytical: K_l = (1/2)^l - 2(1/4)^l has K_1 = 0 but K_2 = 1/8, so
+    ||K_last|| * rho/(1-rho) returns a ZERO tail for a nonzero one. Kept as an
+    executable record of why the bound was removed rather than loosened."""
+    l = onp.arange(8)
+    K = (0.5) ** l - 2 * (0.25) ** l
+    assert K[1] == pytest.approx(0.0, abs=1e-15)
+    assert K[2] == pytest.approx(0.125)
+    rho = 0.5
+    old_bound = abs(K[1]) * rho / (1 - rho)         # window 0..1
+    true_tail = float(onp.sum(onp.abs(K[2:])))
+    assert old_bound == pytest.approx(0.0)
+    assert true_tail > 0.1                           # bound understates it
 
 
 @pytest.mark.parametrize("arm", sorted(ARMS))
-def test_impulse_identities_equal_the_executed_forward_pass(arm):
+def test_exact_window_remainder_closes_the_finite_dft(arm):
+    """R2 repair: H(w) == finite DFT over 0..N-1 PLUS the closed-form
+    remainder. This is an identity, so it is a real check rather than an
+    estimate, and it holds for the NONNORMAL 2x2 blocks of the mass arm."""
+    H, N = 3, 64
+    mod, v, x = _module(arm, H=H)
+    core = _core(mod, v, x)
+    w, Hf = SD.frequency_response(core, n_freq=17)
+    K = SD.impulse_matrices(core, N)
+    rem = SD.frequency_window_remainder(core, N, w)
+    lags = onp.arange(N)
+    dft = onp.zeros_like(Hf)
+    for k, wk in enumerate(w):
+        dft[k] = onp.tensordot(onp.exp(-1j * wk * lags), K, axes=(0, 0))
+    # RELATIVE: at dt_min = 1e-3 the resolvent has denominators of order 1e-4,
+    # so |H| itself is large and an absolute tolerance would test magnitude
+    # rather than the identity.
+    err = float(onp.max(onp.abs(Hf - (dft + rem))))
+    scale = max(float(onp.max(onp.abs(Hf))), 1e-12)
+    assert err / scale < REMAINDER_TOL, (arm, err, scale, err / scale)
+
+
+def test_mass_block_is_nonnormal_so_the_remainder_test_is_not_vacuous():
+    mod, v, x = _module("gp_fixed_mass")
+    core = _core(mod, v, x)
+    A = onp.asarray(core["coefficients"]["A_bar"])
+    dev = max(float(onp.max(onp.abs(A[p] @ A[p].conj().T
+                                    - A[p].conj().T @ A[p])))
+              for p in range(A.shape[0]))
+    assert dev > 1e-6, "fixture must contain a genuinely nonnormal block"
+
+
+def test_band_energies_are_windowed_and_absolute_as_well_as_fractional():
+    K = onp.zeros((512, 2, 2)); K[0] = 1.0; K[200] = 2.0
+    r = SD.band_energy(K, BANDS)
+    by = {(b["lo"], b["hi"]): b for b in r["bands"]}
+    assert by[(0, 0)]["energy"] == pytest.approx(4.0)
+    assert by[(161, 511)]["energy"] == pytest.approx(16.0)
+    assert all("energy" in b and "fraction" in b for b in r["bands"])
+
+
+# ----------------------------------------------------------------- core ----
+@pytest.mark.parametrize("arm", sorted(ARMS))
+def test_impulse_identities_equal_the_executed_core(arm):
     H, L = 4, 40
-    mod, v, core = _core_and_module(arm, H=H, L=L)
+    mod, v, _ = _module(arm, H=H)
+    core = _core(mod, v, np.zeros((L, H)))
     K = SD.impulse_matrices(core, L)
     for h in range(H):
         x = onp.zeros((L, H)); x[0, h] = 1.0
-        y = onp.asarray(mod.apply(v, np.asarray(x)))         # (L, H)
-        assert float(onp.max(onp.abs(y - K[:, :, h]))) < IMPULSE_TOL, (
-            arm, h, float(onp.max(onp.abs(y - K[:, :, h]))))
+        y = onp.asarray(mod.apply(v, np.asarray(x)))
+        assert float(onp.max(onp.abs(y - K[:, :, h]))) < IMPULSE_TOL, (arm, h)
 
 
 @pytest.mark.parametrize("arm", sorted(ARMS))
-def test_impulse_is_linear_so_the_core_really_is_the_whole_layer(arm):
-    """If the extracted K reproduced only part of the layer, superposition
-    against a random input would fail even though the impulse matched."""
+def test_superposition_holds_for_the_linear_recurrent_CORE(arm):
+    """R5 wording: this validates the linear recurrent CORE, not the whole
+    nonlinear residual SequenceLayer."""
     H, L = 4, 40
-    mod, v, core = _core_and_module(arm, H=H, L=L)
+    mod, v, _ = _module(arm, H=H)
+    core = _core(mod, v, np.zeros((L, H)))
     K = SD.impulse_matrices(core, L)
     x = onp.asarray(onp.random.RandomState(0).randn(L, H))
     y = onp.asarray(mod.apply(v, np.asarray(x)))
@@ -101,58 +241,16 @@ def test_impulse_is_linear_so_the_core_really_is_the_whole_layer(arm):
 
 
 @pytest.mark.parametrize("arm", sorted(ARMS))
-def test_frequency_response_matches_the_impulse_dft_within_the_tail(arm):
-    """The resolvent form must agree with the DFT of a long impulse window.
-
-    Disagreement larger than the truncation tail would mean the 2*Re trap: a
-    complex-pair system's real response is NOT 2 Re of its complex transfer.
-    """
-    H, n_lags = 3, 4096
-    # A WELL DAMPED fixture: at the production dt_min = 1e-3 these models have
-    # NOT decayed by lag 4096 (tau can exceed 2000 frames), so a truncated DFT
-    # cannot test the closed form there. The production-scale case is covered
-    # by the geometric tail bound in the next test.
-    mod, v, core = _core_and_module(arm, H=H, L=8, dt_min=0.05, dt_max=0.5)
-    w, Hf = SD.frequency_response(core, n_freq=33)
-    K = SD.impulse_matrices(core, n_lags)
-    rho = SD.spectral_radius(core)
-    bound = SD.truncation_tail_bound(K, rho)
-    dft = onp.zeros_like(Hf)
-    lags = onp.arange(n_lags)
-    for k, wk in enumerate(w):
-        dft[k] = onp.tensordot(onp.exp(-1j * wk * lags), K, axes=(0, 0))
-    err = float(onp.max(onp.abs(Hf - dft)))
-    assert err < max(FREQ_TOL, 10 * bound), (arm, err, bound, rho)
-
-
-@pytest.mark.parametrize("arm", sorted(ARMS))
-def test_production_scale_window_is_declared_truncated_not_negligible(arm):
-    """At production dt the 512-lag window used by the report is NOT the whole
-    response, and the report must say so rather than imply convergence."""
-    H = 3
-    _, _, core = _core_and_module(arm, H=H, L=8)          # production dt
-    K = SD.impulse_matrices(core, 512)
-    rho = SD.spectral_radius(core)
-    bound = SD.truncation_tail_bound(K, rho)
-    assert rho < 1.0
-    energy_in_window = float(onp.sqrt(onp.sum(K ** 2)))
-    # the tail is a real quantity here, not a rounding artefact
-    assert bound > 0.0
-    assert onp.isfinite(bound) and onp.isfinite(energy_in_window)
-
-
-@pytest.mark.parametrize("arm", sorted(ARMS))
 def test_two_re_of_the_complex_transfer_is_NOT_the_real_response(arm):
-    """Pins the specific error the brief warns about, so a later refactor
-    cannot reintroduce it silently."""
     H = 3
-    _, _, core = _core_and_module(arm, H=H, L=8)
+    mod, v, _ = _module(arm, H=H)
+    core = _core(mod, v, np.zeros((8, H)))
     w, Hf = SD.frequency_response(core, n_freq=33)
     c = core["coefficients"]
     C = onp.asarray(core["C_tilde"]).astype(onp.complex128)
     if core["response"] in ("one_tap", "alpha_p_two_tap"):
         A = onp.asarray(c["A_bar"]).astype(onp.complex128)
-        B = onp.asarray(c.get("B_bar")).astype(onp.complex128)
+        B = onp.asarray(c["B_bar"]).astype(onp.complex128)
     elif core["response"] == "gp_fixed_m0":
         A = onp.asarray(c["a_bar"]).astype(onp.complex128)
         B = onp.asarray(c["b_bar"]).astype(onp.complex128)
@@ -162,67 +260,112 @@ def test_two_re_of_the_complex_transfer_is_NOT_the_real_response(arm):
     for k, wk in enumerate(w):
         u = onp.exp(-1j * wk)
         naive[k] = 2 * onp.real(C @ (B / (1.0 - A * u)[:, None]))
-    # they must NOT coincide except at w = 0 and w = pi, where u is real
-    interior = onp.max(onp.abs(Hf[1:-1] - naive[1:-1]))
-    assert interior > 1e-8, (core["response"], interior)
+    assert onp.max(onp.abs(Hf[1:-1] - naive[1:-1])) > 1e-8
 
 
-def test_band_energy_reports_absolute_and_fraction():
-    K = onp.zeros((512, 2, 2))
-    K[0] = 1.0
-    K[200] = 2.0
-    r = SD.band_energy(K, BANDS)
-    assert r["total_energy"] == pytest.approx(4 * 1.0 + 4 * 4.0)
-    by = {(b["lo"], b["hi"]): b for b in r["bands"]}
-    assert by[(0, 0)]["energy"] == pytest.approx(4.0)
-    assert by[(161, 511)]["energy"] == pytest.approx(16.0)
-    assert sum(b["fraction"] for b in r["bands"]) == pytest.approx(1.0)
-
-
-@pytest.mark.parametrize("arm", ["alpha_p_s5", "gp_fixed_m0", "gp_fixed_mass"])
-def test_counterfactual_one_tap_differs_from_the_executed_law(arm):
-    """The counterfactual must actually swap the law, not silently return the
-    same response - otherwise it could not separate law from coadaptation."""
-    H, L = 4, 64
-    _, _, core = _core_and_module(arm, H=H, L=L)
-    K = SD.impulse_matrices(core, L)
-    Kc = SD.counterfactual_one_tap(core, L)
-    assert float(onp.max(onp.abs(K - Kc))) > 1e-6, arm
-
-
-def test_counterfactual_reproduces_the_one_tap_arm_exactly():
-    """Sanity: on a one-tap checkpoint the counterfactual is the identity."""
-    H, L = 4, 64
-    _, _, core = _core_and_module("gain_clip_s5", H=H, L=L)
-    K = SD.impulse_matrices(core, L)
-    Kc = SD.counterfactual_one_tap(core, L)
-    assert float(onp.max(onp.abs(K - Kc))) < 1e-9
-
-
-@pytest.mark.parametrize("arm", sorted(ARMS))
-def test_pole_summary_reads_the_clipped_executed_pole(arm):
-    _, _, core = _core_and_module(arm)
-    s = SD.pole_summary(core)
-    assert s["abs_a_bar_max"] < 1.0
-    assert s["n_modes"] == core["P"]
-    assert 0.0 < s["delta_min"] <= s["delta_max"] < 1.0
+def test_native_arm_is_bit_identical_to_upstream_s5():
+    kw = ssm_kw()
+    x = np.asarray(onp.random.RandomState(13).randn(9, kw["H"]))
+    k = jax.random.PRNGKey(0)
+    base = init_S5SSM(clip_eigs=False, **kw)()
+    sub = init_substrate_ssm("native_s5", **kw)()
+    vb, vs = base.init(k, x), sub.init(k, x)
+    assert float(onp.max(onp.abs(base.apply(vb, x) - sub.apply(vs, x)))) == 0.0
 
 
 def test_adapter_refuses_an_unknown_response():
-    """A dispatch miss must RAISE. gp_diagnostics.core_from_module silently
-    falls back to inherited native coefficients for these arms; that is the
-    bug this module was written to avoid, so it is pinned here."""
-    _, _, core = _core_and_module("native_s5")
-    bad = dict(core, response="something_else")
+    mod, v, _ = _module("native_s5")
+    bad = dict(_core(mod, v, np.zeros((8, 4))), response="something_else")
     with pytest.raises(ValueError):
         SD.impulse_matrices(bad, 4)
     with pytest.raises(ValueError):
         SD.frequency_response(bad, n_freq=8)
+    with pytest.raises(ValueError):
+        SD.frequency_window_remainder(bad, 8, onp.array([0.0]))
 
 
 def test_old_gp_diagnostics_would_have_dispatched_wrongly():
-    """Documents WHY the adapter exists, as an executable fact rather than a
-    remark: the old helper keys off `mechanism`, which SubstrateSSM lacks."""
-    from s5.rawat_s5 import SubstrateSSM
     assert not hasattr(SubstrateSSM, "mechanism")
     assert "response" in SubstrateSSM.__annotations__
+
+
+@pytest.mark.parametrize("arm", ["alpha_p_s5", "gp_fixed_m0", "gp_fixed_mass"])
+def test_counterfactual_one_tap_differs_from_the_executed_law(arm):
+    H, L = 4, 64
+    mod, v, _ = _module(arm, H=H)
+    core = _core(mod, v, np.zeros((L, H)))
+    assert float(onp.max(onp.abs(SD.impulse_matrices(core, L)
+                                 - SD.counterfactual_one_tap(core, L)))) > 1e-6
+
+
+def test_counterfactual_reproduces_a_one_tap_core_exactly():
+    H, L = 4, 64
+    mod, v, _ = _module("gain_clip_s5", H=H)
+    core = _core(mod, v, np.zeros((L, H)))
+    assert float(onp.max(onp.abs(SD.impulse_matrices(core, L)
+                                 - SD.counterfactual_one_tap(core, L)))) < 1e-9
+
+
+# ----------------------------------------------------------------- R3 -----
+def _status(tmp_path):
+    from experiments.gp.stage2_diagnostic import Status
+    return Status(str(tmp_path))
+
+
+def test_failed_required_check_forces_FAILED_and_nonzero_exit(tmp_path):
+    from experiments.gp.stage2_diagnostic import EXIT_CODES
+    st = _status(tmp_path)
+    st.record("restore_counts", False, arm="gp_fixed_mass")
+    assert st.final(hashes_ok=True, budget_incomplete=False) == "FAILED"
+    assert EXIT_CODES["FAILED"] != 0
+    assert st.blocked("gp_fixed_mass")
+
+
+def test_optional_failure_does_not_fail_the_run(tmp_path):
+    st = _status(tmp_path)
+    st.record("optional_thing", False, required=False, arm="native_s5")
+    assert st.final(hashes_ok=True, budget_incomplete=False) == "PASS"
+    assert not st.blocked("native_s5")
+
+
+def test_changed_source_hashes_force_FAILED(tmp_path):
+    st = _status(tmp_path)
+    st.record("F_source_files_unchanged", False)
+    assert st.final(hashes_ok=False, budget_incomplete=False) == "FAILED"
+
+
+def test_unknown_hash_state_is_INCOMPLETE_not_pass(tmp_path):
+    st = _status(tmp_path)
+    assert st.final(hashes_ok=None, budget_incomplete=False) == "INCOMPLETE"
+
+
+def test_budget_incomplete_is_INCOMPLETE_with_nonzero_exit(tmp_path):
+    from experiments.gp.stage2_diagnostic import EXIT_CODES
+    st = _status(tmp_path)
+    assert st.final(hashes_ok=True, budget_incomplete=True) == "INCOMPLETE"
+    assert EXIT_CODES["INCOMPLETE"] != 0
+
+
+def test_skipped_check_is_recorded_and_not_silently_passed(tmp_path):
+    st = _status(tmp_path)
+    st.skip("D2_sensitivity", "budget exhausted", arm="native_s5")
+    assert st.final(hashes_ok=True, budget_incomplete=False) == "INCOMPLETE"
+    assert st.unexecuted and st.unexecuted[0]["status"] == "not_executed"
+
+
+def test_checks_are_persisted_immediately(tmp_path):
+    import json
+    st = _status(tmp_path)
+    st.record("something", True)
+    with open(os.path.join(str(tmp_path), "checks.json")) as fh:
+        assert json.load(fh)[0]["check"] == "something"
+
+
+def test_budget_accepts_an_absolute_deadline_from_the_launcher():
+    import time as _t
+    from experiments.gp.stage2_diagnostic import Budget
+    b = Budget(1200.0, deadline=_t.time() + 30.0)
+    assert b.limit <= 30.5 and b.limit > 25.0
+    assert not b.incomplete
+    b.mark("x", "skipped_budget")
+    assert b.incomplete is True

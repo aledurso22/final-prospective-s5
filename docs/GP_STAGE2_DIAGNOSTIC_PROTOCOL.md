@@ -67,8 +67,8 @@ consistent with the production tolerances already declared in
 | restored validation cross entropy vs saved | 1e-5 absolute |
 | adapter impulse vs executed forward (float64 fixture) | 1e-10 |
 | adapter impulse vs executed forward (float32 checkpoint) | 1e-4 relative |
-| frequency response vs impulse DFT | max(1e-6, 10x geometric tail bound) |
 | JVP/VJP vs central finite difference | 1e-3 relative, **gated at step 1e-2**, step 1e-3 also reported |
+| frequency response vs finite DFT **plus exact remainder** | 1e-8 (identity, not an estimate) |
 | future-input sensitivity, inference mode | 0 exactly |
 | source file hashes before vs after | byte-identical |
 
@@ -76,7 +76,8 @@ A failed check is reported. If restored counts differ from saved, the
 discrepancy is resolved as a loading/dtype/data problem **before** any
 performance explanation is offered.
 
-**Amendment made before execution, with its reason.** The finite-difference
+**Amendment made after local-fixture inspection and BEFORE any Stage 2
+checkpoint analysis, with its reason.** The finite-difference
 check was first written with a unit-L2 direction and a single step of 1e-3. On
 a `(32, 161, 20)` input that moves each element by only ~2.5e-6, about 20x
 float32 epsilon, so the central difference measured ROUNDING rather than the
@@ -86,19 +87,62 @@ the fix: rel error 2.6e-3 to 2.3e-2 at step 1e-3, and **4.8e-5 to 7.7e-4 at
 step 1e-2**, for all five arms. The gate therefore uses step 1e-2, where
 rounding no longer dominates, and both steps are reported. The tolerance itself
 is unchanged at 1e-3; what changed is a defective measurement, and it was
-changed before any cluster execution, not after seeing a diagnostic result.
+changed before any Stage 2 checkpoint was analysed, not after seeing a
+diagnostic result. The measurements quoted above come from a LOCAL synthetic
+fixture (see section 15), not from the cluster.
 
 ## 4. Truncation is declared, never assumed
 
 At the production clock `Delta` can be as small as 1e-3, giving decay times
-over 2000 frames, so the 512-lag window is **not** the whole response. Every
-windowed statistic is reported with the geometric tail bound
-`||K_511|| * rho/(1 - rho)`, `rho = max |discrete pole|`. Band fractions are
-reported **alongside absolute energies**, because fractions alone can hide a
-collapse in total response.
+over 2000 frames, so the 512-lag window is **not** the whole response.
 
-No monotonic-Hankel claim is made, and "longer poles" is never treated as
-"better useful memory".
+**AMENDED after coordinator review (R2).** An earlier version of this protocol
+reported a geometric tail bound `||K_last|| * rho/(1 - rho)`. **That bound is
+invalid and has been removed, not loosened.** It is not a general bound on a
+multimode output tail: output modes can cancel exactly at the last measured
+sample and not at the next, and a nonnormal block need not contract in
+Euclidean norm at its spectral radius. The analytical counterexample, which
+needs no experiment, is the scalar two-mode response
+
+    K_l = (1/2)^l - 2 (1/4)^l ,   K_1 = 0 but K_2 = 1/8
+
+for which a two-sample window reports a zero tail while the true tail is
+nonzero. It is kept as an executable test.
+
+What replaces it:
+
+* **Lag-band energies are explicitly windowed at 0..511 and the remainder is
+  marked `unknown (not bounded)`.** No windowed statistic is used to call
+  memory negligible.
+* **The frequency comparison uses the EXACT finite-window remainder** computed
+  from the resolvent, so `H(w) = finite DFT + remainder` is an identity rather
+  than an approximation. For a one-tap realization `K_l = C A^l B` the
+  remainder after `l = 0..N-1` is `C (uA)^N (I - uA)^-1 B`, `u = e^{-iw}`;
+  native `D` has no tail; the two-tap lag-one drive `A B_plus + B_minus` and
+  its index shift are handled explicitly; complex pairs are realified exactly
+  as in the frequency adapter. Verified on the nonnormal mass blocks too.
+* `spectral_radius` is retained as a **descriptive** quantity only, and is
+  never used as a tolerance in the frequency gate.
+
+Band fractions are reported **alongside absolute energies**, because fractions
+alone can hide a collapse in total response. No monotonic-Hankel claim is made,
+and "longer poles" is never treated as "better useful memory".
+
+## 4a. Poles: trained, executed, continuous and discrete (R1)
+
+* The **trained raw pole** is the parameter `Lambda_re + i Lambda_im`.
+  `Lambda_re_init` / `Lambda_im_init` are the static **initializer fields**;
+  an earlier version read those, so trained clipping counts and
+  raw-versus-clipped shifts could be wrong even where the executed impulse
+  response was right. Fixed, with a test that moves both raw parts away from
+  initialization, including a real part above the clipping boundary.
+* **Continuous poles are exported directly, never as `log` of a discrete
+  eigenvalue**, which returns a principal-branch value and therefore ALIASES
+  any continuous frequency above pi per unit interval. Sources: `a` for the
+  one/two-tap arms, `a_eff` for `M = 0`, and eigenvalues of the executed
+  continuous block generator for the mass arm. Discrete magnitude and angle are
+  reported separately and the angle is labelled an aliased frequency; a test
+  uses a continuous frequency beyond pi to prevent relabelling.
 
 ## 5. Frequency response: the specific trap
 
@@ -198,7 +242,66 @@ Dense learned-`T` local gains are a **different model family**. No switch to
 that family, to arbitrary off-diagonal coefficients, to learned physical
 constants or to another readout is made here.
 
-## 12. Deliverable
+## 12. Enforcement: a failed check fails the run (R3)
+
+Every check is persisted the moment it is taken. A failed **required** check —
+restoration counts or CE, the adapter-versus-executed-core comparison, the
+derivative check, nonzero future sensitivity, or a changed source file —
+**blocks dependent interpretation for that arm and forces a nonzero exit**. An
+unavailable optional phase is recorded as `not_executed` and is distinguished
+from a failure.
+
+Final status and exit codes: `PASS` 0, `INCOMPLETE` 3, `FAILED` 4. A
+budget-incomplete run is never reported as a pass. On an error, interrupt or
+timeout, a `finally` path preserves results and re-hashes the sources; if that
+cannot complete, source invariance is reported **unknown**, never true.
+
+The adapter comparison covers **every reported layer and every input
+coordinate**, batched; the checked scope is recorded in the result. An earlier
+version checked layer 0 and six coordinates while reporting four layers.
+
+## 13. Budget enforcement (R4)
+
+**One deadline covers backend verification, the focused numerical tests and the
+diagnostic.** The launcher computes it first, verifies the GPU before any
+numerical fixture, and passes the absolute deadline down. An outer
+process-group watchdog stops an overrunning phase, with a cleanup reserve kept
+inside the cap; the result is reported as `INCOMPLETE (timeout)`, not as a
+pass. There is no CPU fallback.
+
+Each invocation is a **fresh rerun** into a new timestamped directory. It is
+NOT a resumption, and the earlier claim that "completed phases are not
+restarted" has been withdrawn. To run only genuinely missing phases, pass
+`ONLY_PHASES=...`. Test logs are unique per invocation.
+
+## 14. Implemented versus absent (R5)
+
+| item | status |
+|---|---|
+| reconstructed-initialization **cores** | implemented (phase `C_init`), labelled as reconstructed, not a saved checkpoint |
+| initialization **gradient** probes (D4) | **not implemented**; deferred by the priority order and recorded as such in the run summary |
+| per-layer activation RMS | implemented |
+| gradients at recurrent-core **inputs** and at the pre-pooling activation | implemented, by differentiating additive zero offsets injected through the bound submodules |
+| last-vs-best checkpoint comparison | implemented, lightweight pole summary only, and only when best is not last |
+| dtype record | implemented; actual parameter and batch-statistic dtypes, with `cast_applied: false` |
+| schedule metadata | implemented; steps-per-epoch read from **saved run metadata**, not hardcoded |
+
+Parameter-gradient norms alone do **not** establish depth attenuation or
+gradient quality, and no conclusion resting on the unimplemented item is drawn.
+"Core" is used throughout for the linear recurrent core; the superposition
+check validates that core, not the whole nonlinear residual `SequenceLayer`.
+
+## 15. Provenance of the finite-difference amendment
+
+The FD direction/step amendment in section 3 was made **after inspecting a
+local synthetic fixture and before any Stage 2 checkpoint analysis**. It was
+not made after seeing a Stage 2 diagnostic result. The 36-second local fixture
+run that informed it was a **local fixture result**, outside the brief's
+no-local-numerical-execution scope; it is recorded as such and is not relabelled
+as a cluster check. All numerical validation from this revision onward runs on
+the cluster, inside the launcher.
+
+## 16. Deliverable
 
 A diagnosis. An improved score is neither required nor sought, and no
 experiment is authorized by this protocol.

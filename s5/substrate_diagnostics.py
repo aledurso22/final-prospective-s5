@@ -53,13 +53,20 @@ def read_core(module, variables, layer):
     BOUND module. Raises rather than guessing if the response is unknown."""
     def _read(m):
         seq = m.encoder.layers[layer].seq
-        Lambda_raw = seq.Lambda_re_init + 1j * seq.Lambda_im_init
+        # R1: Lambda_re_init / Lambda_im_init are the INITIALIZER fields, i.e.
+        # static configuration. The TRAINED raw pole is the parameter
+        # seq.Lambda_re + 1j*seq.Lambda_im. Reading the initializer made
+        # trained clipping counts and raw-vs-clipped shifts wrong even when the
+        # executed impulse response was right.
+        Lambda_raw = seq.Lambda_re + 1j * seq.Lambda_im
+        Lambda_init = seq.Lambda_re_init + 1j * seq.Lambda_im_init
         Lam, B_c, Delta = seq._native()
         B_tilde = seq.B[..., 0] + 1j * seq.B[..., 1]
         return dict(response=seq.response, input_gain=seq.input_gain,
                     clip_eigs=seq.clip_eigs, conj_sym=seq.conj_sym,
                     P=seq.P, H=seq.H,
                     Lambda_clipped=Lam, Lambda_raw_param=Lambda_raw,
+                    Lambda_initializer_field=Lambda_init,
                     B_tilde=B_tilde, B_c=B_c, Delta=Delta,
                     a=Lam * Delta, b=Delta[:, None] * B_c,
                     C_tilde=seq.C_tilde, D=seq.D,
@@ -187,48 +194,77 @@ def band_energy(K, bands):
     return dict(total_energy=tot, bands=rows)
 
 
-def pole_summary(core):
-    """Native vs effective poles, decay times in frames, frequencies, clipping."""
-    a = _np(core["a"])
-    Lam_raw = _np(core["Lambda_raw_param"])
-    Lam_clip = _np(core["Lambda_clipped"])
-    c = core["coefficients"]
+def continuous_poles(core):
+    """The ACTUAL continuous poles of the executed core.
+
+    R1: `log(discrete eigenvalue)` returns a principal-branch value, so it
+    ALIASES any continuous frequency with |Im| > pi. It is therefore not the
+    original continuous pole and is never reported as one. Per response:
+
+        one_tap / alpha_p_two_tap : a = Delta * Lambda_clipped
+        gp_fixed_m0               : a_eff
+        gp_fixed_mass             : eigenvalues of the executed CONTINUOUS
+                                    block generator A (not of A_bar)
+    """
     resp = core["response"]
+    c = core["coefficients"]
     if resp in ("one_tap", "alpha_p_two_tap"):
-        a_bar = _np(c["A_bar"])
-        a_eff = onp.log(a_bar)
-    elif resp == "gp_fixed_m0":
-        a_bar = _np(c["a_bar"]); a_eff = _np(c["a_eff"])
-    else:
-        A = _np(c["A_bar"])
-        ev = onp.linalg.eigvals(A)                       # (P,2) discrete
-        a_bar = ev
-        with onp.errstate(divide="ignore"):
-            a_eff = onp.log(ev + 0j)
-    mag = onp.abs(a_bar)
+        return _np(core["a"]).ravel()
+    if resp == "gp_fixed_m0":
+        return _np(c["a_eff"]).ravel()
+    return onp.linalg.eigvals(_np(c["A"])).ravel()
+
+
+def discrete_poles(core):
+    """Discrete eigenvalues of the executed transition."""
+    resp = core["response"]
+    c = core["coefficients"]
+    if resp in ("one_tap", "alpha_p_two_tap"):
+        return _np(c["A_bar"]).ravel()
+    if resp == "gp_fixed_m0":
+        return _np(c["a_bar"]).ravel()
+    return onp.linalg.eigvals(_np(c["A_bar"])).ravel()
+
+
+def pole_summary(core):
+    """Trained raw vs executed clipped poles, continuous and discrete kept
+    SEPARATE, with clipping measured on the trained parameter."""
+    raw = _np(core["Lambda_raw_param"])              # TRAINED
+    init = _np(core["Lambda_initializer_field"])     # static config
+    clipped = _np(core["Lambda_clipped"])            # executed
+    cont = continuous_poles(core)
+    disc = discrete_poles(core)
+    mag = onp.abs(disc)
     with onp.errstate(divide="ignore", invalid="ignore"):
-        tau = onp.where(mag < 1.0, -1.0 / onp.log(onp.maximum(mag, 1e-300)),
-                        onp.inf)
-    n_clipped = int(onp.sum(Lam_raw.real > -1e-4)) if core["clip_eigs"] else 0
+        tau = onp.where(mag < 1.0,
+                        -1.0 / onp.log(onp.maximum(mag, 1e-300)), onp.inf)
+    n_clipped = int(onp.sum(raw.real > -1e-4)) if core["clip_eigs"] else 0
+    fin = tau[onp.isfinite(tau)]
+    # a continuous |Im| above pi per unit interval is ALIASED by the discrete
+    # angle; flagged rather than silently relabelled
+    aliased = int(onp.sum(onp.abs(onp.imag(cont)) > onp.pi))
     return dict(
-        n_modes=int(a.size),
+        n_modes=int(raw.size),
         n_raw_poles_clipped=n_clipped,
-        clipped_fraction=n_clipped / float(a.size),
-        native_pole_re=a.real.tolist(), native_pole_im=a.imag.tolist(),
-        eff_pole_re=onp.real(a_eff).ravel().tolist(),
-        eff_pole_im=onp.imag(a_eff).ravel().tolist(),
+        clipped_fraction=n_clipped / float(raw.size),
+        clip_active=bool(n_clipped > 0),
+        trained_raw_re=raw.real.tolist(), trained_raw_im=raw.imag.tolist(),
+        clipped_re=clipped.real.tolist(), clipped_im=clipped.imag.tolist(),
+        raw_minus_clipped_max=float(onp.max(onp.abs(raw - clipped))),
+        trained_minus_initializer_max=float(onp.max(onp.abs(raw - init))),
+        continuous_pole_re=onp.real(cont).tolist(),
+        continuous_pole_im=onp.imag(cont).tolist(),
+        continuous_freq_cycles_per_frame=(onp.abs(onp.imag(cont))
+                                          / (2 * onp.pi)).tolist(),
+        n_continuous_modes_aliased_by_discrete_angle=aliased,
+        discrete_abs=mag.tolist(),
+        discrete_angle=onp.angle(disc).tolist(),
+        discrete_angle_is_aliased_frequency=True,
         abs_a_bar_max=float(onp.max(mag)),
-        decay_frames_median=float(onp.median(tau[onp.isfinite(tau)]))
-        if onp.any(onp.isfinite(tau)) else float("inf"),
-        decay_frames_max=float(onp.max(tau[onp.isfinite(tau)]))
-        if onp.any(onp.isfinite(tau)) else float("inf"),
-        osc_freq_cycles_per_frame=(onp.abs(onp.imag(a_eff)).ravel()
-                                   / (2 * onp.pi)).tolist(),
+        decay_frames_median=float(onp.median(fin)) if fin.size else float("inf"),
+        decay_frames_max=float(onp.max(fin)) if fin.size else float("inf"),
         delta_min=float(onp.min(_np(core["Delta"]))),
         delta_max=float(onp.max(_np(core["Delta"]))),
-        lambda_clip_active=bool(n_clipped > 0),
-        lambda_raw_vs_clipped_max_shift=float(
-            onp.max(onp.abs(Lam_raw - Lam_clip))),
     )
 
 
@@ -260,24 +296,72 @@ def counterfactual_one_tap(core, n_lags):
 
 
 def spectral_radius(core):
-    """max |discrete pole| of the executed core, for truncation bounds."""
-    c = core["coefficients"]
-    resp = core["response"]
-    if resp in ("one_tap", "alpha_p_two_tap"):
-        return float(onp.max(onp.abs(_np(c["A_bar"]))))
-    if resp == "gp_fixed_m0":
-        return float(onp.max(onp.abs(_np(c["a_bar"]))))
-    return float(onp.max(onp.abs(onp.linalg.eigvals(_np(c["A_bar"])))))
+    """max |discrete pole| of the executed core. Descriptive only.
 
-
-def truncation_tail_bound(K, rho):
-    """Bound on sum_{l>=N} |K_l| given a geometric decay rate rho.
-
-    ||K_N|| * rho/(1-rho). Reported with every windowed statistic: at
-    Delta ~ 1e-3 the impulse of these models has NOT decayed by lag 4096, so a
-    window is never assumed negligible.
+    R2: this is NOT used to bound an impulse tail. The formula
+    ||K_last|| * rho/(1-rho) is invalid for a multimode output: modes can
+    cancel exactly at the last measured sample and not at the next, e.g. the
+    scalar two-mode response K_l = (1/2)^l - 2(1/4)^l has K_1 = 0 while
+    K_2 = 1/8, so a two-sample window would report a zero tail for a nonzero
+    one. A nonnormal block also need not contract in Euclidean norm at its
+    spectral radius. The invalid bound has been removed rather than loosened.
     """
-    if rho >= 1.0:
-        return float("inf")
-    last = float(onp.sqrt(onp.sum(K[-1] ** 2)))
-    return last * rho / (1.0 - rho)
+    return float(onp.max(onp.abs(discrete_poles(core))))
+
+
+def frequency_window_remainder(core, n_lags, w):
+    """EXACT frequency-domain remainder of a finite impulse window.
+
+    H(w) = sum_{l<N} K_l e^{-i w l} + remainder(w), computed in closed form
+    from the resolvent rather than estimated. For a one-tap realization
+    K_l = C A^l B the remainder after l = 0..N-1 is C (uA)^N (I - uA)^-1 B with
+    u = e^{-iw}; native D has no tail. The two-tap lag-one drive
+    (A B_plus + B_minus) and its index shift are handled explicitly, and
+    complex pairs are realified exactly as in `frequency_response`.
+
+    This replaces the invalid geometric bound: it is an identity, so it can be
+    checked, and it makes a windowed frequency comparison exact instead of
+    approximate.
+    """
+    resp = core["response"]
+    if resp not in RESPONSES:
+        raise ValueError(f"unknown response {resp!r}; refusing to guess")
+    c = core["coefficients"]
+    C = _np(core["C_tilde"]).astype(onp.complex128)
+    fac = 2.0 if core["conj_sym"] else 1.0
+    N = int(n_lags)
+
+    def rem(u):
+        if resp in ("one_tap", "alpha_p_two_tap"):
+            A = _np(c["A_bar"]).astype(onp.complex128)
+            uA = u * A
+            if resp == "one_tap":
+                B = _np(c["B_bar"]).astype(onp.complex128)
+                return C @ ((uA ** N / (1.0 - uA))[:, None] * B)
+            G = (_np(c["A_bar"])[:, None] * _np(c["B_plus"])
+                 + _np(c["B_minus"])).astype(onp.complex128)
+            # sum_{l<N} state_l u^l with state_0 = B_plus,
+            # state_l = A^(l-1) G  =>  remainder = u (uA)^(N-1) (I-uA)^-1 G
+            return C @ ((u * uA ** (N - 1) / (1.0 - uA))[:, None] * G)
+        if resp == "gp_fixed_m0":
+            a = _np(c["a_bar"]).astype(onp.complex128)
+            b = _np(c["b_bar"]).astype(onp.complex128)
+            ua = u * a
+            return C @ ((ua ** N / (1.0 - ua))[:, None] * b)
+        A = _np(c["A_bar"]).astype(onp.complex128)          # (P,2,2)
+        B = _np(c["B_bar"]).astype(onp.complex128)          # (P,2,H)
+        P = A.shape[0]
+        I2 = onp.eye(2, dtype=onp.complex128)
+        uA = u * A
+        powN = onp.array([onp.linalg.matrix_power(uA[p], N) for p in range(P)])
+        X = onp.linalg.solve(I2[None] - uA, B)              # (I-uA)^-1 B
+        Y = onp.einsum("pij,pjh->pih", powN, X)
+        return C @ Y[:, 0, :]
+
+    w = onp.atleast_1d(w)
+    H = _np(core["D"]).shape[0]
+    out = onp.zeros((w.size, H, H), dtype=onp.complex128)
+    for k, wk in enumerate(w):
+        out[k] = (rem(onp.exp(-1j * wk))
+                  + onp.conj(rem(onp.exp(+1j * wk)))) * (fac / 2.0)
+    return out

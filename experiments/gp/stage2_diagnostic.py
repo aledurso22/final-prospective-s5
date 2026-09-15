@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import sys
 import time
 
@@ -47,14 +48,80 @@ FD_GATE_STEP = 1e-2
 ARMS_1E3 = ("native_s5", "alpha_p_s5", "gain_clip_s5", "gp_fixed_m0",
             "gp_fixed_mass")
 
+#: PASS -> 0, INCOMPLETE -> 3, FAILED -> 4. A failed required check or a
+#: budget-incomplete run must NOT exit 0 (R3).
+EXIT_CODES = {"PASS": 0, "INCOMPLETE": 3, "FAILED": 4}
+
 
 # --------------------------------------------------------------- utilities
-class Budget:
-    """Wall-clock deadline with phase accounting. Never auto-extends."""
+class Status:
+    """Check registry that GATES analysis and determines the exit code.
 
-    def __init__(self, seconds):
+    R3: previously every check appended a `passed` boolean that nothing read,
+    so a failed restoration, a failed adapter comparison, a failed derivative
+    check, nonzero future sensitivity or a CHANGED SOURCE FILE could still end
+    with DIAGNOSTIC_EXIT=0. Now a required failure blocks dependent analysis
+    for that arm and forces a nonzero exit, and an unavailable optional phase
+    is distinguished from a failed required check.
+    """
+
+    def __init__(self, out):
+        self.out = out
+        self.checks = []
+        self.failed_required = []
+        self.unexecuted = []
+        self.blocked_arms = set()
+
+    def record(self, name, passed, required=True, arm=None, detail=None):
+        rec = dict(check=name, arm=arm, passed=bool(passed),
+                   required=bool(required), detail=detail,
+                   time=time.time())
+        self.checks.append(rec)
+        if not passed and required:
+            self.failed_required.append(rec)
+            if arm:
+                self.blocked_arms.add(arm)
+            print(f"[FAIL] {name}" + (f" [{arm}]" if arm else ""))
+        # persist immediately: a crash must not lose the record
+        write_json(os.path.join(self.out, "checks.json"), self.checks)
+        return bool(passed)
+
+    def skip(self, name, reason, arm=None, required=False):
+        rec = dict(check=name, arm=arm, status="not_executed", reason=reason,
+                   required=bool(required))
+        self.unexecuted.append(rec)
+        self.checks.append(rec)
+        write_json(os.path.join(self.out, "checks.json"), self.checks)
+        print(f"[skip] {name}" + (f" [{arm}]" if arm else "") + f": {reason}")
+
+    def blocked(self, arm):
+        return arm in self.blocked_arms
+
+    def final(self, hashes_ok, budget_incomplete):
+        if self.failed_required or hashes_ok is False:
+            return "FAILED"
+        if budget_incomplete or hashes_ok is None or self.unexecuted:
+            return "INCOMPLETE"
+        return "PASS"
+
+
+class Budget:
+    """Wall-clock deadline with phase accounting. Never auto-extends.
+
+    R4: the deadline is set by the LAUNCHER and passed in as an absolute epoch
+    time, so backend verification and the focused tests run inside the same
+    20-minute budget rather than before it starts.
+    """
+
+    def __init__(self, seconds, deadline=None):
         self.t0 = time.time()
-        self.limit = seconds
+        if deadline is not None:
+            self.limit = max(0.0, float(deadline) - self.t0)
+            self.absolute_deadline = float(deadline)
+        else:
+            self.limit = seconds
+            self.absolute_deadline = self.t0 + seconds
+        self.incomplete = False
         self.phases = []
 
     def left(self):
@@ -64,6 +131,8 @@ class Budget:
         return self.left() > need
 
     def mark(self, name, status="complete", note=None):
+        if status.startswith("skipped"):
+            self.incomplete = True
         self.phases.append(dict(phase=name, status=status,
                                 elapsed_s=time.time() - self.t0, note=note))
         print(f"[budget] {name}: {status}  elapsed {time.time()-self.t0:.1f}s  "
@@ -169,9 +238,18 @@ def restore_readonly(run_dir, cfg, name="best"):
                                  batch_stats=variables.get("batch_stats"))
     state, bs, meta = restore_checkpoint(run_dir, name, state,
                                          state.batch_stats)
-    casts = {}
-    for k, v in jax.tree_util.tree_leaves_with_path(state.params):
-        pass
+    # R5: record the ACTUAL dtypes rather than leaving an empty placeholder.
+    # Nothing is cast here; if a dtype differed from the saved one it would
+    # show up as a mismatch in this record.
+    def _dtypes(tree):
+        from flax.traverse_util import flatten_dict
+        if tree is None:
+            return None
+        return sorted({str(v.dtype) for v in flatten_dict(tree).values()})
+    casts = dict(params_dtypes=_dtypes(state.params),
+                 batch_stats_dtypes=_dtypes(bs),
+                 cast_applied=False,
+                 note="restored as saved; no dtype conversion performed")
     return dict(args=a, model=model, eval_model=eval_model, params=state.params,
                 batch_stats=bs, step=int(state.step), meta=meta,
                 init_params=variables["params"],
@@ -204,9 +282,10 @@ def extract_cores(loaded, arm):
             physical=core["physical"],
             poles=SD.pole_summary(core),
             impulse_bands=SD.band_energy(K, BANDS),
-            spectral_radius=rho,
-            truncation_tail_bound=SD.truncation_tail_bound(K, rho),
+            spectral_radius_descriptive_only=rho,
             window_lags=N_LAGS,
+            window_remainder="unknown (NOT bounded); band energies are "
+                             "explicitly windowed at 0..511",
             K0_norm=float(onp.sqrt(onp.sum(K[0] ** 2))),
             D_norm=float(onp.sqrt(onp.sum(onp.asarray(core["D"]) ** 2))),
             K0_minus_D_norm=float(onp.sqrt(onp.sum(
@@ -231,37 +310,46 @@ def extract_cores(loaded, arm):
     return out
 
 
-def verify_adapter_vs_forward(loaded, arm, layer=0, n=24, tol=1e-4):
-    """The adapter must equal the EXECUTED layer, on the restored checkpoint."""
+def verify_adapter_all_layers(loaded, arm, n=24, tol=1e-4):
+    """Adapter vs executed CORE, for EVERY reported layer and EVERY input.
+
+    R3: the previous version checked layer 0 and at most six input coordinates
+    while four layers were reported. All H impulses are now batched through a
+    vmap, so the checked scope equals the reported scope, and the scope is
+    recorded in the result rather than implied.
+
+    The target is the recurrent CORE (`layers[l].seq`), not the whole nonlinear
+    residual SequenceLayer; the wording is kept consistent with that (R5).
+    """
     a = loaded["args"]
-    model = loaded["model"]
     variables = {"params": loaded["params"]}
     if loaded["batch_stats"] is not None:
         variables["batch_stats"] = loaded["batch_stats"]
-    core = SD.read_core(model, variables, layer)
-    K = SD.impulse_matrices(core, n)
-    H = int(core["H"])
+    single = single_module(a.arm, a.d_model, a.ssm_size, a.n_layers,
+                           training=False)
+    results = []
+    for layer in range(a.n_layers):
+        core = SD.read_core(loaded["model"], variables, layer)
+        K = SD.impulse_matrices(core, n)                 # (n, H, H)
+        H = int(core["H"])
+        X = onp.zeros((H, n, H), dtype=onp.float32)
+        for h in range(H):
+            X[h, 0, h] = 1.0
 
-    def run(x):
-        def f(m, xx, tt, ll):
-            return m.encoder.layers[layer].seq(xx)
-        return model.apply(variables, x[None], jnp.ones((1, x.shape[0])), None,
-                           method=f)
-    worst = 0.0
-    for h in range(min(H, 6)):
-        x = onp.zeros((n, H), dtype=onp.float32)
-        x[0, h] = 1.0
-        try:
-            y = onp.asarray(run(jnp.asarray(x)))[0]
-        except Exception:
-            single = single_module(a.arm, a.d_model, a.ssm_size, a.n_layers)
-            y = onp.asarray(single.apply(
-                variables, jnp.asarray(x), jnp.ones(n), None,
-                method=lambda m, xx, tt, ll: m.encoder.layers[layer].seq(xx)))
-        den = max(float(onp.max(onp.abs(K[:, :, h]))), 1e-12)
-        worst = max(worst, float(onp.max(onp.abs(y - K[:, :, h]))) / den)
-    return dict(arm=arm, layer=layer, worst_rel=worst, tol=tol,
-                passed=bool(worst < tol))
+        def one(xx, _layer=layer):
+            return single.apply(
+                variables, xx, jnp.ones(n), None,
+                method=lambda m, u, t, l: m.encoder.layers[_layer].seq(u))
+
+        Y = onp.asarray(jax.vmap(one)(jnp.asarray(X)))   # (H, n, H)
+        pred = onp.transpose(K, (2, 0, 1))               # (H, n, H)
+        den = max(float(onp.max(onp.abs(pred))), 1e-12)
+        worst = float(onp.max(onp.abs(Y - pred))) / den
+        results.append(dict(arm=arm, layer=layer, worst_rel=worst, tol=tol,
+                            passed=bool(worst < tol), scope="recurrent core",
+                            n_inputs_checked=H, n_lags_checked=int(n),
+                            n_inputs_total=H))
+    return results
 
 
 # ------------------------------------------------------------- D: gradients
@@ -270,6 +358,69 @@ def fixed_subset(Xtr, Ytr):
         Xtr.shape[0])[:N_SUBSET]
     idx = onp.sort(idx)
     return idx, jnp.asarray(onp.asarray(Xtr[idx])), jnp.asarray(Ytr[idx])
+
+
+def block_activation_report(loaded, x, y):
+    """Per-layer activation RMS and gradients at each recurrent-core INPUT and
+    at the pre-pooling activation.
+
+    R5: parameter-gradient norms alone cannot establish depth attenuation. The
+    stack is re-run through the bound submodules with an additive zero offset
+    at each layer input and before pooling; differentiating with respect to
+    those offsets gives the exact activation gradients without modifying the
+    model. Inference mode: saved batch statistics, dropout disabled.
+    """
+    import optax
+    from flax import linen as nn
+    a = loaded["args"]
+    variables = {"params": loaded["params"]}
+    if loaded["batch_stats"] is not None:
+        variables["batch_stats"] = loaded["batch_stats"]
+    single = single_module(a.arm, a.d_model, a.ssm_size, a.n_layers,
+                           training=False)
+    L = x.shape[1]
+    n_sites = a.n_layers + 1                       # layer inputs + pre-pooling
+
+    def fwd(m, xx, tt, ll, offs):
+        h = m.encoder.encoder(xx)
+        acts = []
+        for i, lyr in enumerate(m.encoder.layers):
+            h = h + offs[i]
+            h = lyr(h)
+            acts.append(h)
+        h = h + offs[len(m.encoder.layers)]
+        z = m.readout_proj(m.readout_norm(h))
+        pooled = jnp.mean(z, axis=0)
+        out = m.mlp_out(m.drop(nn.gelu(m.mlp_in(pooled))))
+        return out, acts
+
+    def loss_fn(offs):
+        def one(xx):
+            return single.apply(variables, xx, jnp.ones(L), None, offs,
+                                method=fwd)
+        logits, acts = jax.vmap(one)(x)
+        onehot = jax.nn.one_hot(y, RB.D_OUTPUT)
+        loss = optax.softmax_cross_entropy(
+            logits, optax.smooth_labels(onehot, a.label_smoothing)).mean()
+        return loss, acts
+
+    offs = [jnp.zeros((L, a.d_model)) for _ in range(n_sites)]
+    (loss, acts), g = jax.value_and_grad(loss_fn, has_aux=True)(offs)
+    sites = []
+    for i, gi in enumerate(g):
+        name = (f"core_input_layer_{i}" if i < a.n_layers
+                else "pre_pooling_activation")
+        gi = onp.asarray(gi)
+        sites.append(dict(site=name,
+                          grad_norm=float(onp.sqrt(onp.sum(gi ** 2))),
+                          grad_rms=float(onp.sqrt(onp.mean(gi ** 2)))))
+    act = []
+    for i, ai in enumerate(acts):
+        ai = onp.asarray(ai)
+        act.append(dict(layer=i, activation_rms=float(onp.sqrt(onp.mean(
+            ai ** 2)))))
+    return dict(loss=float(loss), sites=sites, activations=act,
+                mode="inference")
 
 
 def grad_report(loaded, x, y, training_mode=False):
@@ -407,213 +558,39 @@ def finite_difference_check(loaded, x):
                      "where rounding no longer dominates.")
 
 
-# ------------------------------------------------------------------- main
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--stage2_dir", default="/Users/durso/s5-runs/stage2")
-    ap.add_argument("--out_root",
-                    default="/Users/durso/s5-runs/stage2-diagnostics")
-    ap.add_argument("--data_cache", default="/Users/durso/s5-runs/sc10_cache")
-    ap.add_argument("--budget_s", type=float, default=1200.0)
-    ap.add_argument("--matmul_precision", default="highest")
-    ap.add_argument("--allow_cpu", action="store_true")
-    args = ap.parse_args()
-
-    backend = RB.require_gpu(args.allow_cpu)
-    jax.config.update("jax_default_matmul_precision", args.matmul_precision)
-    B = Budget(args.budget_s)
-
-    run_id = time.strftime("%Y%m%d-%H%M%S")
-    out = os.path.join(args.out_root, run_id)
-    os.makedirs(out, exist_ok=True)
-    print(f"[*] diagnostic output {out}")
-    print(f"[*] backend={backend} budget={args.budget_s:.0f}s")
-
-    # ---- A: inventory + hashes BEFORE
-    hashes_before = hash_tree(args.stage2_dir)
-    runs = []
-    for d in sorted(os.listdir(args.stage2_dir)):
-        rd = os.path.join(args.stage2_dir, d)
-        if os.path.isdir(rd):
-            runs.append(read_run(rd))
-    manifest = dict(run_id=run_id, stage2_dir=args.stage2_dir,
-                    n_runs=len(runs), backend=backend,
-                    provenance=provenance(),
-                    source_hashes_before=hashes_before,
-                    runs=[dict(name=r["name"],
-                               arm=r.get("config_json", {}).get("config", {})
-                               .get("arm"),
-                               lr=r.get("config_json", {}).get("config", {})
-                               .get("lr"),
-                               seed=r.get("config_json", {}).get("config", {})
-                               .get("seed"),
-                               epochs_recorded=len(r.get("metrics", [])),
-                               has_best=os.path.exists(
-                                   os.path.join(r["run_dir"], "best.msgpack")),
-                               has_last=os.path.exists(
-                                   os.path.join(r["run_dir"], "last.msgpack")),
-                               original_provenance=r.get("config_json", {})
-                               .get("provenance"))
-                          for r in runs])
-    write_json(os.path.join(out, "manifest.json"), manifest)
-    B.mark("A_inventory")
-
-    # ---- B: reconstruct the screen from saved records only
-    screen = []
-    for r in runs:
-        cfg = r.get("config_json", {}).get("config", {})
-        mets = r.get("metrics", [])
-        if not mets:
-            continue
-        best = max(mets, key=lambda m: m.get("val_accuracy", -1))
-        ties = [m for m in mets
-                if m.get("val_accuracy") == best.get("val_accuracy")]
-        screen.append(dict(
-            run=r["name"], arm=cfg.get("arm"), lr=cfg.get("lr"),
-            seed=cfg.get("seed"), epochs=len(mets),
-            best_epoch=best.get("epoch"), last_epoch=mets[-1].get("epoch"),
-            best_is_last=bool(best.get("epoch") == mets[-1].get("epoch")),
-            n_ties_on_val_accuracy=len(ties),
-            val_accuracy=best.get("val_accuracy"),
-            val_cross_entropy=best.get("val_cross_entropy"),
-            curve=[dict(epoch=m.get("epoch"),
-                        train_loss_SMOOTHED=m.get("train_loss"),
-                        train_acc=m.get("train_acc"),
-                        val_accuracy=m.get("val_accuracy"),
-                        val_cross_entropy_UNSMOOTHED=m.get(
-                            "val_cross_entropy"),
-                        grad_norm_LAST_MINIBATCH=m.get("grad_norm"),
-                        epoch_s_EXCLUDES_CHECKPOINT_WRITE=m.get("epoch_s"))
-                   for m in mets],
-            lr_schedule=dict(
-                kind="cosine_decay over steps_per_epoch*epochs",
-                note="TEN-EPOCH COSINE SCHEDULE, not a prefix of a 300-epoch "
-                     "schedule",
-                init_value=cfg.get("lr"), final_value=cfg.get("lr_final"),
-                epochs=cfg.get("epochs"))))
-    write_json(os.path.join(out, "screen_reconstruction.json"), screen)
-    B.mark("B_screen_reconstruction")
-
-    # ---- B2: corroborate restoration on validation (no reselection)
-    data, dmani = SC.load_splits(args.data_cache, splits=("train", "val"))
-    Xtr, Ytr = data["train"]
-    Xva, Yva = data["val"]
-    sel = {}
-    for s in screen:
-        if s["lr"] == 1e-3 and s["arm"] in ARMS_1E3:
-            sel[s["arm"]] = s
-    restore_checks = []
-    loaded_arms = {}
-    for arm in ARMS_1E3:
-        if arm not in sel or not B.ok(60):
-            B.mark(f"B2_{arm}", "skipped_budget")
-            continue
-        r = next(x for x in runs if x["name"] == sel[arm]["run"])
-        cfg = r["config_json"]["config"]
-        L = restore_readonly(r["run_dir"], cfg, "best")
-        loaded_arms[arm] = (L, r, sel[arm])
-        res = RB.evaluate_split(L["params"], L["batch_stats"], L["eval_model"],
-                                Xva, Yva, cfg.get("batch", 32))
-        n = res["n"]
-        saved_acc = sel[arm]["val_accuracy"]
-        saved_correct = int(round(saved_acc * n))
-        got_correct = int(round(res["accuracy"] * n))
-        restore_checks.append(dict(
-            arm=arm, run=sel[arm]["run"], n=n,
-            saved_accuracy=saved_acc, restored_accuracy=res["accuracy"],
-            saved_correct=saved_correct, restored_correct=got_correct,
-            counts_match=bool(saved_correct == got_correct),
-            saved_ce=sel[arm]["val_cross_entropy"],
-            restored_ce=res["cross_entropy"],
-            ce_abs_diff=abs(res["cross_entropy"]
-                            - sel[arm]["val_cross_entropy"]),
-            ce_tol=CE_TOL,
-            ce_within_tol=bool(abs(res["cross_entropy"]
-                                   - sel[arm]["val_cross_entropy"]) < CE_TOL),
-            checkpoint_epoch=L["meta"].get("epoch")))
-        print(f"  restore {arm}: saved {saved_correct} correct, "
-              f"restored {got_correct}, ce diff "
-              f"{restore_checks[-1]['ce_abs_diff']:.2e}")
-        B.mark(f"B2_{arm}")
-    write_json(os.path.join(out, "restore_checks.json"), restore_checks)
-
-    # ---- C: core extraction
-    cores, adapter_checks = [], []
-    for arm, (L, r, s) in loaded_arms.items():
-        if not B.ok(45):
-            B.mark(f"C_{arm}", "skipped_budget")
-            continue
-        adapter_checks.append(verify_adapter_vs_forward(L, arm))
-        cores.extend(extract_cores(L, arm))
-        B.mark(f"C_{arm}")
-    write_json(os.path.join(out, "cores.json"), cores)
-    write_json(os.path.join(out, "adapter_checks.json"), adapter_checks)
-
-    # ---- D: gradients and sensitivity
-    idx, xs, ys = fixed_subset(Xtr, Ytr)
-    write_json(os.path.join(out, "subset.json"),
-               dict(seed=SUBSET_SEED, n=int(len(idx)), indices=idx.tolist(),
-                    split="train",
-                    split_sha256=dmani["feature_sha256"]["train"],
-                    note="post-screen diagnostic sample, NOT an independent "
-                         "confirmation sample"))
-    grads, sens, fdchecks = [], [], []
-    for arm, (L, r, s) in loaded_arms.items():
-        if not B.ok(45):
-            B.mark(f"D1_{arm}", "skipped_budget")
-            continue
-        g = grad_report(L, xs, ys, training_mode=False)
-        g["arm"] = arm
-        grads.append(g)
-        B.mark(f"D1_{arm}")
-    for arm, (L, r, s) in loaded_arms.items():
-        if not B.ok(60):
-            B.mark(f"D2_{arm}", "skipped_budget")
-            continue
-        fdchecks.append(dict(arm=arm, **finite_difference_check(L, xs)))
-        sens.append(dict(arm=arm, anchors=sensitivity_probe(L, xs)))
-        B.mark(f"D2_{arm}")
-    for arm, (L, r, s) in loaded_arms.items():
-        if not B.ok(40):
-            B.mark(f"D3_{arm}", "skipped_budget")
-            continue
-        g = grad_report(L, xs, ys, training_mode=True)
-        g["arm"] = arm
-        g["label"] = ("TRAINING-MODE normalization: BatchNorm couples samples "
-                      "and times; not a purely causal recurrence diagnostic")
-        grads.append(g)
-        B.mark(f"D3_{arm}")
-    write_json(os.path.join(out, "gradients.json"), grads)
-    write_json(os.path.join(out, "sensitivity.json"), sens)
-    write_json(os.path.join(out, "fd_checks.json"), fdchecks)
-
-    # ---- plots (optional; never affects the read-only guarantee)
+def make_plots(out, screen, cores, sens, ST):
+    """Plots are OPTIONAL: a failure here never fails the diagnostic."""
     plots = dict(attempted=True, written=[], error=None)
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        # 1. training curves and the ten-epoch cosine schedule
         fig, ax = plt.subplots(1, 3, figsize=(15, 4))
+        spe = None
         for sc in screen:
             if sc["lr"] != 1e-3:
                 continue
+            spe = sc["lr_schedule"].get("steps_per_epoch_FROM_SAVED_METADATA") \
+                or spe
             ep = [c["epoch"] for c in sc["curve"]]
             ax[0].plot(ep, [c["val_accuracy"] for c in sc["curve"]],
                        marker="o", label=sc["arm"])
             ax[1].plot(ep, [c["train_loss_SMOOTHED"] for c in sc["curve"]],
                        marker="o", label=sc["arm"])
-        steps = onp.arange(0, 10 * 843)
-        cos10 = 1e-6 + (1e-3 - 1e-6) * 0.5 * (1 + onp.cos(onp.pi * steps
-                                                          / (10 * 843)))
-        cos300 = 1e-6 + (1e-3 - 1e-6) * 0.5 * (1 + onp.cos(onp.pi * steps
-                                                           / (300 * 843)))
-        ax[2].plot(steps, cos10, label="Stage 2: TEN-EPOCH cosine")
-        ax[2].plot(steps, cos300, "--",
-                   label="first 10 epochs of a 300-epoch cosine")
+        # R5: steps/epoch comes from SAVED METADATA, not a hardcoded constant
+        if spe:
+            steps = onp.arange(0, 10 * spe)
+            cos10 = 1e-6 + (1e-3 - 1e-6) * 0.5 * (
+                1 + onp.cos(onp.pi * steps / (10 * spe)))
+            cos300 = 1e-6 + (1e-3 - 1e-6) * 0.5 * (
+                1 + onp.cos(onp.pi * steps / (300 * spe)))
+            ax[2].plot(steps, cos10, label="Stage 2: TEN-EPOCH cosine")
+            ax[2].plot(steps, cos300, "--",
+                       label="first 10 epochs of a 300-epoch cosine")
+            ax[2].set_title(f"schedule definitions (analytic, NOT run)\n"
+                            f"steps/epoch = {spe} from saved metadata")
         ax[2].set_xlabel("update"); ax[2].set_ylabel("learning rate")
-        ax[2].set_title("schedule definitions (analytic, NOT run)")
         ax[0].set_title("validation accuracy"); ax[0].set_xlabel("epoch")
         ax[1].set_title("train loss (label-smoothed)"); ax[1].set_xlabel("epoch")
         for a_ in ax:
@@ -622,30 +599,32 @@ def main():
         f1 = os.path.join(out, "curves_and_schedule.png")
         fig.savefig(f1, dpi=110); plt.close(fig); plots["written"].append(f1)
 
-        # 2. poles and impulse energy by lag band, layer 0
-        fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-        for c in cores:
-            if c["layer"] != 0:
-                continue
-            ax[0].scatter(c["poles"]["eff_pole_re"], c["poles"]["eff_pole_im"],
-                          s=14, label=c["arm"], alpha=.7)
-            xs_ = range(len(BANDS))
-            ax[1].plot(list(xs_), [b["energy"] for b in
-                                   c["impulse_bands"]["bands"]],
-                       marker="o", label=c["arm"])
-        ax[0].set_title("effective poles, layer 0"); ax[0].grid(alpha=.3)
-        ax[0].set_xlabel("Re"); ax[0].set_ylabel("Im")
-        ax[1].set_yscale("log"); ax[1].set_title("impulse energy by lag band")
-        ax[1].set_xticks(list(range(len(BANDS))))
-        ax[1].set_xticklabels([f"{lo}-{hi}" for lo, hi in BANDS], fontsize=7)
-        ax[1].grid(alpha=.3)
-        for a_ in ax:
-            a_.legend(fontsize=7)
-        fig.tight_layout()
-        f2 = os.path.join(out, "poles_and_impulse.png")
-        fig.savefig(f2, dpi=110); plt.close(fig); plots["written"].append(f2)
+        if cores:
+            fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+            for c in cores:
+                if c["layer"] != 0:
+                    continue
+                ax[0].scatter(c["poles"]["continuous_pole_re"],
+                              c["poles"]["continuous_pole_im"],
+                              s=14, label=c["arm"], alpha=.7)
+                ax[1].plot(range(len(BANDS)),
+                           [b["energy"] for b in c["impulse_bands"]["bands"]],
+                           marker="o", label=c["arm"])
+            ax[0].set_title("CONTINUOUS poles, layer 0 (not log of discrete)")
+            ax[0].set_xlabel("Re"); ax[0].set_ylabel("Im"); ax[0].grid(alpha=.3)
+            ax[1].set_yscale("log")
+            ax[1].set_title("core impulse energy by lag band (windowed 0..511)")
+            ax[1].set_xticks(list(range(len(BANDS))))
+            ax[1].set_xticklabels([f"{lo}-{hi}" for lo, hi in BANDS],
+                                  fontsize=7)
+            ax[1].grid(alpha=.3)
+            for a_ in ax:
+                a_.legend(fontsize=7)
+            fig.tight_layout()
+            f2 = os.path.join(out, "poles_and_impulse.png")
+            fig.savefig(f2, dpi=110); plt.close(fig)
+            plots["written"].append(f2)
 
-        # 3. current vs history sensitivity, pre-pooling
         if sens:
             fig, ax = plt.subplots(1, len(ANCHORS), figsize=(11, 4))
             ax = onp.atleast_1d(ax)
@@ -665,35 +644,395 @@ def main():
                 ax[ai].grid(alpha=.3); ax[ai].legend(fontsize=7)
             fig.tight_layout()
             f3 = os.path.join(out, "sensitivity_by_lag.png")
-            fig.savefig(f3, dpi=110); plt.close(fig); plots["written"].append(f3)
-    except Exception as exc:                       # never fail the diagnostic
+            fig.savefig(f3, dpi=110); plt.close(fig)
+            plots["written"].append(f3)
+    except Exception as exc:
         plots["error"] = f"{type(exc).__name__}: {exc}"
         print(f"[!] plots skipped: {plots['error']}")
+        ST.skip("plots", plots["error"])
     write_json(os.path.join(out, "plots.json"), plots)
+    return plots
 
-    # ---- F: hashes AFTER
-    hashes_after = hash_tree(args.stage2_dir)
-    unchanged = hashes_before == hashes_after
-    diff = [k for k in set(hashes_before) | set(hashes_after)
-            if hashes_before.get(k) != hashes_after.get(k)]
-    summary = dict(run_id=run_id, out=out, backend=backend,
-                   wall_s=time.time() - B.t0, budget_s=args.budget_s,
-                   phases=B.phases,
-                   source_hashes_unchanged=bool(unchanged),
-                   source_hash_differences=diff,
-                   test_split_opened=False,
-                   data_manifest=dict(
-                       train=dmani["feature_sha256"]["train"],
-                       val=dmani["feature_sha256"]["val"]),
-                   n_arms_analysed=len(loaded_arms),
-                   plots=plots)
-    write_json(os.path.join(out, "summary.json"), summary)
-    print(f"[*] source hashes unchanged: {unchanged}")
-    if diff:
-        print(f"[!] CHANGED: {diff}")
-    print(f"[*] wall {summary['wall_s']:.1f}s of {args.budget_s:.0f}s")
-    print(f"DIAGNOSTIC_DONE out={out}")
-    return summary
+
+# ------------------------------------------------------------------- main
+PHASES = ("A", "B", "B2", "C", "C_init", "C_last", "D1", "D2", "D3")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stage2_dir", default="/Users/durso/s5-runs/stage2")
+    ap.add_argument("--out_root",
+                    default="/Users/durso/s5-runs/stage2-diagnostics")
+    ap.add_argument("--data_cache", default="/Users/durso/s5-runs/sc10_cache")
+    ap.add_argument("--budget_s", type=float, default=1200.0)
+    ap.add_argument("--deadline", type=float, default=None,
+                    help="absolute epoch deadline from the launcher, so the "
+                         "backend check and focused tests sit INSIDE the cap")
+    ap.add_argument("--reserve_s", type=float, default=25.0,
+                    help="cleanup reserve kept inside the cap")
+    ap.add_argument("--only_phases", default=None,
+                    help="comma-separated subset of "
+                         + ",".join(PHASES) +
+                         "; the documented way to run genuinely missing "
+                         "phases. Each invocation is otherwise a FRESH RERUN, "
+                         "not a resumption.")
+    ap.add_argument("--matmul_precision", default="highest")
+    ap.add_argument("--allow_cpu", action="store_true")
+    args = ap.parse_args()
+
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    out = os.path.join(args.out_root, run_id)
+    os.makedirs(out, exist_ok=True)
+    ST = Status(out)
+    B = Budget(args.budget_s, args.deadline)
+    want = set(PHASES if not args.only_phases
+               else [p.strip() for p in args.only_phases.split(",")])
+
+    hashes_before = None
+    hashes_after = None
+    hashes_ok = None                      # None = UNKNOWN, never assumed True
+    loaded_arms = {}
+    backend = "unknown"
+    interrupted = None
+
+    def _sigterm(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _sigterm)
+        except Exception:
+            pass
+
+    try:
+        # R4: GPU is verified INSIDE the budget and before any numerical work
+        backend = RB.require_gpu(args.allow_cpu)
+        jax.config.update("jax_default_matmul_precision", args.matmul_precision)
+        print(f"[*] output {out}")
+        print(f"[*] backend={backend} budget={B.limit:.0f}s "
+              f"reserve={args.reserve_s:.0f}s phases={sorted(want)}")
+
+        # ---- A: inventory + hashes BEFORE
+        hashes_before = hash_tree(args.stage2_dir)
+        runs = [read_run(os.path.join(args.stage2_dir, d))
+                for d in sorted(os.listdir(args.stage2_dir))
+                if os.path.isdir(os.path.join(args.stage2_dir, d))]
+        write_json(os.path.join(out, "manifest.json"), dict(
+            run_id=run_id, stage2_dir=args.stage2_dir, n_runs=len(runs),
+            backend=backend, provenance=provenance(),
+            source_hashes_before=hashes_before,
+            runs=[dict(name=r["name"],
+                       arm=r.get("config_json", {}).get("config", {}).get("arm"),
+                       lr=r.get("config_json", {}).get("config", {}).get("lr"),
+                       seed=r.get("config_json", {}).get("config", {}).get("seed"),
+                       epochs_recorded=len(r.get("metrics", [])),
+                       steps_per_epoch=r.get("config_json", {}).get("extra", {})
+                       .get("steps_per_epoch"),
+                       has_best=os.path.exists(os.path.join(r["run_dir"],
+                                                            "best.msgpack")),
+                       has_last=os.path.exists(os.path.join(r["run_dir"],
+                                                            "last.msgpack")),
+                       original_provenance=r.get("config_json", {})
+                       .get("provenance"))
+                  for r in runs]))
+        ST.record("A_inventory", len(runs) > 0, detail=f"{len(runs)} runs")
+        B.mark("A_inventory")
+
+        # ---- B: screen reconstruction from saved records only
+        screen = []
+        for r in runs:
+            cfg = r.get("config_json", {}).get("config", {})
+            extra = r.get("config_json", {}).get("extra", {})
+            mets = r.get("metrics", [])
+            if not mets:
+                continue
+            best = max(mets, key=lambda m: m.get("val_accuracy", -1))
+            ties = [m for m in mets
+                    if m.get("val_accuracy") == best.get("val_accuracy")]
+            spe = extra.get("steps_per_epoch")
+            screen.append(dict(
+                run=r["name"], arm=cfg.get("arm"), lr=cfg.get("lr"),
+                seed=cfg.get("seed"), epochs=len(mets),
+                best_epoch=best.get("epoch"), last_epoch=mets[-1].get("epoch"),
+                best_is_last=bool(best.get("epoch") == mets[-1].get("epoch")),
+                n_ties_on_val_accuracy=len(ties),
+                selection_rule_used_by_runner=
+                "first strict improvement in val_accuracy; ties keep the "
+                "EARLIER epoch",
+                val_accuracy=best.get("val_accuracy"),
+                val_cross_entropy=best.get("val_cross_entropy"),
+                curve=[dict(epoch=m.get("epoch"),
+                            train_loss_SMOOTHED=m.get("train_loss"),
+                            train_acc=m.get("train_acc"),
+                            val_accuracy=m.get("val_accuracy"),
+                            val_cross_entropy_UNSMOOTHED=m.get(
+                                "val_cross_entropy"),
+                            grad_norm_LAST_MINIBATCH=m.get("grad_norm"),
+                            epoch_s_EXCLUDES_CHECKPOINT_WRITE=m.get("epoch_s"))
+                       for m in mets],
+                lr_schedule=dict(
+                    kind="cosine_decay over steps_per_epoch*epochs",
+                    note="TEN-EPOCH COSINE SCHEDULE, not a prefix of a "
+                         "300-epoch schedule",
+                    init_value=cfg.get("lr"), final_value=cfg.get("lr_final"),
+                    epochs=cfg.get("epochs"),
+                    steps_per_epoch_FROM_SAVED_METADATA=spe,
+                    total_decay_steps=(spe * cfg["epochs"]
+                                       if spe and cfg.get("epochs") else None))))
+        write_json(os.path.join(out, "screen_reconstruction.json"), screen)
+        ST.record("B_screen_reconstruction", len(screen) > 0)
+        B.mark("B_screen_reconstruction")
+
+        # ---- B2: restoration corroboration (REQUIRED; gates everything after)
+        data, dmani = SC.load_splits(args.data_cache, splits=("train", "val"))
+        Xtr, Ytr = data["train"]
+        Xva, Yva = data["val"]
+        sel = {sc["arm"]: sc for sc in screen
+               if sc["lr"] == 1e-3 and sc["arm"] in ARMS_1E3}
+        restore_checks = []
+        for arm in ARMS_1E3:
+            if "B2" not in want:
+                ST.skip("B2_restore", "phase not selected", arm=arm)
+                continue
+            if arm not in sel:
+                ST.skip("B2_restore", "no lr=1e-3 run found", arm=arm,
+                        required=True)
+                continue
+            if not B.ok(args.reserve_s + 60):
+                ST.skip("B2_restore", "budget exhausted", arm=arm,
+                        required=True)
+                B.mark(f"B2_{arm}", "skipped_budget")
+                continue
+            r = next(x for x in runs if x["name"] == sel[arm]["run"])
+            cfg = r["config_json"]["config"]
+            L = restore_readonly(r["run_dir"], cfg, "best")
+            res = RB.evaluate_split(L["params"], L["batch_stats"],
+                                    L["eval_model"], Xva, Yva,
+                                    cfg.get("batch", 32))
+            n = res["n"]
+            saved_correct = int(round(sel[arm]["val_accuracy"] * n))
+            got_correct = int(round(res["accuracy"] * n))
+            ce_diff = abs(res["cross_entropy"] - sel[arm]["val_cross_entropy"])
+            rec = dict(arm=arm, run=sel[arm]["run"], n=n,
+                       saved_accuracy=sel[arm]["val_accuracy"],
+                       restored_accuracy=res["accuracy"],
+                       saved_correct=saved_correct, restored_correct=got_correct,
+                       counts_match=bool(saved_correct == got_correct),
+                       saved_ce=sel[arm]["val_cross_entropy"],
+                       restored_ce=res["cross_entropy"], ce_abs_diff=ce_diff,
+                       ce_tol=CE_TOL, ce_within_tol=bool(ce_diff < CE_TOL),
+                       checkpoint_epoch=L["meta"].get("epoch"),
+                       dtypes=L["casts"])
+            restore_checks.append(rec)
+            write_json(os.path.join(out, "restore_checks.json"), restore_checks)
+            ok = ST.record("B2_restore_counts", rec["counts_match"], arm=arm,
+                           detail=f"saved {saved_correct} vs restored "
+                                  f"{got_correct}")
+            ST.record("B2_restore_ce", rec["ce_within_tol"], arm=arm,
+                      detail=f"|diff| {ce_diff:.3e} vs tol {CE_TOL}")
+            print(f"  restore {arm}: saved {saved_correct}, restored "
+                  f"{got_correct}, ce diff {ce_diff:.2e}")
+            if ok:
+                loaded_arms[arm] = (L, r, sel[arm])
+            else:
+                print(f"  [FAIL] {arm}: restoration mismatch; dependent "
+                      f"interpretation for this arm is STOPPED")
+            B.mark(f"B2_{arm}")
+
+        # ---- C: core extraction, gated by the adapter check per arm
+        cores, adapter_checks = [], []
+        for arm, (L, r, sc) in list(loaded_arms.items()):
+            if "C" not in want or ST.blocked(arm):
+                ST.skip("C_cores", "arm blocked or phase not selected", arm=arm)
+                continue
+            if not B.ok(args.reserve_s + 45):
+                ST.skip("C_cores", "budget exhausted", arm=arm, required=True)
+                B.mark(f"C_{arm}", "skipped_budget")
+                continue
+            checks = verify_adapter_all_layers(L, arm)
+            adapter_checks.extend(checks)
+            write_json(os.path.join(out, "adapter_checks.json"), adapter_checks)
+            ok = all(c["passed"] for c in checks)
+            ST.record("C_adapter_equals_executed_core", ok, arm=arm,
+                      detail=f"worst rel "
+                             f"{max(c['worst_rel'] for c in checks):.2e} over "
+                             f"{len(checks)} layers")
+            if not ok:
+                continue
+            cores.extend(extract_cores(L, arm))
+            write_json(os.path.join(out, "cores.json"), cores)
+            B.mark(f"C_{arm}")
+
+        # ---- C_init: reconstructed seed-100 initialization (R5 D4, light)
+        init_cores = []
+        for arm, (L, r, sc) in list(loaded_arms.items()):
+            if "C_init" not in want or ST.blocked(arm):
+                continue
+            if not B.ok(args.reserve_s + 30):
+                ST.skip("C_init", "budget exhausted", arm=arm)
+                B.mark(f"C_init_{arm}", "skipped_budget")
+                continue
+            iv = {"params": L["init_params"]}
+            if L["init_batch_stats"] is not None:
+                iv["batch_stats"] = L["init_batch_stats"]
+            for layer in range(L["args"].n_layers):
+                core = SD.read_core(L["model"], iv, layer)
+                K = SD.impulse_matrices(core, N_LAGS)
+                init_cores.append(dict(
+                    arm=arm, layer=layer, label="RECONSTRUCTED INITIALIZATION "
+                                                "(not a saved checkpoint)",
+                    poles=SD.pole_summary(core),
+                    impulse_bands=SD.band_energy(K, BANDS),
+                    window_lags=N_LAGS,
+                    window_remainder="unknown (not bounded)"))
+            write_json(os.path.join(out, "init_cores.json"), init_cores)
+            B.mark(f"C_init_{arm}")
+
+        # ---- C_last: last vs best, lightweight pole summary only (R5)
+        last_cmp = []
+        for arm, (L, r, sc) in list(loaded_arms.items()):
+            if "C_last" not in want or ST.blocked(arm):
+                continue
+            if sc["best_is_last"]:
+                last_cmp.append(dict(arm=arm, compared=False,
+                                     reason="best IS last"))
+                continue
+            if not B.ok(args.reserve_s + 30):
+                ST.skip("C_last", "budget exhausted", arm=arm)
+                B.mark(f"C_last_{arm}", "skipped_budget")
+                continue
+            cfg = r["config_json"]["config"]
+            LL = restore_readonly(r["run_dir"], cfg, "last")
+            lv = {"params": LL["params"]}
+            if LL["batch_stats"] is not None:
+                lv["batch_stats"] = LL["batch_stats"]
+            for layer in range(LL["args"].n_layers):
+                last_cmp.append(dict(arm=arm, layer=layer, compared=True,
+                                     poles=SD.pole_summary(
+                                         SD.read_core(LL["model"], lv, layer))))
+            write_json(os.path.join(out, "last_vs_best.json"), last_cmp)
+            B.mark(f"C_last_{arm}")
+
+        # ---- D: gradients, activations and sensitivity
+        idx, xs, ys = fixed_subset(Xtr, Ytr)
+        write_json(os.path.join(out, "subset.json"),
+                   dict(seed=SUBSET_SEED, n=int(len(idx)),
+                        indices=idx.tolist(), split="train",
+                        split_sha256=dmani["feature_sha256"]["train"],
+                        note="post-screen diagnostic sample, NOT an "
+                             "independent confirmation sample"))
+        grads, sens, fdchecks, blocks = [], [], [], []
+        for arm, (L, r, sc) in list(loaded_arms.items()):
+            if "D1" not in want or ST.blocked(arm):
+                continue
+            if not B.ok(args.reserve_s + 45):
+                ST.skip("D1_gradients", "budget exhausted", arm=arm)
+                B.mark(f"D1_{arm}", "skipped_budget")
+                continue
+            g = grad_report(L, xs, ys, training_mode=False)
+            g["arm"] = arm
+            grads.append(g)
+            blocks.append(dict(arm=arm, **block_activation_report(L, xs, ys)))
+            write_json(os.path.join(out, "gradients.json"), grads)
+            write_json(os.path.join(out, "block_activations.json"), blocks)
+            B.mark(f"D1_{arm}")
+
+        for arm, (L, r, sc) in list(loaded_arms.items()):
+            if "D2" not in want or ST.blocked(arm):
+                continue
+            if not B.ok(args.reserve_s + 60):
+                ST.skip("D2_sensitivity", "budget exhausted", arm=arm)
+                B.mark(f"D2_{arm}", "skipped_budget")
+                continue
+            fd = dict(arm=arm, **finite_difference_check(L, xs))
+            fdchecks.append(fd)
+            write_json(os.path.join(out, "fd_checks.json"), fdchecks)
+            ST.record("D2_jvp_vs_finite_difference", fd["passed"], arm=arm,
+                      detail=f"rel {fd['rel_error']:.2e} at step "
+                             f"{fd['gate_step']:.0e}")
+            srec = dict(arm=arm, anchors=sensitivity_probe(L, xs))
+            sens.append(srec)
+            write_json(os.path.join(out, "sensitivity.json"), sens)
+            worst_future = max(
+                d["future_sensitivity_max"]
+                for a_ in srec["anchors"] for d in a_["directions"])
+            ST.record("D2_no_future_dependency", worst_future == 0.0, arm=arm,
+                      detail=f"max future sensitivity {worst_future:.3e}")
+            B.mark(f"D2_{arm}")
+
+        for arm, (L, r, sc) in list(loaded_arms.items()):
+            if "D3" not in want or ST.blocked(arm):
+                continue
+            if not B.ok(args.reserve_s + 40):
+                ST.skip("D3_training_mode_gradients",
+                        "budget exhausted (OPTIONAL phase)", arm=arm)
+                B.mark(f"D3_{arm}", "skipped_budget")
+                continue
+            g = grad_report(L, xs, ys, training_mode=True)
+            g["arm"] = arm
+            g["label"] = ("TRAINING-MODE normalization: BatchNorm couples "
+                          "samples and times; not a purely causal recurrence "
+                          "diagnostic")
+            grads.append(g)
+            write_json(os.path.join(out, "gradients.json"), grads)
+            B.mark(f"D3_{arm}")
+
+        make_plots(out, screen, cores, sens, ST)
+
+    except KeyboardInterrupt as exc:
+        interrupted = str(exc)
+        print(f"[!] interrupted: {exc}")
+    except Exception as exc:                      # preserve what exists
+        interrupted = f"{type(exc).__name__}: {exc}"
+        print(f"[!] ERROR: {interrupted}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # R3.5: always TRY to close the read-only guarantee; if we cannot,
+        # invariance is reported UNKNOWN, never assumed true.
+        try:
+            if hashes_before is not None:
+                hashes_after = hash_tree(args.stage2_dir)
+                hashes_ok = (hashes_before == hashes_after)
+        except Exception as exc:
+            print(f"[!] could not re-hash sources: {exc}")
+            hashes_ok = None
+        diff = ([k for k in set(hashes_before or {}) | set(hashes_after or {})
+                 if (hashes_before or {}).get(k) != (hashes_after or {}).get(k)]
+                if hashes_after is not None else None)
+        if hashes_ok is True:
+            ST.record("F_source_files_unchanged", True)
+        elif hashes_ok is False:
+            ST.record("F_source_files_unchanged", False, detail=str(diff))
+        else:
+            ST.skip("F_source_files_unchanged",
+                    "could not be determined", required=True)
+        budget_incomplete = bool(B.incomplete or interrupted)
+        status = ST.final(hashes_ok, budget_incomplete)
+        summary = dict(
+            run_id=run_id, out=out, backend=backend, status=status,
+            wall_s=time.time() - B.t0, budget_s=B.limit,
+            deadline_from_launcher=bool(args.deadline is not None),
+            phases=B.phases, interrupted=interrupted,
+            failed_required_checks=ST.failed_required,
+            unexecuted_checks=ST.unexecuted,
+            source_hashes_unchanged=hashes_ok,
+            source_hash_differences=diff,
+            test_split_opened=False,
+            n_arms_analysed=len(loaded_arms),
+            not_implemented=[
+                "initialization GRADIENT probes (D4): deferred by the "
+                "protocol's priority order; reconstructed-initialization CORES "
+                "are computed",
+            ])
+        write_json(os.path.join(out, "summary.json"), summary)
+        print(f"[*] source hashes unchanged: {hashes_ok}")
+        if diff:
+            print(f"[!] CHANGED: {diff}")
+        print(f"[*] wall {summary['wall_s']:.1f}s of {B.limit:.0f}s")
+        print(f"DIAGNOSTIC_STATUS={status} out={out}")
+        code = EXIT_CODES[status]
+        sys.exit(code)
 
 
 if __name__ == "__main__":
