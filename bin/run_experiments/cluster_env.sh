@@ -22,7 +22,7 @@ PY="$PROSPECTIVE_VENV/bin/python"
 cluster_check_env() {
   local ok=0
   echo "host        : $(hostname)"
-  echo "date        : $(date -Is)"
+  echo "date        : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "slurm job   : ${SLURM_JOB_ID:-<none>}"
   echo "visible gpus: ${CUDA_VISIBLE_DEVICES:-<unset>}"
   [ -x "$PY" ] || { echo "MISSING interpreter: $PY"; ok=1; }
