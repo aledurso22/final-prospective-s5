@@ -1637,3 +1637,36 @@ not run; the failed criterion was.**
 | GPU integration, stage 1 | 5 arms | `stage1/20260915-153757` | PASSED, exit 0 |
 | **Validation screening, stage 2** | **9 runs, seed 100** | **`stage2/manifest.jsonl`** | **EXECUTED — criterion FAILED** |
 | Final benchmark comparison, stage 3 | — | — | **not triggered** |
+
+## 12.13 Stage 2 diagnostic — executed, report linked
+
+A read-only diagnostic of the saved Stage 2 checkpoints was run on the cluster
+(`pgi15-gpu3`, SLURM 65870, commit `cc4c752`, output
+`/Users/durso/s5-runs/stage2-diagnostics/20260915-172533`).
+
+**Full findings: [`docs/GP_STAGE2_DIAGNOSTIC_REPORT.md`](GP_STAGE2_DIAGNOSTIC_REPORT.md).**
+
+**The Stage 2 verdict in s12.12 is unchanged: the predeclared screen FAILED.**
+The diagnostic explains the result; it does not revise it.
+
+Verification: restored validation counts matched the saved values **exactly**
+for all five arms with cross-entropy difference `0.00e+00`; the response adapter
+reproduced the executed core to **5e-08** over every layer and input; future
+input sensitivity was **0.0**; and the Stage 2 source file hashes were
+**unchanged**. Status `INCOMPLETE/3` for one reason only — `matplotlib` is
+absent, so the optional plots did not run; no required check failed and no
+phase was dropped for budget.
+
+Two distinct diagnoses, not one:
+
+* **`gp_fixed_m0`** changes the learned temporal filtering excessively. The
+  contract's own bound predicts that `a_eff = a/(1 - T a)` confines effective
+  modes to a disk of radius `1/(2T)`; at `T = 5` the measured trained poles sit
+  inside it, frequencies compressed **2.88x**, and the end-to-end history share
+  falls to **3.7 %** against **27.5 %** for its matched control.
+* **`gp_fixed_mass`** changes the computation **least** of the three
+  interventions — a 10-16 % counterfactual response change against 38-60 % for
+  alpha-P, and a dynamical current tap no larger than the ordinary control —
+  while costing ~2.5x the epoch time and double the recurrent carry.
+
+No gradient pathology, normalization effect or implementation defect was found.
