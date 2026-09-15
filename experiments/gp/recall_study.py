@@ -27,7 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import tasks.recall as T                                          # noqa: E402
 from s5.checkpointing import provenance                           # noqa: E402
-from s5.rawat_s5 import RHO_INIT_RECALL, init_substrate_ssm       # noqa: E402
+from s5.rawat_s5 import (LOG_RHO_BOUNDS, RHO_INIT_RECALL,         # noqa: E402
+                         RHO_ONLY_PARAM_NAME, init_substrate_ssm)
 from s5.recall_model import BatchRecallModel, parameter_count     # noqa: E402
 from s5.ssm_init import make_DPLR_HiPPO                           # noqa: E402
 from jax.scipy.linalg import block_diag                           # noqa: E402
@@ -46,6 +47,11 @@ SEEDS = (100, 101, 102)
 
 #: response-change gate, declared before execution
 INIT_RESPONSE_TOL = 0.01          # 1% relative, signal-only core response
+#: zero-reference branch: if the ordinary core response is numerically zero the
+#: arm's must be too, so an ABSOLUTE criterion applies instead of a ratio
+INIT_RESPONSE_ABS_TOL = 1e-9
+#: the gate runs before EVERY seed's continuations, not once
+GATE_EVERY_SEED = True
 IMPULSE_LAGS = 128
 N_FREQ = 65
 
@@ -148,14 +154,56 @@ def loss_fn(params, model, x, y):
 # Both jitted ONCE at module level with the module and optimizer as STATIC
 # arguments, so the compilation is reused across seeds. Defining a jitted
 # closure inside a helper would retrace on every call.
+def _rho_leaves(tree):
+    """The learned-response leaves of a parameter tree, if any."""
+    from flax.traverse_util import flatten_dict
+    return [v for k, v in flatten_dict(tree).items()
+            if k[-1] == RHO_ONLY_PARAM_NAME]
+
+
+def project_response_leaves(params):
+    """Project the RAW log-response back into the declared interval.
+
+    Applied AFTER the optimizer update, and it is not optional. With only a
+    forward clip, a raw eta above u = log(0.9999) gives d(rho)/d(eta) = 0 and
+    therefore ZERO task gradient through that leaf, so nothing can bring it
+    back: AdamW's decoupled decay shrinks eta toward 0, which is AWAY from a
+    negative upper bound. The parameter would be stranded outside the
+    differentiable region while the forward law stayed admissible - the failure
+    mode is silent. Optimizer state is untouched; only parameters are projected.
+    """
+    def fix(path, v):
+        name = path[-1].key if hasattr(path[-1], "key") else str(path[-1])
+        return jnp.clip(v, *LOG_RHO_BOUNDS) if name == RHO_ONLY_PARAM_NAME else v
+
+    return jax.tree_util.tree_map_with_path(fix, params)
+
+
 @partial(jax.jit, static_argnums=(0, 1))
 def train_step(model, tx, params, opt_state, x, y):
     (loss, logits), g = jax.value_and_grad(loss_fn, has_aux=True)(
         params, model, x, y)
     upd, opt_state = tx.update(g, opt_state, params)
-    params = optax.apply_updates(params, upd)
+    raw = optax.apply_updates(params, upd)
+    params = project_response_leaves(raw)
     acc = jnp.mean(jnp.argmax(logits, -1) == y)
-    return params, opt_state, loss, acc, optax.global_norm(g)
+    # telemetry so the bound interaction is OBSERVABLE rather than inferred
+    pre, post = _rho_leaves(raw), _rho_leaves(params)
+    if pre:
+        moved = jnp.sum(jnp.stack([jnp.sum(jnp.abs(a - b) > 0)
+                                   for a, b in zip(pre, post)]))
+        over = jnp.max(jnp.stack([
+            jnp.max(jnp.maximum(jnp.maximum(a - LOG_RHO_BOUNDS[1],
+                                            LOG_RHO_BOUNDS[0] - a), 0.0))
+            for a in pre]))
+        gr = jnp.sqrt(sum(jnp.sum(v ** 2) for v in _rho_leaves(g)))
+        ur = jnp.sqrt(sum(jnp.sum(v ** 2) for v in _rho_leaves(upd)))
+    else:
+        moved = jnp.asarray(0); over = jnp.asarray(0.0)
+        gr = jnp.asarray(0.0); ur = jnp.asarray(0.0)
+    tel = dict(n_projected=moved, max_overshoot=over, rho_grad_norm=gr,
+               rho_update_norm=ur)
+    return params, opt_state, loss, acc, optax.global_norm(g), tel
 
 
 @partial(jax.jit, static_argnums=(0,))
@@ -176,6 +224,20 @@ def evaluate(model, params, x, y, batch=EVAL_BATCH):
 
 
 # ------------------------------------------------------------ cloning ------
+def trainable_count(params, arm):
+    """STORED values and TRAINABLE degrees of freedom are not the same number.
+
+    The frozen arm stores the rho leaves but excludes them from learning, so
+    reporting one count for both would overstate its trainable capacity.
+    """
+    total = parameter_count(params)
+    rho = sum(int(v.size) for v in _rho_leaves(params))
+    return dict(stored=total, rho_leaves=rho,
+                trainable=(total - rho if arm == "gp_rho_frozen" else total),
+                note=("gp_rho_frozen stores the rho leaves but does not train "
+                      "them" if arm == "gp_rho_frozen" else None))
+
+
 def clone_common(src, dst):
     """Copy every parameter the two trees SHARE, leave the rest as initialized.
 
@@ -336,6 +398,19 @@ def write(path, obj):
         json.dump(jsonable(obj), fh, indent=2)
 
 
+def save_params(path, params):
+    """Save a parameter tree so a later audit does not depend on summaries.
+
+    The first execution saved only clipped summaries, so its raw overshoot can
+    no longer be recovered. Any corrected execution saves the tree itself.
+    """
+    from flax import serialization
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(serialization.to_bytes(params))
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out_root", default="/Users/durso/s5-runs/recall")
@@ -383,7 +458,15 @@ def main():
     probe = T.probe_interventions(onp.random.RandomState(1234), 64)
     struct = T.check_pairing(*eval_sets[32])
     status["task_structure"] = struct
+    # The REALIZED training-delay distribution is recorded rather than assumed:
+    # the generator cycles delays within each batch, so a 16-pair batch holds
+    # 6/5/5 pairs at delays 8/32/64, i.e. 37.5/31.25/31.25 per cent, not equal
+    # thirds. The generator is NOT changed here; only the fact is recorded.
+    status["realized_training_delay_distribution"] = \
+        T.realized_delay_counts(BATCH // 2)
     print(f"[*] task check: {struct}")
+    print(f"[*] realized training delay mix: "
+          f"{status['realized_training_delay_distribution']}")
     write(os.path.join(out, "status.json"), status)
 
     all_rows = []
@@ -405,19 +488,23 @@ def main():
         p = p0
         for i in range(args.warmup):
             x, y = stream[i]
-            p, opt, loss, acc, gn = train_step(model_o, tx, p, opt,
-                                               jnp.asarray(x), jnp.asarray(y))
+            p, opt, loss, acc, gn, _tel = train_step(
+                model_o, tx, p, opt, jnp.asarray(x), jnp.asarray(y))
         loss.block_until_ready()
         warm_s = time.time() - t_w
         print(f"[seed {seed}] warm-up {args.warmup} updates in {warm_s:.1f}s "
               f"loss={float(loss):.4f} acc={float(acc):.3f}")
+        save_params(os.path.join(out, "params", f"warmup_seed{seed}.msgpack"), p)
         status["stages"].append(dict(seed=seed, stage="warmup",
                                      wall_s=warm_s, loss=float(loss),
                                      acc=float(acc)))
         write(os.path.join(out, "status.json"), status)
 
-        # ---- initialization response gate, before ANY continuation
-        if status["gate"] is None:
+        # ---- initialization response gate, before THIS seed's continuations
+        #
+        # Runs for EVERY seed: each warm-up has different learned poles and
+        # readouts, so a single seed's probe does not certify the others.
+        if GATE_EVERY_SEED or status.get("gate") is None:
             gate = dict(seed=seed, arms={})
             xprobe = jnp.asarray(eval_sets[32][0][:32])
             for arm in ("gp_rho", "gp_rho_frozen", "rawat", "professor"):
@@ -438,26 +525,62 @@ def main():
                       f"{('%.4e' % w) if w is not None else 'n/a'}"
                       f"   query-logit rel = "
                       f"{('%.4e' % ql['rel']) if ql['rel'] is not None else 'n/a'}")
-            gp_worst = max(
-                v for k in ("gp_rho", "gp_rho_frozen")
-                for v in [gate["arms"][k]["worst_impulse_rel"]]
-                if v is not None)
-            gate["gp_worst_impulse_rel"] = gp_worst
+            # BOTH declared criteria are enforced, not just the impulse one,
+            # non-finite values fail, and the zero-reference branch applies an
+            # ABSOLUTE criterion instead of silently dropping the layer.
+            failures, worst_imp, worst_freq = [], 0.0, 0.0
+            for k in ("gp_rho", "gp_rho_frozen"):
+                for lay in gate["arms"][k]["layers"]:
+                    for kind, rel, absd in (
+                            ("impulse", lay["impulse_rel"],
+                             lay["impulse_abs_diff"]),
+                            ("frequency", lay["freq_rel"],
+                             lay["freq_abs_diff"])):
+                        if not onp.isfinite(absd):
+                            failures.append(f"{k} L{lay['layer']} {kind}: "
+                                            f"non-finite")
+                            continue
+                        if rel is None:                 # zero reference
+                            if absd > INIT_RESPONSE_ABS_TOL:
+                                failures.append(
+                                    f"{k} L{lay['layer']} {kind}: zero "
+                                    f"reference but abs {absd:.3e} > "
+                                    f"{INIT_RESPONSE_ABS_TOL:.0e}")
+                            continue
+                        if not onp.isfinite(rel):
+                            failures.append(f"{k} L{lay['layer']} {kind}: "
+                                            f"non-finite relative")
+                            continue
+                        if kind == "impulse":
+                            worst_imp = max(worst_imp, rel)
+                        else:
+                            worst_freq = max(worst_freq, rel)
+                        if rel > INIT_RESPONSE_TOL:
+                            failures.append(f"{k} L{lay['layer']} {kind}: "
+                                            f"{rel:.3e} > "
+                                            f"{INIT_RESPONSE_TOL:.0e}")
+            gate["gp_worst_impulse_rel"] = worst_imp
+            gate["gp_worst_frequency_rel"] = worst_freq
             gate["tolerance"] = INIT_RESPONSE_TOL
-            gate["passed"] = bool(gp_worst <= INIT_RESPONSE_TOL)
+            gate["abs_tolerance_zero_reference"] = INIT_RESPONSE_ABS_TOL
+            gate["failures"] = failures
+            gate["passed"] = not failures
+            gate["scope"] = ("finite-window impulse over 0..127 lags and a "
+                             "65-point frequency grid, at THIS seed's warm-up. "
+                             "Not a uniform transfer-function theorem.")
+            status.setdefault("gates", []).append(gate)
             status["gate"] = gate
             write(os.path.join(out, "status.json"), status)
             if not gate["passed"]:
-                print(f"[STOP] generalized arms' signal-only core response "
-                      f"changes by {gp_worst:.4e} at initialization, above the "
-                      f"predeclared {INIT_RESPONSE_TOL:.0e}. Reporting and "
-                      f"stopping this initialization route WITHOUT reading "
-                      f"comparative scores, as the protocol requires.")
+                print(f"[STOP] seed {seed}: initialization gate FAILED: "
+                      f"{gate['failures']}. Reporting and stopping WITHOUT "
+                      f"reading comparative scores, as the protocol requires.")
                 status["stopped_by_gate"] = True
                 write(os.path.join(out, "status.json"), status)
                 print(f"RECALL_STATUS=GATE_STOP out={out}")
                 return 3
-            print(f"[gate] PASSED: worst {gp_worst:.4e} <= "
+            print(f"[gate] seed {seed} PASSED: worst impulse {worst_imp:.4e}, "
+                  f"worst frequency {worst_freq:.4e}, both <= "
                   f"{INIT_RESPONSE_TOL:.0e}")
 
         # ---- projection before comparative training
@@ -491,17 +614,32 @@ def main():
             rho0 = None
             if arm in ("gp_rho", "gp_rho_frozen"):
                 from flax.traverse_util import flatten_dict
-                rho0 = {"/".join(k): onp.exp(onp.clip(onp.asarray(v),
-                                                      -9.21, -1e-4)).tolist()
-                        for k, v in flatten_dict(p_a).items()
-                        if k[-1] == "log_response_rho_only"}
+                rho0 = {"/".join(k): dict(
+                    raw=onp.asarray(v).tolist(),
+                    rho=onp.exp(onp.clip(onp.asarray(v),
+                                         *LOG_RHO_BOUNDS)).tolist())
+                    for k, v in flatten_dict(p_a).items()
+                    if k[-1] == RHO_ONLY_PARAM_NAME}
             t_a = time.time()
             q = p_a
+            n_proj_total, max_over, grad_sum, upd_sum = 0, 0.0, 0.0, 0.0
             for i in range(args.updates):
                 x, y = stream[args.warmup + i]
-                q, opt_a, loss, acc, gn = train_step(
+                q, opt_a, loss, acc, gn, tel = train_step(
                     m_a, tx_a, q, opt_a, jnp.asarray(x), jnp.asarray(y))
+                n_proj_total += int(tel["n_projected"])
+                max_over = max(max_over, float(tel["max_overshoot"]))
+                grad_sum += float(tel["rho_grad_norm"])
+                upd_sum += float(tel["rho_update_norm"])
             loss.block_until_ready()
+            projection_telemetry = dict(
+                n_projection_events=n_proj_total,
+                max_raw_overshoot_beyond_bound=max_over,
+                mean_rho_grad_norm=grad_sum / max(args.updates, 1),
+                mean_rho_update_norm=upd_sum / max(args.updates, 1),
+                note=("counts every raw entry the post-update projection had to "
+                      "move back into the interval; a large count means the "
+                      "bound was repeatedly active during training"))
             wall = time.time() - t_a
             per_delay = {}
             for d, (xe, ye) in eval_sets.items():
@@ -526,10 +664,19 @@ def main():
             rho_final = None
             if arm in ("gp_rho", "gp_rho_frozen"):
                 from flax.traverse_util import flatten_dict
-                rho_final = {"/".join(k): onp.exp(onp.clip(onp.asarray(v),
-                                                           -9.21, -1e-4)).tolist()
-                             for k, v in flatten_dict(q).items()
-                             if k[-1] == "log_response_rho_only"}
+                lo, hi = LOG_RHO_BOUNDS
+                rho_final = {}
+                for k, v in flatten_dict(q).items():
+                    if k[-1] != RHO_ONLY_PARAM_NAME:
+                        continue
+                    raw = onp.asarray(v)
+                    rho_final["/".join(k)] = dict(
+                        raw=raw.tolist(),
+                        rho=onp.exp(onp.clip(raw, lo, hi)).tolist(),
+                        n_at_upper=int(onp.sum(raw >= hi - 1e-12)),
+                        n_at_lower=int(onp.sum(raw <= lo + 1e-12)),
+                        n_outside_raw=int(onp.sum((raw > hi) | (raw < lo))),
+                        n_modes=int(raw.size))
             from flax.traverse_util import flatten_dict
             clock = {"/".join(k): onp.exp(onp.asarray(v)).ravel().tolist()
                      for k, v in flatten_dict(q).items() if k[-1] == "log_step"}
@@ -539,7 +686,14 @@ def main():
                        params=parameter_count(q), state_counts=counts,
                        final_train_loss=float(loss), final_train_acc=float(acc),
                        interventions=interv, rho_init=rho0, rho_final=rho_final,
+                       projection_telemetry=(projection_telemetry
+                                             if arm in ("gp_rho",
+                                                        "gp_rho_frozen")
+                                             else None),
+                       trainable_params=trainable_count(q, arm),
                        effective_clock=clock, **extra)
+            save_params(os.path.join(out, "params",
+                                     f"final_seed{seed}_{arm}.msgpack"), q)
             all_rows.append(row)
             status["results"] = all_rows
             write(os.path.join(out, "results.json"), all_rows)

@@ -423,3 +423,119 @@ def test_rho_gradient_converges_like_a_second_order_difference():
     assert rels[0] / rels[2] > 1e3, ladder
     # 3. reaching a floor consistent with the arithmetic actually used
     assert min(rels) < 1e-4, ladder
+
+
+# ---------------------------------------------- post-update projection (R1) --
+def test_raw_response_is_projected_back_after_an_outward_update():
+    """The production path must not strand a raw parameter outside the bound.
+
+    Forces an outward crossing, then checks that the projection pulls it back
+    AND that an inward task gradient can still move it - which is exactly what
+    a forward clip alone cannot provide, since d(rho)/d(eta) = 0 beyond the
+    bound gives zero task gradient and AdamW's decay shrinks eta toward zero,
+    away from a negative upper bound.
+    """
+    from flax.traverse_util import flatten_dict, unflatten_dict
+    from s5.rawat_s5 import LOG_RHO_BOUNDS
+    lo, hi = LOG_RHO_BOUNDS
+    m, p = RS.init_params("gp_rho", 0)
+    flat = dict(flatten_dict(p))
+    key = [k for k in flat if k[-1] == RHO_ONLY_PARAM_NAME][0]
+
+    # 1. a raw value pushed far outside is projected back onto the bound
+    outside = unflatten_dict({**flat, key: np.full_like(flat[key], hi + 5.0)})
+    back = flatten_dict(RS.project_response_leaves(outside))[key]
+    assert float(np.max(back)) <= hi + 1e-12
+    assert float(np.min(back)) >= lo - 1e-12
+    below = unflatten_dict({**flat, key: np.full_like(flat[key], lo - 5.0)})
+    assert float(np.min(flatten_dict(
+        RS.project_response_leaves(below))[key])) >= lo - 1e-12
+
+    # 2. an UNPROJECTED outward value has exactly zero task gradient: the
+    #    failure mode the projection exists to prevent
+    rng = onp.random.RandomState(51)
+    x, y = T.generate_fixed_delay(rng, 16, delay=32)
+    x, y = np.asarray(x), np.asarray(y)
+
+    def grad_at(tree):
+        def L(params):
+            return RS.loss_fn(params, m, x, y)[0]
+        return flatten_dict(jax.grad(L)(tree))[key]
+
+    assert float(np.max(np.abs(grad_at(outside)))) == 0.0
+
+    # 3. after projection onto the bound the gradient is available again
+    projected = RS.project_response_leaves(outside)
+    assert float(np.max(np.abs(grad_at(projected)))) > 0.0
+
+
+def test_a_training_step_projects_and_reports_the_bound_interaction():
+    """The production train_step, not a helper: an outward step must be
+    projected, counted, and its overshoot reported."""
+    from flax.traverse_util import flatten_dict, unflatten_dict
+    from s5.rawat_s5 import LOG_RHO_BOUNDS
+    lo, hi = LOG_RHO_BOUNDS
+    rng = onp.random.RandomState(53)
+    x, y = T.generate_fixed_delay(rng, 32, delay=32)
+    x, y = np.asarray(x), np.asarray(y)
+    m, p = RS.init_params("gp_rho", 0)
+    flat = dict(flatten_dict(p))
+    key = [k for k in flat if k[-1] == RHO_ONLY_PARAM_NAME][0]
+    start = unflatten_dict({**flat, key: np.full_like(flat[key], hi - 1e-9)})
+    tx = RS.make_tx()
+    opt = tx.init(start)
+    q, opt, loss, acc, gn, tel = RS.train_step(m, tx, start, opt, x, y)
+    raw = flatten_dict(q)[key]
+    assert float(np.max(raw)) <= hi + 1e-12, "projection did not hold the bound"
+    assert float(np.min(raw)) >= lo - 1e-12
+    assert int(tel["n_projected"]) >= 0
+    assert float(tel["max_overshoot"]) >= 0.0
+    assert float(tel["rho_grad_norm"]) >= 0.0
+
+
+def test_the_frozen_arm_is_unchanged_by_the_projection():
+    rng = onp.random.RandomState(57)
+    x, y = T.generate_fixed_delay(rng, 32, delay=32)
+    x, y = np.asarray(x), np.asarray(y)
+    from flax.traverse_util import flatten_dict
+    m, p = RS.init_params("gp_rho_frozen", 0)
+    tx = RS.make_tx(freeze_rho=True)
+    opt = tx.init(p)
+    q, opt, loss, acc, gn, tel = RS.train_step(m, tx, p, opt, x, y)
+    a = flatten_dict(p); b = flatten_dict(q)
+    for k in a:
+        if k[-1] == RHO_ONLY_PARAM_NAME:
+            assert float(np.max(np.abs(a[k] - b[k]))) == 0.0, "/".join(k)
+    assert int(tel["n_projected"]) == 0
+    moved = max(float(np.max(np.abs(a[k] - b[k]))) for k in a if k[-1] == "B")
+    assert moved > 0.0, "ordinary weights must still train"
+
+
+def test_stored_and_trainable_counts_are_reported_separately():
+    _, p = RS.init_params("gp_rho_frozen", 0)
+    c = RS.trainable_count(p, "gp_rho_frozen")
+    assert c["stored"] > c["trainable"]
+    assert c["stored"] - c["trainable"] == c["rho_leaves"]
+    _, q = RS.init_params("gp_rho", 0)
+    d = RS.trainable_count(q, "gp_rho")
+    assert d["stored"] == d["trainable"]
+
+
+def test_realized_delay_distribution_is_reported_not_assumed_equal():
+    r = T.realized_delay_counts(16)
+    assert r["counts"] == {8: 6, 32: 5, 64: 5}
+    assert r["equal"] is False
+    assert abs(r["fractions"][8] - 0.375) < 1e-9
+    assert T.realized_delay_counts(15)["equal"] is True
+
+
+def test_gate_enforces_both_criteria_and_the_zero_reference_branch():
+    """The decision must use impulse AND frequency, and must not drop a
+    zero-reference layer."""
+    assert RS.INIT_RESPONSE_ABS_TOL > 0.0
+    assert RS.GATE_EVERY_SEED is True
+    src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "experiments", "gp",
+        "recall_study.py")).read()
+    assert "freq_rel" in src.split("failures, worst_imp")[1][:2000]
+    assert "zero reference" in src

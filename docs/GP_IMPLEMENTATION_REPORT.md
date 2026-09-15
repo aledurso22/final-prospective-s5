@@ -1733,7 +1733,20 @@ a real recall probe, and it puts the earlier 84.85 % on mean-pooled speech in
 context: the same mechanism is at chance here.
 
 Learning `rho` helped against freezing it in all three seeds (+0.911 pp), but
-the median final `rho` is the declared **ceiling** — 27-28 of 32 modes moved
-*up* into the clip, toward the ordinary-SSM limit — so it does not support the
-generalized response being the active ingredient. A protocol statement of mine
-that `rho` could "effectively only fall" is corrected in the report.
+what that movement meant cannot be read from this run. A coordinator review
+found that the **raw response leaf was never projected back into its interval
+after an optimizer update**: above the bound the task gradient is exactly zero
+and AdamW's decay pushes `eta` further away, so a median at the ceiling is
+equally consistent with a boundary optimum and with a clipping lockout. The
+repair is committed with regression coverage; **no corrected run has been
+executed**, and missing projection is not evidence that a repaired run would
+score differently. See
+[`docs/RECALL_CORRECTION_PLAN.md`](RECALL_CORRECTION_PLAN.md).
+
+Also corrected there and in the report: the initialization gate covered **seed
+100 only** and enforced the impulse criterion alone, so the arms are
+*approximately matched on those probes*, not verified across the study; the
+protocol reversed the mass direction (`mu = T rho`, so lowering `rho` lowers
+mass); the `+0.3` pp threshold was never declared for this study and is
+withdrawn; and the realized training-delay mix is 37.5/31.25/31.25 per cent
+rather than equal thirds.

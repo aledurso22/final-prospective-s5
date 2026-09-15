@@ -12,7 +12,11 @@ Generator, fixed for this study:
   unmarked distractor drawn from the same alphabet.
 * The target is the symbol of the LATEST marked cue, regardless of the
   distractors in between.
-* Query-to-latest-cue delay is 8, 32 or 64 in training, equally represented.
+* Query-to-latest-cue delay is 8, 32 or 64 in training. NOTE: the cycle
+  restarts inside each batch, so a 16-pair batch realizes 6/5/5 pairs at
+  delays 8/32/64, i.e. 37.5 / 31.25 / 31.25 per cent - close to, but not
+  exactly, equal representation. `realized_delay_counts` reports the actual
+  mix, and the runner records it.
   The gap between the two cues is drawn independently from 8, 16, 24. Delay 96
   is HELD OUT for extrapolation and never trained or selected on.
 * Sequences are generated in PAIRS with identical distractors and identical
@@ -48,7 +52,12 @@ def generate(rng, n_pairs, delays=TRAIN_DELAYS, gaps=CUE_GAPS):
     """`2 * n_pairs` sequences: each pair shares everything but swapped cues.
 
     Returns (x, y) with x float32 (2*n_pairs, SEQ_LEN, N_CHANNELS) and y int32.
-    Target classes and pair order are balanced by construction.
+
+    Pair order is balanced by construction: each pair contributes both
+    orderings of the same two marked symbols, so the two targets always appear
+    together. Target CLASSES are balanced only in EXPECTATION - the symbols
+    themselves are sampled uniformly at random, not assigned round-robin.
+    `check_pairing` reports the realized class counts.
     """
     xs, ys = [], []
     for i in range(n_pairs):
@@ -71,6 +80,22 @@ def generate(rng, n_pairs, delays=TRAIN_DELAYS, gaps=CUE_GAPS):
     y = onp.asarray(ys, dtype=onp.int32)
     perm = rng.permutation(x.shape[0])
     return x[perm], y[perm]
+
+
+def realized_delay_counts(n_pairs, delays=TRAIN_DELAYS):
+    """The ACTUAL delay mix a batch of `n_pairs` realizes.
+
+    `generate` assigns `delays[i % len(delays)]`, and the cycle restarts in
+    every batch, so the mix is only exactly equal when `n_pairs` is a multiple
+    of `len(delays)`. Reported rather than assumed.
+    """
+    counts = {int(d): 0 for d in delays}
+    for i in range(n_pairs):
+        counts[int(delays[i % len(delays)])] += 1
+    total = max(sum(counts.values()), 1)
+    return dict(n_pairs=int(n_pairs), counts=counts,
+                fractions={k: v / total for k, v in counts.items()},
+                equal=bool(len(set(counts.values())) == 1))
 
 
 def generate_fixed_delay(rng, n, delay, gaps=CUE_GAPS):

@@ -51,8 +51,10 @@ independent microscopic derivation.
 `tasks/recall.py`. 8 symbols, length 128, query at index 127 carrying **no
 symbol payload**. Exactly two marked cues; every other earlier token is an
 unmarked distractor from the same alphabet. **Target = the symbol of the latest
-marked cue.** Training delays 8, 32, 64 equally represented; cue gap from
-8/16/24. Sequences are generated in **pairs** sharing distractors and marker
+marked cue.** Training delays 8, 32, 64 cycled within each batch, which for a
+16-pair batch realizes **6/5/5 pairs = 37.5 / 31.25 / 31.25 per cent**, close
+to but not exactly equal representation; the runner records the realized mix.
+Cue gap from 8/16/24. Sequences are generated in **pairs** sharing distractors and marker
 positions with the two marked symbols swapped, so the pair has the same token
 multiset and different targets and no bag-of-symbols statistic separates them.
 
@@ -106,18 +108,34 @@ The shared warm-up cost is reported. **This does not answer which model trains
 best from scratch**, and Rawat's mechanism is transplanted here, not reproduced
 at its published schedule.
 
+The raw log-response leaf is **projected back into the declared interval after
+every optimizer update**, not merely clipped in the forward pass. A forward clip
+alone leaves a raw value above the upper bound with `d(rho)/d(eta) = 0` and
+therefore **zero task gradient**, and AdamW's decoupled decay shrinks `eta`
+toward zero, which is *away* from a negative upper bound — so nothing brings it
+back. Optimizer state is preserved; only parameters are projected. Raw values,
+executed `rho`, boundary occupancy and projection counts are logged.
+
 `rho` is initialized at **0.9998** — a declared initialization choice, not a
 physiological measurement.
 
-**A property of that choice, recorded before execution.** In log space
-`log(0.9998) = -2.000e-4` sits only **1.0e-4** below the declared upper bound
-`log(1 - 1e-4)`. So `rho` starts essentially **at its ceiling** and the
-learnable direction is effectively one-sided: it can decrease, adding mass and
-moving away from the ordinary-SSM limit, while any increase is absorbed by the
-forward clip almost immediately. That is consistent with the physics — `rho` is
-`M/(gamma T)` and `rho <= 1` is the admissible region, so the ceiling is a
-physical limit rather than an arbitrary one — but it means "`rho` moved" can
-only mean "`rho` fell", and the learned distribution must be read that way.
+**A property of that choice — CORRECTED after the coordinator's review.** In
+log space `log(0.9998) = -2.000e-4` sits **1.0e-4 BELOW** the declared upper
+bound `log(1 - 1e-4)`. `rho` can therefore **rise as well as fall**, and in the
+executed run it mostly rose.
+
+Two statements in an earlier version of this section were wrong and are
+withdrawn:
+
+* *"it can decrease, adding mass"* — **reversed**. With `gamma_n = 1` the mass
+  is `mu = T rho`, so **decreasing `rho` DECREASES the mass**. What decreasing
+  `rho` does is break the `rho = 1` pole-zero cancellation and change the
+  observable contribution of the auxiliary dynamics; it is not the same thing
+  as increasing memory importance.
+* *"`rho` moved can only mean `rho` fell"* — false, for the reason above.
+
+`rho = 1` is the **physical** family boundary; `0.9999` is a **chosen numerical
+margin** below it, not a physical limit.
 
 It also makes a finite-difference gradient check at the initialization point
 invalid: a usable float32 step of 1e-2 is 100x the available headroom, so the
@@ -135,11 +153,17 @@ modules:
 * **signal-only** core impulse response over lags 0..127, with the native `D`
   contribution **removed**, relative Frobenius
   `||K_arm - K_ord||_F / ||K_ord||_F`;
+* the gate runs **before every seed's continuations**, since each warm-up has
+  different learned poles and readouts, and **both** the impulse and frequency
+  criteria are enforced, with non-finite values failing;
 * the same on a 65-point frequency grid;
 * query-logit change on unlabeled initialization probes.
 
 **Zero-reference handling:** if `||K_ord||_F <= 1e-12` the relative figure is
-reported as `None` and the absolute difference is used.
+reported as `None` and an **absolute** criterion applies instead, with a
+declared tolerance of `1e-9`: a layer with no ordinary response must also have
+no arm response to count as matched. Such layers are **not** dropped from the
+decision.
 
 **If the generalized arms' worst signal-only core relative change exceeds 1 %,
 the run STOPS and reports before reading any comparative score**, and before
@@ -154,6 +178,11 @@ and 64**. Reported per arm and per seed, with paired differences against **both*
 `ordinary` and `rawat`, every seed shown. Delay 8 reported separately to expose
 a retention/responsiveness tradeoff; delay 96 as held-out extrapolation.
 **No checkpoint or seed is selected by the comparison.**
+
+**No accuracy threshold is predeclared for this study.** The `+0.3` percentage
+point figure used in the Speech Commands screens is **not** a criterion here and
+is not imported. Differences are reported per seed with their signs and
+magnitudes, and interpreted as such.
 
 Also reported: parameter counts, physical and auxiliary carry, Rawat's input
 buffer, wall time, learned `rho` and effective clock distributions. Saved

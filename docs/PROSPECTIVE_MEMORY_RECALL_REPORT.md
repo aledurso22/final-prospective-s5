@@ -3,11 +3,51 @@
 Protocol committed before execution:
 `docs/PROSPECTIVE_MEMORY_RECALL_PROTOCOL.md`.
 
-**Outcome: the predeclared screen FAILED.** The generalized prospective
-recurrence did not improve recall over the literature mechanisms by the
-declared margin, and an ordinary S5 with twice the stored modes beat it in
-every seed. Two findings survive and are worth keeping; both are stated below
-with their limits.
+**Outcome: the generalized prospective recurrence did not improve recall over
+the literature mechanisms, and an ordinary S5 with twice the stored modes beat
+it in every seed.**
+
+> **CORRECTIONS APPLIED 15 September 2026** after the coordinator's review of
+> the executed commit. The completed run, its artifacts and every number below
+> are preserved unchanged. What is corrected is interpretation, coverage
+> statements, and one physics sign error. A **material implementation defect**
+> found by that review is recorded in s0; it does not invalidate the observed
+> accuracies but it does remove one of the conclusions I drew.
+
+## 0. A defect in the executed optimization, and what it costs the conclusions
+
+**The raw response leaf was never projected back into its interval after an
+optimizer update.** `rho_only()` clips in the FORWARD pass, which keeps the
+executed law admissible, but the raw parameter `eta` was free to leave the
+interval. Above the upper bound `u = log(0.9999)`,
+
+```
+rho = exp(u) ,   d rho / d eta = 0 ,   dL_data / d eta = 0
+```
+
+so a leaf that crosses outward has **zero task gradient** and nothing brings it
+back: AdamW's decoupled decay shrinks `eta` toward zero, which is *away* from a
+negative upper bound. The earlier `rawat_benchmark.py` did project; this runner
+did not, and the older helper would not have recognized the new leaf name in any
+case.
+
+**Consequence for the conclusions.** The observed median `rho = 0.9999` is
+compatible with a genuine boundary optimum, with clipping lockout, or with a
+mixture. My earlier conclusion that *"the learned direction was overwhelmingly
+toward the ordinary-SSM limit"* is therefore **withdrawn**: the data cannot
+distinguish a preference from a lockout. Everything else in this report - the
+accuracies, the controls, the professor result, the interventions - is
+unaffected, because the forward law stayed in bounds throughout.
+
+**What cannot be recovered.** The completed run saved only clipped summaries.
+No warm-up or final parameter trees, optimizer states or raw trajectories were
+written, so the raw overshoot of *this* run cannot be reconstructed after the
+fact. That limitation is stated rather than worked around; the repaired runner
+saves parameter trees and projection telemetry.
+
+The repair is committed (post-update projection, preserving optimizer state,
+with regression coverage), but **no corrected run has been executed**. Missing
+projection is **not** evidence that a repaired run would beat the baselines.
 
 ## 1. Execution identity
 
@@ -51,8 +91,21 @@ relative Frobenius over lags 0..127, measured on the executed modules:
 | `professor` | **7.57e+00** | 1.18e+00 | **no** |
 
 Gate **PASSED** for the generalized arms at 1.99e-03 against the predeclared
-1e-2, so they genuinely start from the warm-up function rather than merely
-having `rho` near 1.
+1e-2.
+
+**Coverage correction.** These probes are **seed 100 only**: the executed gate
+ran once and was then skipped, although each seed's warm-up has different
+learned poles and readouts. The decision also used the **impulse** criterion
+alone — the frequency differences were computed and saved but not enforced —
+and zero-reference layers were filtered out rather than receiving the declared
+absolute criterion. So the correct statement is that the generalized arms are
+**approximately matched on the reported seed-100 probes**, not exactly
+function-matched across the study. The saved frequency entries may be reported,
+but nothing should be inferred about them from the overall PASS. These are
+finite-window and finite-grid checks, not a uniform transfer-function theorem.
+
+The repaired runner runs the gate before every seed, enforces both criteria,
+fails on non-finite values, and implements the zero-reference branch.
 
 `rawat` starts about **209 %** away from the warm-up function. It is therefore
 **not** function-matched, exactly as the protocol required be reported, and
@@ -82,10 +135,16 @@ Paired differences in percentage points, every seed shown:
 | `gp_rho` - `gp_rho_frozen` | +1.904 | +0.732 | +0.098 | **+0.911** | all + |
 | `gp_rho` - `ordinary_2x` | -4.980 | -2.881 | -3.564 | **-3.809** | all - |
 
-**The screen FAILED.** The target was at least +0.3 pp over **both**
-references. Against `ordinary` the difference is consistently positive but
-averages **0.098 pp** — about **two examples out of the 2,048 evaluated** — and
-is below the target in every seed. Against `rawat` the sign flips across seeds.
+**No accuracy threshold was predeclared for this study.** The `+0.3` pp figure
+used in the Speech Commands screens appears in neither the recall brief nor the
+committed recall protocol; an earlier version of this report presented it as a
+criterion here, which was an import from a different study and is withdrawn.
+
+The findings stand without it. Against `ordinary` the difference is
+consistently positive but averages **0.098 pp** — **3, 1 and 2 additional
+correct examples out of 2,048** in seeds 100, 101 and 102 — which does not
+establish a practical advantage. Against `rawat` the sign flips across seeds,
+and on average the generalized arm is **behind** it by 0.374 pp.
 
 By delay, mean over seeds (96 is held out, never trained or selected on):
 
@@ -112,11 +171,14 @@ coordinates**. It is also no slower in wall time (10.1 s vs 15.3 s per
 continuation).
 
 It is **not** matched in parameters: 11,368 against 7,208, i.e. **+4,160
-(+58 %)**. So the honest statement is that at equal carry and greater parameter
-count, plain extra ordinary modes bought substantially more recall on this task
-than the derived response did. This does not isolate every possible benefit of
-the exact coefficient ties, and the brief said so in advance; it does mean the
-simplest capacity explanation is not ruled out here — it is favoured.
+(+58 %)**. It is therefore best described as **an effective larger ordinary
+model under this budget**, not an isolation of recurrent state independent of
+parameter count. At equal carry and greater parameter count, plain extra
+ordinary modes bought substantially more recall on this task than the derived
+response did. The simplest capacity explanation is not ruled out here.
+
+Reported timings are for this script and configuration; they are not universal
+runtime claims.
 
 ## 5. What learning `rho` actually did — and a correction to my own protocol
 
@@ -130,26 +192,37 @@ simplest capacity explanation is not ruled out here — it is favoured.
 32 modes moved *up* and are pinned at the bound; only 4-5 modes per seed fell,
 though those fell substantially (to 0.82-0.95).
 
-**This corrects a statement I put in the protocol before the run.** I wrote that
-`rho` "can effectively only fall" because it starts adjacent to its ceiling. That
-was wrong: there was 1.0e-4 of headroom in log space and the optimizer used it,
-driving most modes into the clip. The clip is therefore **active for roughly
-85 % of modes at the end of training**, which is a bound interaction that has to
-be reported, not a free exploration of the family.
+**Two statements I put in the protocol before the run were wrong.**
 
-`rho -> 1` is the **ordinary memory-bearing SSM limit** (the transfer reduces to
-`b/(p+j)` with a rescaled clock). So the dominant learned direction was *towards*
-ordinary S5, not away from it. The derived mass barely moved in the median:
-`mu = T rho` went from 4.9990 to 4.9995. The minority of modes that fell reached
+1. I wrote that `rho` *"can effectively only fall"*. False: there was 1.0e-4 of
+   headroom in log space and the optimizer used it. `rho` can rise as well as
+   fall, and here it mostly rose.
+2. I wrote that decreasing `rho` *"adds mass"*. **Reversed.** With `gamma_n = 1`
+   the mass is `mu = T rho`, so decreasing `rho` **decreases** the mass. What
+   decreasing `rho` does is break the `rho = 1` pole-zero cancellation and
+   change the observable contribution of the auxiliary dynamics — not the same
+   thing as increasing memory importance.
+
+Also: `rho = 1` is the **physical** family boundary; `0.9999` is a **chosen
+numerical margin** below it.
+
+`rho -> 1` is the ordinary memory-bearing SSM limit (the transfer reduces to
+`b/(p+j)` with a rescaled clock). The derived mass barely moved in the median:
+`mu = T rho` went from 4.9990 to 4.9995; the minority of modes that fell reached
 `mu` of 4.11-4.75.
 
+**But the direction cannot be interpreted**, for the reason in s0: without
+post-update projection, a raw leaf that crossed the upper bound had zero task
+gradient and could not return. A median at the bound is equally consistent with
+a boundary optimum and with lockout, and this run saved no raw trajectory that
+could separate them.
+
 The `gp_rho` vs `gp_rho_frozen` gap of **+0.911 pp, positive in all three
-seeds**, is the one comparison that favours the mechanism. Given the `rho`
-distribution, the most it supports is that *allowing* `rho` to move helped
-relative to holding it at 0.9998 — and the movement was mostly toward the
-ordinary limit with a handful of modes departing from it. It is **not** evidence
-that a distinctly generalized response is what helped, and with three seeds and
-most modes pinned at a bound it is not a population claim.
+seeds**, is the one comparison that favours the mechanism. The most it supports
+is that *allowing* `rho` to move helped relative to holding it at 0.9998. It is
+**not** evidence that a distinctly generalized response is what helped, and with
+three seeds, most modes at a bound, and the projection defect of s0 unresolved
+in this run, it is not a population claim.
 
 `gp_rho_frozen` scored **0.82 pp below `ordinary`** on average despite being
 function-matched to 2e-3 at initialization. Two arms that start within 0.2 % of
@@ -194,8 +267,9 @@ Mean over seeds, on one fixed held-out probe batch:
 Every memory-bearing arm is strongly and comparably selective: changing the
 relevant marked cue moves the logits about 100x more than changing an unmarked
 distractor, and the prediction follows the new cue symbol. **Both interventions
-are reported, and they do not distinguish the arms** — the generalized
-recurrence is not more cue-selective than ordinary S5 here.
+are reported, and they do not distinguish the arms.** These figures establish
+useful cue sensitivity in ordinary and generalized S5 alike; they do **not**
+show improved selection by the generalized model.
 
 ## 8. Costs
 
@@ -205,14 +279,31 @@ recurrence is not more cue-selective than ordinary S5 here.
 | `rawat` | 7,176 | 64 | 0 | 64 | 9.7 |
 | `professor` | 7,176 | **0** | 0 | 0 | 5.3 |
 | `gp_rho` | 7,208 | 64 | **64** | 0 | 15.3 |
-| `gp_rho_frozen` | 7,208 | 64 | 64 | 0 | 14.9 |
+| `gp_rho_frozen` | 7,208 stored / **7,176 trainable** | 64 | 64 | 0 | 14.9 |
 | `ordinary_2x` | 11,368 | **128** | 0 | 0 | 10.1 |
 
 `gp_rho` adds 32 parameters (one `rho` per stored mode per layer) and doubles
-the carry, and is the slowest memory-bearing arm at 1.4x `ordinary`.
+the carry, and is the slowest memory-bearing arm at 1.4x `ordinary` in this
+configuration.
+
+**Stored values are not trainable degrees of freedom.** `gp_rho_frozen` stores
+7,208 values but its 32 `rho` entries are excluded from learning, so it has
+7,176 trainable parameters — the same as `ordinary`. The repaired runner reports
+both counts separately.
 
 ## 9. Limitations
 
+* **The post-update projection was missing in this run (s0).** Conclusions
+  about what learning `rho` preferred are not supported by these artifacts, and
+  the raw trajectory cannot be recovered from them.
+* **The initialization gate covered seed 100 only**, and enforced the impulse
+  criterion alone. The arms are approximately matched on those probes, not
+  verified as matched across the study.
+* **The realized training-delay mix is 37.5 / 31.25 / 31.25 per cent** at
+  delays 8 / 32 / 64, not equal thirds: the generator cycles delays within each
+  batch. Target classes are balanced in expectation, not by construction. All
+  arms shared the same data, so the comparisons are unaffected; the generator
+  was **not** regenerated, since that would be a separate declared change.
 * **Three seeds.** They do not establish population variance. The
   frozen-vs-learned gap is consistent in sign across three seeds; that is a
   weak form of evidence, not a significance test.
@@ -232,9 +323,9 @@ the carry, and is the slowest memory-bearing arm at 1.4x `ordinary`.
 
 On a task that genuinely requires recall — confirmed by the memoryless control
 scoring at chance — the physically derived generalized prospective recurrence
-**did not** improve recall over ordinary S5 or Rawat's prospective-input S5 by
-the predeclared margin. Its edge over ordinary S5 was +0.098 pp, roughly two
-examples; against Rawat it was inconsistent in sign.
+**did not** improve recall over ordinary S5 or Rawat's prospective-input S5. Its
+edge over ordinary S5 was +0.098 pp, i.e. 3, 1 and 2 additional correct examples
+out of 2,048; against Rawat it was inconsistent in sign and behind on average.
 
 The most informative comparison is the one that did not involve the mechanism
 at all: **doubling the ordinary recurrent state gained 3.8 pp over the
@@ -242,13 +333,19 @@ generalized recurrence in every seed, at equal total carry**. Whatever this task
 rewards, extra ordinary modes supplied it more effectively than the derived
 response did.
 
-Allowing `rho` to learn helped relative to freezing it, in all three seeds. But
-the learned direction was overwhelmingly *toward* the ordinary-SSM limit, with
-most modes pinned at the bound, so that result does not support the derived
-response being the active ingredient.
+Allowing `rho` to learn helped relative to freezing it, in all three seeds. What
+that movement *meant* cannot be read from this run: the missing post-update
+projection (s0) leaves a median at the bound equally consistent with a boundary
+optimum and with a clipping lockout. The result does not support the derived
+response being the active ingredient, and it does not rule it out either.
 
-The supported next question is whether any response-shaping in this family can
-compete with simply adding ordinary state on tasks of this kind, and that would
-need the matched response-parameterization control this batch deliberately did
-not include. **No larger run and no rescue sweep follows from this result.** The
+The supported next steps are, in order: (1) a **bounded corrected rerun** on the
+same data streams and equations with the projection repaired and the gate
+covering every seed, whose outcome is to be reported regardless of whether
+projection helps; and only then (2) the question of whether any response-shaping
+in this family can compete with simply adding ordinary state, which would need
+the matched response-parameterization control this batch deliberately omitted.
+
+**Missing projection is not evidence that a repaired run will beat the
+baselines.** No larger run and no rescue sweep follows from this result. The
 earlier Speech Commands studies and their verdicts are unchanged.
