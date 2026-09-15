@@ -86,3 +86,27 @@ The completed run wrote only clipped summaries — no parameter trees, optimizer
 states or raw trajectories. Its raw overshoot is therefore **unrecoverable**,
 and no retrospective diagnosis of that run will be offered. Saving those
 artifacts is part of the repair, not a claim about the past.
+
+
+## Executed
+
+The corrected study ran at `fb166146aa07f9b13bac44fcc5a7e3d75c09480e` on
+`pgi15-gpu3`, `RECALL_STATUS=PASS`, 38 focused checks, 18/18 rows, 824 s of the
+1,200 s cap, artifacts `/Users/durso/s5-runs/recall/20260915-225516/`.
+
+**Outcome, reported as it came out:** the repair removed the study's only
+consistent positive result. The frozen-versus-learned comparison went from
+`+0.911 pp` (all three seeds positive) to `-0.309 pp` (mixed). Every arm without
+a learned response leaf is bit-identical between the two runs, which is the
+control confirming the repair touched only the intended arm.
+
+The `rho` distribution inverted: 23-29 of 32 modes now fall, against 4-5 before,
+with only 3-8 at the numerical margin. Between 17.9 % and 33.9 % of entry-updates
+required projection, each overshooting by about `1e-3` — the AdamW step size. The
+first run's pile-up at the margin was therefore a clipping lockout, and the claim
+that learning drove `rho` toward the ordinary-SSM limit was **wrong**, not merely
+unsupported.
+
+This closes the correction study. It was worth running precisely because a
+defect that could only have suppressed the mechanism turned out to have
+manufactured its apparent advantage.

@@ -7,6 +7,19 @@ Protocol committed before execution:
 the literature mechanisms, and an ordinary S5 with twice the stored modes beat
 it in every seed.**
 
+**TWO RUNS ARE REPORTED.** The first, at `b5d7211`, was executed with a defect:
+the raw response parameter was never projected back into its interval after an
+optimizer update. The second, at `fb16614`, repairs exactly that and changes
+nothing else. Both are preserved. **The corrected run is authoritative for the
+learned-response arm**; every other arm is bit-identical between them, which is
+itself the control showing the repair touched only what it should.
+
+**The correction reversed the single result that had favoured the mechanism.**
+In the defective run, learning `rho` beat freezing it in all three seeds
+(+0.911 pp). With the projection repaired that comparison is mixed and slightly
+negative (-0.309 pp). The apparent benefit was an artifact of the defective
+optimization.
+
 > **CORRECTIONS APPLIED 15 September 2026** after the coordinator's review of
 > the executed commit. The completed run, its artifacts and every number below
 > are preserved unchanged. What is corrected is interpretation, coverage
@@ -69,15 +82,17 @@ projection is **not** evidence that a repaired run would beat the baselines.
 |---|---|
 | checkout | `/Local/durso/final-prospective-s5` |
 | branch | `adaptive-recurrence` |
-| executed commit | **`b5d7211b2d631e104935a231aa41bbd00debf48d`** |
+| executed commit, run 1 (defective) | `b5d7211b2d631e104935a231aa41bbd00debf48d` |
+| executed commit, run 2 (**corrected, authoritative**) | **`fb166146aa07f9b13bac44fcc5a7e3d75c09480e`** |
 | host | `pgi15-gpu3.iff.kfa-juelich.de`, RTX 3090 |
 | SLURM job | 65910, `CUDA_VISIBLE_DEVICES=0` |
 | backend | `gpu`, `CudaDevice(id=0)`, jax 0.11.0 |
-| artifacts | `/Users/durso/s5-runs/recall/20260915-220252/` |
+| artifacts, run 1 | `/Users/durso/s5-runs/recall/20260915-220252/` |
+| artifacts, run 2 | `/Users/durso/s5-runs/recall/20260915-225516/` |
 | logs | `/Users/durso/s5-runs/recall/logs/20260915-215629/` |
-| focused checks | **25 passed**, 377 s |
-| study | **18/18 rows, `complete=True`, no incomplete stages**, 354 s |
-| total | **739 s of the 1200 s cap** |
+| focused checks | run 1: 25 passed; run 2: **38 passed**, 433 s |
+| study | **18/18 rows, `complete=True`, no incomplete stages** in both |
+| total | run 1: 739 s; run 2: **824 s of the 1200 s cap** |
 | status | **`RECALL_STATUS=PASS`, `RECALL_EXIT=0`** |
 
 Command:
@@ -108,22 +123,32 @@ No cell here says "function-matched": the executed gate probed one seed with one
 of the two declared criteria, so none of these is a verified match across the
 study.
 
-Gate **PASSED** for the generalized arms at 1.99e-03 against the predeclared
-1e-2.
+**Corrected run: the gate ran before every seed and enforced both criteria.**
 
-**Coverage correction.** These probes are **seed 100 only**: the executed gate
-ran once and was then skipped, although each seed's warm-up has different
-learned poles and readouts. The decision also used the **impulse** criterion
-alone — the frequency differences were computed and saved but not enforced —
-and zero-reference layers were filtered out rather than receiving the declared
-absolute criterion. So the correct statement is that the generalized arms are
-**approximately matched on the reported seed-100 probes**, not exactly
-function-matched across the study. The saved frequency entries may be reported,
-but nothing should be inferred about them from the overall PASS. These are
-finite-window and finite-grid checks, not a uniform transfer-function theorem.
+| seed | `gp_rho` impulse | `gp_rho` frequency | `rawat` impulse | `rawat` frequency |
+|---|---|---|---|---|
+| 100 | 1.99e-03 | 2.33e-03 | 2.09e+00 | 1.86e+00 |
+| 101 | 3.03e-03 | 2.99e-03 | 4.88e+00 | 4.82e+00 |
+| 102 | 2.55e-03 | 2.91e-03 | 2.67e+00 | 2.59e+00 |
 
-The repaired runner runs the gate before every seed, enforces both criteria,
-fails on non-finite values, and implements the zero-reference branch.
+All three seeds passed on both criteria. The frequency figures are comparable in
+size to the impulse ones, so enforcing them was not cosmetic even though it did
+not change the verdict here. `rawat`'s initial function change varies from
+**2.09 to 4.88** across seeds — a far larger spread than seed 100 alone
+suggested, and relevant to its seed-to-seed variability.
+
+The table below is from the defective run, where the gate ran once.
+
+**Coverage correction, for the defective run only.** Those probes were **seed
+100 only** and used the **impulse** criterion alone; zero-reference layers were
+filtered out rather than receiving the declared absolute criterion. For that run
+the correct statement is that the generalized arms were *approximately matched
+on the seed-100 impulse probe*, not function-matched across the study.
+
+The corrected run fixes all of it: the gate runs before every seed, enforces
+both criteria, fails on non-finite values, and applies the declared absolute
+criterion to zero-reference layers. These remain finite-window and finite-grid
+checks, not a uniform transfer-function theorem.
 
 `rawat` starts about **209 %** away from the warm-up function. It is therefore
 **not** function-matched, exactly as the protocol required be reported, and
@@ -135,23 +160,39 @@ largest.
 
 Mean accuracy at the trained longer delays 32 and 64, per seed:
 
+**Corrected run** (`fb16614`), mean accuracy at the trained longer delays:
+
 | arm | seed 100 | seed 101 | seed 102 | mean |
 |---|---|---|---|---|
 | **`ordinary_2x`** | **0.9927** | **1.0000** | **0.9951** | **0.9959** |
 | `rawat` | 0.9155 | 0.9971 | 0.9722 | 0.9616 |
-| `gp_rho` | 0.9429 | 0.9712 | 0.9595 | 0.9578 |
 | `ordinary` | 0.9414 | 0.9707 | 0.9585 | 0.9569 |
 | `gp_rho_frozen` | 0.9238 | 0.9639 | 0.9585 | 0.9487 |
+| `gp_rho` | 0.9336 | 0.9365 | 0.9668 | **0.9456** |
 | `professor` | 0.1196 | 0.1177 | 0.1235 | 0.1203 |
 
-Paired differences in percentage points, every seed shown:
+Paired differences in percentage points, every seed shown, **defective run above
+and corrected run below**:
 
 | comparison | s100 | s101 | s102 | mean | sign |
 |---|---|---|---|---|---|
-| `gp_rho` - `ordinary` | +0.146 | +0.049 | +0.098 | **+0.098** | all + |
-| `gp_rho` - `rawat` | +2.734 | -2.588 | -1.270 | -0.374 | **mixed** |
-| `gp_rho` - `gp_rho_frozen` | +1.904 | +0.732 | +0.098 | **+0.911** | all + |
-| `gp_rho` - `ordinary_2x` | -4.980 | -2.881 | -3.564 | **-3.809** | all - |
+| `gp_rho` - `ordinary` (defective) | +0.146 | +0.049 | +0.098 | +0.098 | all + |
+| **`gp_rho` - `ordinary` (corrected)** | **-0.781** | **-3.418** | **+0.830** | **-1.123** | **mixed** |
+| `gp_rho` - `rawat` (defective) | +2.734 | -2.588 | -1.270 | -0.374 | mixed |
+| **`gp_rho` - `rawat` (corrected)** | **+1.807** | **-6.055** | **-0.537** | **-1.595** | **mixed** |
+| `gp_rho` - `gp_rho_frozen` (defective) | +1.904 | +0.732 | +0.098 | +0.911 | **all +** |
+| **`gp_rho` - `gp_rho_frozen` (corrected)** | **+0.977** | **-2.734** | **+0.830** | **-0.309** | **mixed** |
+| `gp_rho` - `ordinary_2x` (defective) | -4.980 | -2.881 | -3.564 | -3.809 | all - |
+| **`gp_rho` - `ordinary_2x` (corrected)** | **-5.908** | **-6.348** | **-2.832** | **-5.029** | **all -** |
+
+**The reversal is the headline.** The frozen-versus-learned comparison was the
+only one consistent in sign across all three seeds, and the only evidence that
+allowing the response to learn helped at all. With the projection repaired it is
+mixed and slightly negative. `gp_rho` itself fell from 0.9579 to 0.9456.
+
+Every other arm is **bit-identical** between the two runs — `ordinary`, `rawat`,
+`professor`, `gp_rho_frozen` and `ordinary_2x` reproduce exactly — so the change
+is attributable to the repair and not to run-to-run variation.
 
 **No accuracy threshold was predeclared for this study.** The `+0.3` pp figure
 used in the Speech Commands screens appears in neither the recall brief nor the
@@ -198,66 +239,53 @@ response did. The simplest capacity explanation is not ruled out here.
 Reported timings are for this script and configuration; they are not universal
 runtime claims.
 
-## 5. What learning `rho` actually did — and a correction to my own protocol
+## 5. What learning `rho` actually did — the corrected picture
 
-| seed | `rho` init | final min | final median | modes that FELL |
-|---|---|---|---|---|
-| 100 | 0.9998 | 0.9497 | **0.9999** | 4 / 32 |
-| 101 | 0.9998 | 0.9323 | **0.9999** | 5 / 32 |
-| 102 | 0.9998 | 0.8212 | **0.9999** | 4 / 32 |
+**Defective run.** Median `rho` 0.9999, the clip value; 4-5 of 32 modes fell.
 
-**The median final `rho` is 0.9999, the clip value.** Since the executed `rho`
-cannot exceed it, a median at the clip means **at least 16 of 32 modes sit at
-it**. Only 4-5 modes per seed fell below the initialization, though those fell
-substantially (to 0.82-0.95).
+**Corrected run.** The distribution inverts:
 
-**The exact bound occupancy was not recorded for this run**, so the count at the
-margin is bounded (at least 16, at most 28) rather than known. An earlier
-version of this report stated "27-28 of 32 modes" — that was inferred from the
-median plus `n_fell` and is withdrawn. The repaired runner records occupancy
-directly.
+| seed | final min | final median | modes that FELL | at the cap | raw outside |
+|---|---|---|---|---|---|
+| 100 | 0.9438 | **0.9806** | **29 / 32** | 3 | 0 |
+| 101 | 0.9333 | **0.9834** | **28 / 32** | 3 | 0 |
+| 102 | 0.8224 | **0.9986** | **23 / 32** | 8 | 0 |
 
-**Two statements I put in the protocol before the run were wrong.**
+With the projection in place **most modes fall** and only 3-8 sit at the
+numerical margin, against 4-5 falling and a median pinned at the margin before.
+Median `mu = T rho` is 4.90 / 4.92 / 4.99 against 4.999 at initialization: the
+derived mass moves **down**, i.e. *away* from the ordinary-SSM limit.
 
-1. I wrote that `rho` *"can effectively only fall"*. False: there was 1.0e-4 of
-   headroom in log space and the optimizer used it. `rho` can rise as well as
-   fall, and here it mostly rose.
-2. I wrote that decreasing `rho` *"adds mass"*. **Reversed.** With `gamma_n = 1`
-   the mass is `mu = T rho`, so decreasing `rho` **decreases** the mass. What
-   decreasing `rho` does is break the `rho = 1` pole-zero cancellation and
-   change the observable contribution of the auxiliary dynamics — not the same
-   thing as increasing memory importance.
+**The bound was active throughout, and that is why it mattered.** Projection
+telemetry, over 1,024 updates x 32 entries = 32,768 entry-updates per seed:
 
-Also: `rho = 1` is the **physical** family boundary; `0.9999` is a **chosen
-numerical margin** below it.
+| seed | projection events | share | max raw overshoot | mean \|g_rho\| | mean \|u_rho\| |
+|---|---|---|---|---|---|
+| 100 | 5,852 | 17.9 % | 1.05e-3 | 1.62 | 1.11e-3 |
+| 101 | 6,424 | 19.6 % | 1.00e-3 | 2.13 | 1.12e-3 |
+| 102 | 11,111 | 33.9 % | 1.26e-3 | 1.53 | 1.44e-3 |
 
-`rho -> 1` is the ordinary memory-bearing SSM limit (the transfer reduces to
-`b/(p+j)` with a rescaled clock). The derived mass barely moved in the median:
-`mu = T rho` went from 4.9990 to 4.9995; the minority of modes that fell reached
-`mu` of 4.11-4.75.
+Between a fifth and a third of all entry-updates required projection, and the
+maximum overshoot each time is about `1e-3` — the AdamW step size, exactly as
+the headroom argument predicts. `gp_rho_frozen` recorded **zero** events, as it
+must. No raw value finished outside the interval in any seed.
 
-**But the direction cannot be interpreted**, for the reason in s0: without
-post-update projection, a raw leaf that crossed the upper bound had zero task
-gradient and could not return. A median at the bound is equally consistent with
-a boundary optimum and with lockout, and this run saved no raw trajectory that
-could separate them.
+**A claim of mine is not merely unsupported but wrong.** The earlier report said
+the learned direction was *"overwhelmingly toward the ordinary-SSM limit"*. With
+the optimization repaired the direction is the **opposite**: `rho` predominantly
+falls. What the defective run showed was a **clipping lockout** — entries crossed
+the ceiling on the first updates and could never return, so the distribution
+piled up at the margin. The corrected run is what the task actually prefers.
 
-The `gp_rho` vs `gp_rho_frozen` gap of **+0.911 pp, positive in all three
-seeds**, is the one comparison that favours the mechanism. The most it supports
-is that *allowing* `rho` to move helped relative to holding it at 0.9998. It is
-**not** evidence that a distinctly generalized response is what helped, and with
-three seeds, most modes at a bound, and the projection defect of s0 unresolved
-in this run, it is not a population claim.
+And it prefers it without benefit: `rho` genuinely moves away from the ordinary
+limit, and the arm is **not** better for it — mixed against its own frozen
+control, mixed against `ordinary`, and 5.03 pp behind `ordinary_2x` in every
+seed.
 
-`gp_rho_frozen` scored **0.82 pp below `ordinary`** on average despite being
-function-matched to 2e-3 at initialization. Two arms that start within 0.2 % of
-each other diverged by more than the effect being screened for, which is a
-useful caution about the resolution of this setup.
-
-Effective clocks were essentially identical across `ordinary`, `gp_rho` and
-`gp_rho_frozen` **for seed 100**, the only seed whose clocks were printed
-(median 0.0071, range 0.0012-0.105). That is not generalized to the other seeds
-here; the repaired summary prints all of them.
+Effective clocks, now printed for **all three seeds**, are essentially identical
+across `ordinary`, `gp_rho` and `gp_rho_frozen` (medians 0.0071 / 0.0136 /
+0.0217 by seed, matching to three significant figures), so the arms did not
+diverge by silently retiming.
 
 ## 6. The professor control, and what it says about the earlier speech result
 
@@ -319,12 +347,14 @@ both counts separately.
 
 ## 9. Limitations
 
-* **The post-update projection was missing in this run (s0).** Conclusions
-  about what learning `rho` preferred are not supported by these artifacts, and
-  the raw trajectory cannot be recovered from them.
-* **The initialization gate covered seed 100 only**, and enforced the impulse
-  criterion alone. The arms are approximately matched on those probes, not
-  verified as matched across the study.
+* **The defective run's `rho` conclusions are void**, and its raw trajectory
+  cannot be recovered from its artifacts. The corrected run supersedes it for
+  the learned-response arm.
+* **The bound remains active in the corrected run** — 18-34 % of entry-updates
+  required projection — so `rho` is learning against a constraint, not freely.
+  The constraint is now a projection rather than a trap.
+* **Three seeds**, and the corrected differences are mixed in sign with a spread
+  of several points, so the study does not resolve small effects.
 * **The realized training-delay mix is 37.5 / 31.25 / 31.25 per cent** at
   delays 8 / 32 / 64, not equal thirds: the generator cycles delays within each
   batch. Target classes are balanced in expectation, not by construction. All
@@ -349,9 +379,9 @@ both counts separately.
 
 On a task that genuinely requires recall — confirmed by the memoryless control
 scoring at chance — the physically derived generalized prospective recurrence
-**did not** improve recall over ordinary S5 or Rawat's prospective-input S5. Its
-edge over ordinary S5 was +0.098 pp, i.e. 3, 1 and 2 additional correct examples
-out of 2,048; against Rawat it was inconsistent in sign and behind on average.
+**did not** improve recall over ordinary S5 or Rawat's prospective-input S5. In
+the corrected run it is **behind ordinary S5 by 1.12 pp** and **behind Rawat by
+1.60 pp** on average, mixed in sign in both cases.
 
 The most informative comparison is the one that did not involve the mechanism
 at all: **doubling the ordinary recurrent state gained 3.8 pp over the
@@ -359,19 +389,37 @@ generalized recurrence in every seed, at equal total carry**. Whatever this task
 rewards, extra ordinary modes supplied it more effectively than the derived
 response did.
 
-Allowing `rho` to learn helped relative to freezing it, in all three seeds. What
-that movement *meant* cannot be read from this run: the missing post-update
-projection (s0) leaves a median at the bound equally consistent with a boundary
-optimum and with a clipping lockout. The result does not support the derived
-response being the active ingredient, and it does not rule it out either.
+Allowing `rho` to learn helped in all three seeds **only in the defective run**.
+With the optimization repaired the comparison is mixed and slightly negative, so
+the study contains no consistent evidence that response learning helps here.
 
-The supported next steps are, in order: (1) a **bounded corrected rerun** on the
-same data streams and equations with the projection repaired and the gate
-covering every seed, whose outcome is to be reported regardless of whether
-projection helps; and only then (2) the question of whether any response-shaping
-in this family can compete with simply adding ordinary state, which would need
-the matched response-parameterization control this batch deliberately omitted.
+The repair also settled what the defective run could not. `rho` does not drift
+toward the ordinary-SSM limit; with projection it predominantly **falls**, in
+23-29 of 32 modes per seed, lowering the derived mass. The pile-up at the margin
+in the first run was a clipping lockout, reached on the very first updates.
 
-**Missing projection is not evidence that a repaired run will beat the
-baselines.** No larger run and no rescue sweep follows from this result. The
-earlier Speech Commands studies and their verdicts are unchanged.
+**The corrected rerun has been executed, and it did not help.** That was the
+honest test of the repair: fixing a defect that could only have suppressed the
+mechanism's measured performance in fact *removed* its one apparent advantage,
+because that advantage had been an artifact. The bounded correction study is
+therefore complete, and its outcome is reported as it came out.
+
+What the two runs together establish, with three seeds on one task at one size:
+
+* allowing the constrained response to learn does **not** consistently help,
+  and the single positive result that suggested otherwise was an optimization
+  artifact;
+* when `rho` can actually move it moves **away** from the ordinary-SSM limit,
+  and the model is not better for it;
+* the strongest comparator is **not** a prospective mechanism at all but
+  **twice the ordinary recurrent state**, ahead by 5.03 pp in every seed at
+  equal total carry;
+* the fully matched prospective recurrence is at **chance**, which is what
+  makes this task a usable recall probe and what the pooled speech task could
+  not show.
+
+The remaining question this supports is whether any response-shaping in this
+family can compete with simply adding ordinary state, which would need the
+matched response-parameterization control this batch deliberately omitted. **No
+larger run and no rescue sweep follows.** The earlier Speech Commands studies
+and their verdicts are unchanged.
