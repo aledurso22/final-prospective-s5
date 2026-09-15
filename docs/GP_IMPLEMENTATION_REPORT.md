@@ -1732,15 +1732,25 @@ with exactly zero logit response to any input change. That confirms the task is
 a real recall probe, and it puts the earlier 84.85 % on mean-pooled speech in
 context: the same mechanism is at chance here.
 
-Learning `rho` helped against freezing it in all three seeds (+0.911 pp), but
-what that movement meant cannot be read from this run. A coordinator review
-found that the **raw response leaf was never projected back into its interval
-after an optimizer update**: above the bound the task gradient is exactly zero
-and AdamW's decay pushes `eta` further away, so a median at the ceiling is
-equally consistent with a boundary optimum and with a clipping lockout. The
-repair is committed with regression coverage; **no corrected run has been
-executed**, and missing projection is not evidence that a repaired run would
-score differently. See
+In the first run, learning `rho` appeared to help against freezing it in all
+three seeds (+0.911 pp). A coordinator review found that the **raw response leaf
+was never projected back into its interval after an optimizer update**: above
+the bound the task gradient is exactly zero and AdamW's decay pushes `eta`
+further away, so nothing could bring it back.
+
+**A corrected rerun at `fb16614` — projection repaired, everything else
+unchanged — reversed that finding.** The frozen-versus-learned comparison went
+from **+0.911 pp, positive in all three seeds** to **-0.309 pp, mixed**, and
+`gp_rho` fell from 0.9579 to 0.9456. Every other arm is **bit-identical**
+between the runs, which is the control showing the repair touched only the
+intended arm. Corrected standings: `gp_rho` is 1.12 pp behind `ordinary`,
+1.60 pp behind `rawat`, and 5.03 pp behind `ordinary_2x` in every seed.
+
+The `rho` distribution also inverted: with projection, **23-29 of 32 modes fall**
+rather than piling up at the margin, and 17.9-33.9 % of entry-updates required
+projection with overshoots of about `1e-3`, the AdamW step size. So the earlier
+claim that learning drove `rho` toward the ordinary-SSM limit was not merely
+unsupported but **wrong** — it was a clipping lockout. See
 [`docs/RECALL_CORRECTION_PLAN.md`](RECALL_CORRECTION_PLAN.md).
 
 Also corrected there and in the report: the initialization gate covered **seed
