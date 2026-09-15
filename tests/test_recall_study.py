@@ -365,14 +365,26 @@ def test_memoryless_arm_has_no_response_beyond_lag_zero_in_the_adapter():
     assert SD.spectral_radius(core) == 0.0
 
 
-def test_rho_gradient_is_correct_in_float64_against_a_step_ladder():
-    """Gradient CORRECTNESS, at the precision that can answer it.
+def test_rho_gradient_converges_like_a_second_order_difference():
+    """Gradient CORRECTNESS, established by the CONVERGENCE SHAPE.
 
-    The float32 probe is rounding-limited for a derivative this small, so it
-    checks dtypes and magnitude. This is the correctness check: in float64 the
-    relative error must FALL as the step falls, which is the signature of an
-    O(h^2) difference converging on a correct gradient rather than of a dropped
-    term.
+    The evidence that a gradient is right is not that some finite difference
+    is small in absolute terms - that depends on the derivative's size and the
+    arithmetic - but that the error falls like O(h^2) as the step falls, until
+    rounding takes over. A dropped term would leave a step-INDEPENDENT floor.
+
+    Measured here (parameters are float32, so this is not true float64
+    arithmetic despite x64 being enabled; the effective rounding floor sits
+    near 1e-5):
+
+        h      1e-1      1e-2      1e-3      1e-4
+        rel    9.76e-2   1.21e-3   9.21e-6   1.27e-4
+
+    about 80x and 130x improvement per decade against the 100x an O(h^2)
+    difference predicts, then a rise at 1e-4 as rounding dominates. The
+    assertions below check that SHAPE, plus a floor consistent with the
+    measured precision. An earlier revision demanded min < 1e-6, which is below
+    what this configuration can reach and said nothing about correctness.
     """
     import math as _m
     from flax.traverse_util import flatten_dict, unflatten_dict
@@ -404,7 +416,10 @@ def test_rho_gradient_is_correct_in_float64_against_a_step_ladder():
     for h in (1e-1, 1e-2, 1e-3, 1e-4):
         fd = (loss_of(flat[key] + h * d) - loss_of(flat[key] - h * d)) / (2 * h)
         rels.append(abs(ana - fd) / max(abs(fd), 1e-12))
-    # converging: the best of the ladder must be tight, and refining from the
-    # coarsest step must improve it
-    assert min(rels) < 1e-6, list(zip((1e-1, 1e-2, 1e-3, 1e-4), rels))
-    assert rels[1] < rels[0], list(zip((1e-1, 1e-2, 1e-3, 1e-4), rels))
+    ladder = list(zip((1e-1, 1e-2, 1e-3, 1e-4), rels))
+    # 1. the error must FALL monotonically while truncation dominates
+    assert rels[1] < rels[0] and rels[2] < rels[1], ladder
+    # 2. and by orders of magnitude, as O(h^2) over two decades implies
+    assert rels[0] / rels[2] > 1e3, ladder
+    # 3. reaching a floor consistent with the arithmetic actually used
+    assert min(rels) < 1e-4, ladder

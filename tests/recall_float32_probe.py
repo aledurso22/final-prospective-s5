@@ -29,14 +29,23 @@ from s5.rawat_s5 import RHO_ONLY_PARAM_NAME                       # noqa: E402
 #:   h      1e-2      3e-2      1e-1      3e-1
 #:   floor  8.4e-3    2.8e-3    8.4e-4    2.8e-4
 #:
-#: The first cluster run measured 1.1e-2 at h = 1e-2, matching the predicted
-#: 8.4e-3 in order of magnitude: the directional derivative here is SMALL
-#: relative to the loss, so the finite difference is rounding-limited rather
-#: than wrong. The gate therefore uses h = 1e-1, where the floor is far below
-#: the tolerance, and the whole ladder is reported so a future failure is
-#: diagnosable. Gradient CORRECTNESS is established separately in float64 by
-#: tests/test_recall_study.py, which is the right precision for that question.
-TOL, STEP = 5e-3, 1e-1
+#: MEASURED ladder at the current evaluation point rho = 0.5, where the
+#: analytic directional derivative is 0.030152:
+#:
+#:   h      1e-1      3e-2      1e-2
+#:   rel    1.33e-2   1.04e-3   2.80e-4
+#:
+#: i.e. TRUNCATION-dominated at the coarse end, minimum at h = 1e-2. An earlier
+#: revision gated at h = 1e-1 on a rounding-floor argument computed for the
+#: PREVIOUS evaluation point rho = 0.75, where the derivative was ten times
+#: smaller (0.0032) and the floor correspondingly ten times higher. Moving the
+#: evaluation point changed which term binds; the step is now set from the
+#: measured ladder at the point actually used. The 5e-3 tolerance is unchanged.
+#:
+#: Gradient CORRECTNESS is established separately, by the step-ladder
+#: convergence test in tests/test_recall_study.py. This probe checks production
+#: dtypes and agreement within the achievable resolution.
+TOL, STEP = 5e-3, 1e-2
 REPORT_STEPS = (1e-1, 3e-2, 1e-2)
 rng = onp.random.RandomState(0)
 x, y = T.generate_fixed_delay(rng, 32, delay=32)
