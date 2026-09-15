@@ -81,6 +81,23 @@ execution, not superiority, and its numbers are labelled accordingly.
   budget is reduced **for all families equally** and that decision is recorded
   before development.
 
+**Budget decision, taken from stage 1 BEFORE development (required by this
+protocol).** At 843 steps per epoch and the measured per-step times, the nine
+stage-2 runs cost **603 s of compute, 0.17 GPU-h**, against the 2 GPU-hour cap.
+Even at 4x for host data-pipeline overhead the batch needs 0.67 GPU-h.
+**The epoch budget is therefore NOT reduced: stage 2 runs at the full 10
+epochs for every family**, as originally declared. Recorded here before any
+run, not justified afterwards.
+
+**Stage 3 is the tighter one and is not yet committed.** Twelve runs at the
+8 GPU-hour cap: 100 epochs fits even at 2x overhead (3.71 GPU-h), 150 epochs
+fits at 2x (5.53 GPU-h), but **300 epochs at 2x overhead is 10.96 GPU-h and
+exceeds the cap**. Early stopping with patience 20 is expected to end runs well
+before 300. The stage 3 epoch budget will be fixed from the ACTUAL `epoch_s`
+measured in stage 2, and recorded before stage 3 starts. If the balanced
+comparison still does not fit, runs are kept resumable and reported as
+incomplete rather than shortened and called complete.
+
 **Selection order, fixed now:** validation accuracy, then validation cross
 entropy, then the declared candidate order above. Test data is untouched; the
 runner refuses `--split test` without `--confirm_test`.
@@ -118,9 +135,31 @@ is what gets reported. No objective and no arm is dropped from the report.
 
 ## 7. Costs that must be disclosed with any result
 
-Measured locally as a structural indication only (CPU, synthetic data, not
-evidence): `gp_fixed_mass` costs roughly **2.6x the per-step time** of the
-one-tap arms, and doubles the recurrent carry.
+**MEASURED ON THE TARGET GPU** by stage 1 (RTX 3090, SLURM 65870, 15 September
+2026, `/Users/durso/s5-runs/stage1/20260915-153757`, exit 0). These supersede
+the earlier CPU/synthetic indication, which suggested ~2.6x and was pessimistic.
+
+| arm | ms/step | vs native | s/epoch (compute) | peak memory | compile+1st step |
+|---|---|---|---|---|---|
+| `native_s5` | 4.927 | 1.00x | 4.15 | 34.9 MB | 13.5 s |
+| `alpha_p_s5` | 4.657 | 0.95x | 3.93 | 68.4 MB | 12.4 s |
+| `gain_clip_s5` | 4.962 | 1.01x | 4.18 | 34.9 MB | 13.5 s |
+| `gp_fixed_m0` | 4.789 | 0.97x | 4.04 | 68.4 MB | 14.1 s |
+| `gp_fixed_mass` | **9.512** | **1.93x** | 8.02 | 68.4 MB | 16.3 s |
+
+**`gp_fixed_mass` costs 1.93x the per-step time of native S5** and doubles the
+recurrent carry (128 -> 256 real coordinates). That is the headline cost and it
+is disclosed with any accuracy result, favourable or not.
+
+Peak memory is negligible on a 24 GB card for every arm, which is why a single
+GPU is the declared configuration. The three arms at 68.4 MB versus 34.9 MB
+differ by one extra saved tensor per layer (the previous-input tap, or the
+auxiliary velocity carry); no conclusion is drawn from it.
+
+Timings come from `--mode integration`, which reuses one on-device batch, so
+they are COMPUTE ONLY and exclude the host data pipeline. Real epoch times are
+logged as `epoch_s` in stage 2 and are the numbers used for the stage 3
+projection.
 
 | arm | trainable params | physical real state | auxiliary real state | previous-input buffer |
 |---|---|---|---|---|

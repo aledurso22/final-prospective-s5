@@ -1477,3 +1477,39 @@ standing. No training has been run. Stage 1 of
 | GPU integration for the new arms (stage 1) | — | — | **not run** |
 | Validation screening (stage 2) | — | — | **not run** |
 | Final benchmark comparison (stage 3) | — | — | **not run** |
+
+## 12.11 Stage 1 — GPU integration and cost, EXECUTED
+
+Run by the user; `STAGE1_EXIT=0`, all five arms.
+Artifacts `/Users/durso/s5-runs/stage1/20260915-153757`, host `pgi15-gpu3`,
+SLURM 65870, backend `gpu`.
+
+| arm | params | ms/step | vs native | peak memory | physical + auxiliary + buffer state |
+|---|---|---|---|---|---|
+| `native_s5` | 35,050 | 4.927 | 1.00x | 34.9 MB | 128 + 0 + 0 |
+| `alpha_p_s5` | 35,050 | 4.657 | 0.95x | 68.4 MB | 128 + 0 + 128 |
+| `gain_clip_s5` | 35,050 | 4.962 | 1.01x | 34.9 MB | 128 + 0 + 0 |
+| `gp_fixed_m0` | 35,050 | 4.789 | 0.97x | 68.4 MB | 128 + 0 + 0 |
+| `gp_fixed_mass` | 35,050 | **9.512** | **1.93x** | 68.4 MB | 128 + **128** + 0 |
+
+Confirmed on hardware: identical trainable parameter counts across all five
+arms, and the corrected state counts (32 physical real coordinates per layer,
+four layers).
+
+**The positive-mass cost on GPU is 1.93x per step, not the ~2.6x the CPU
+smoke suggested.** The protocol's disclosed cost table was updated to the
+measured value.
+
+**The reported `acc` of 0.28-0.31 in stage 1 means nothing.** Integration mode
+applies three updates to the SAME batch, so it measures memorization of one
+batch, not learning. It is recorded only to show gradients flow.
+
+**Budget decision, recorded before development:** nine stage-2 runs cost 603 s
+of compute (0.17 GPU-h) against a 2 GPU-hour cap; even at 4x data-pipeline
+overhead, 0.67 GPU-h. The epoch budget is **not** reduced. Stage 3 at 300
+epochs and 2x overhead would be 10.96 GPU-h against its 8 GPU-hour cap, so the
+stage 3 budget will be fixed from the actual `epoch_s` measured in stage 2 and
+recorded before stage 3 starts.
+
+Still true at this point: **no accuracy result exists, and stage 2 has not
+run.**
