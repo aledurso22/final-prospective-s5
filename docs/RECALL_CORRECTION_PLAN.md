@@ -97,15 +97,22 @@ The corrected study ran at `fb166146aa07f9b13bac44fcc5a7e3d75c09480e` on
 **Outcome, reported as it came out:** the repair removed the study's only
 consistent positive result. The frozen-versus-learned comparison went from
 `+0.911 pp` (all three seeds positive) to `-0.309 pp` (mixed). Every arm without
-a learned response leaf is bit-identical between the two runs, which is the
-control confirming the repair touched only the intended arm.
+a learned response leaf reproduced **identical recorded metrics** between the two
+runs — the compared quantities are the per-seed and per-delay accuracies, the
+intervention figures and the parameter counts. The first run saved no parameter
+trees, so this is not a claim of bit-identical trajectories. Within that scope it
+is the control confirming the repair touched only the intended arm.
 
 The `rho` distribution inverted: 23-29 of 32 modes now fall, against 4-5 before,
 with only 3-8 at the numerical margin. Between 17.9 % and 33.9 % of entry-updates
-required projection, each overshooting by about `1e-3` — the AdamW step size. The
-first run's pile-up at the margin was therefore a clipping lockout, and the claim
-that learning drove `rho` toward the ordinary-SSM limit was **wrong**, not merely
-unsupported.
+required projection — coordinate/update events, not distinct modes or steps at
+the bound — each with a **proposed pre-projection** overshoot of about `1e-3`,
+the AdamW step size. The first run's pile-up at the margin is consistent with the
+clipping lockout, though without its raw trajectories no per-mode diagnosis is
+possible; the claim that learning drove `rho` toward the ordinary-SSM limit is
+**withdrawn**, since the corrected direction is the opposite. The earlier
+positive signs are results of the previous unprojected optimization procedure
+that did not survive the correction.
 
 This closes the correction study. It was worth running precisely because a
 defect that could only have suppressed the mechanism turned out to have

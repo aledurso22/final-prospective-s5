@@ -1741,16 +1741,26 @@ further away, so nothing could bring it back.
 **A corrected rerun at `fb16614` — projection repaired, everything else
 unchanged — reversed that finding.** The frozen-versus-learned comparison went
 from **+0.911 pp, positive in all three seeds** to **-0.309 pp, mixed**, and
-`gp_rho` fell from 0.9579 to 0.9456. Every other arm is **bit-identical**
-between the runs, which is the control showing the repair touched only the
-intended arm. Corrected standings: `gp_rho` is 1.12 pp behind `ordinary`,
-1.60 pp behind `rawat`, and 5.03 pp behind `ordinary_2x` in every seed.
+`gp_rho` fell from 0.9579 to 0.9456. Every other arm reproduced **identical
+recorded metrics** between the runs — accuracies, interventions and parameter
+counts; the first run saved no parameter trees, so this is not a bit-identical
+trajectory claim — which is the control showing the repair touched only the
+intended arm. Corrected standings: `gp_rho` is 1.12 pp behind `ordinary` and
+1.60 pp behind `rawat` (both mixed in sign across seeds), and behind
+`ordinary_2x` in all three seeds by 5.908 / 6.348 / 2.832 pp, a **mean** of
+5.029 pp.
 
 The `rho` distribution also inverted: with projection, **23-29 of 32 modes fall**
 rather than piling up at the margin, and 17.9-33.9 % of entry-updates required
-projection with overshoots of about `1e-3`, the AdamW step size. So the earlier
-claim that learning drove `rho` toward the ordinary-SSM limit was not merely
-unsupported but **wrong** — it was a clipping lockout. See
+projection with proposed pre-projection overshoots of about `1e-3`, the AdamW
+step size. (Those event counts are coordinate/update events, not distinct modes
+or steps at the bound.) So the earlier claim that learning drove `rho` toward
+the ordinary-SSM limit is **withdrawn**: under the corrected optimization the
+direction reverses. The first run's pile-up is consistent with the lockout
+mechanism, but no per-mode diagnosis is possible without its raw trajectories,
+and none is claimed. The supported conclusion is that the generalized recurrence
+retains useful memory and trains with full BPTT, **without** a demonstrated
+recall, extrapolation or selectivity advantage. See
 [`docs/RECALL_CORRECTION_PLAN.md`](RECALL_CORRECTION_PLAN.md).
 
 Also corrected there and in the report: the initialization gate covered **seed
