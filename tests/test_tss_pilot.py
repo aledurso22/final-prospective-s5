@@ -682,6 +682,35 @@ def test_every_vmap_in_axes_matches_the_wrapped_function_arity():
     assert not bad, bad
 
 
+def test_the_memory_scan_equals_a_plain_sequential_reference():
+    """The real 2x2 block associative scan against the obvious recurrence.
+
+    The sequential complex-carry version measured 1259 ms per training update
+    on the cluster against 27 ms for the ODE arms, so it was replaced by a real
+    block associative scan. Identical mathematics is a claim that has to be
+    checked, not asserted, and log-depth scans are easy to get subtly wrong.
+    """
+    from s5.tss_cells import (complex_memory_rollout,
+                              complex_memory_rollout_sequential)
+    p = TM.init_params("tss_memory_then_prospective", 100)
+    es = jnp.asarray(onp.random.RandomState(17).randn(40, TM.D_ENC))
+    a = complex_memory_rollout(p["mem"], es)
+    b = complex_memory_rollout_sequential(p["mem"], es)
+    err = float(jnp.max(jnp.abs(a - b)))
+    scale = float(jnp.max(jnp.abs(b))) + 1.0
+    print(f"  associative vs sequential memory: rel {err / scale:.3e}")
+    assert err / scale < EXACT, err / scale
+    # and the gradients agree too, not only the trajectories
+    w = jnp.asarray(onp.random.RandomState(18).randn(*a.shape))
+    ga = jax.grad(lambda m: jnp.sum(w * complex_memory_rollout(m, es)))(p["mem"])
+    gb = jax.grad(lambda m: jnp.sum(
+        w * complex_memory_rollout_sequential(m, es)))(p["mem"])
+    for k in ga:
+        d = float(jnp.max(jnp.abs(ga[k] - gb[k])))
+        sc = float(jnp.max(jnp.abs(ga[k]))) + 1.0
+        assert d / sc < EQUIV, (k, d / sc)
+
+
 def test_the_complex_memory_carry_dtype_follows_its_inputs():
     """The x64 regression: a hard-coded complex64 carry with a promoting body.
 

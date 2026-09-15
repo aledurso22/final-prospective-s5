@@ -444,6 +444,37 @@ additionally requires lower relative error than the GLE-inspired baseline at
 Initial-state gradients stay outside the approximate comparison — those initial
 conditions are fixed — and that is recorded, not hidden.
 
+**Amendment, 16 September 2026: the memory bank is a real block associative
+scan.** The second preflight (`e60522d`, logs `20260916-013216`) confirmed the
+fixed-point fix — the ideal control fell from 94.06 ms to **2.83 ms** per
+update — and isolated what remained:
+
+```
+ideal_prospective             step     2.83 ms
+tss_finite_adaptation         step    26.94 ms
+tss_memory_then_prospective   step  1259.41 ms
+retained_compartment          step    27.27 ms
+```
+
+so the processing stage was never the memory arm's bottleneck. The two ODE arms
+take **512** sequential vector-field evaluations per sequence at 27 ms; the
+memory arm took 64 scan steps plus 40 iterations at 1259 ms. Neither sequential
+depth nor arithmetic volume explains that, and what differs is the **complex
+carry** in its `lax.scan`.
+
+The memory is linear with constant per-unit coefficients, so the recurrence is
+an affine scan and `exp(lambda)` acting on `(Re z, Im z)` is a real 2x2
+rotation-scaling. It is now a **real block associative scan** of logarithmic
+depth, with every complex operation confined to an elementwise coefficient
+computation outside the scan. The mathematics is identical, and a check
+compares both the trajectories and the gradients against a plain sequential
+reference.
+
+**The preflight now also prints a component breakdown per arm** — forward,
+gradient, and for the memory comparator its memory and processing stages
+separately. Two guesses at one cost is one too many; if this is still slow, the
+next run says where rather than inviting a third.
+
 **Amendment, 16 September 2026: the fixed-point solves are vectorized over
 time.** Measured, not guessed: the first complete preflight (`e2432a9`, logs
 `20260916-012533`) reported

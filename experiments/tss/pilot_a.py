@@ -232,6 +232,47 @@ def write(path, obj):
         json.dump(jsonable(obj), fh, indent=2)
 
 
+def _time(fn, *a, n=3):
+    """Compile once, then time `n` calls. Returns (compile_s, steady_s)."""
+    t0 = time.time()
+    r = fn(*a)
+    jax.block_until_ready(r)
+    compile_s = time.time() - t0
+    t1 = time.time()
+    for _ in range(n):
+        r = fn(*a)
+    jax.block_until_ready(r)
+    return compile_s, (time.time() - t1) / n
+
+
+def component_timing(arm, p, cfg, es):
+    """Where an arm's time actually goes: forward vs backward, and for the
+    memory comparator, memory against processing.
+
+    Added after a preflight measured the memory arm 54x slower than the ODE
+    arms and a first fix moved it barely at all: guessing at a cost twice is
+    one guess too many, so the breakdown is measured and printed.
+    """
+    out = {}
+    fwd = jax.jit(lambda pp: TM.temporal(arm, pp, es, cfg)[0])
+    c, t = _time(fwd, p)
+    out["temporal_forward_ms"] = 1e3 * t
+    gsum = jax.jit(jax.grad(lambda pp: jnp.sum(
+        TM.temporal(arm, pp, es, cfg)[0] ** 2)))
+    c2, t2 = _time(gsum, p)
+    out["temporal_grad_ms"] = 1e3 * t2
+    if arm == "tss_memory_then_prospective":
+        from s5.tss_cells import complex_memory_rollout
+        mem = jax.jit(lambda pp: complex_memory_rollout(pp["mem"], es))
+        _, tm = _time(mem, p)
+        out["memory_forward_ms"] = 1e3 * tm
+        sm = complex_memory_rollout(p["mem"], es)
+        pro = jax.jit(lambda pp: TM.processing_fixed_point(pp["pros"], sm)[0])
+        _, tp = _time(pro, p)
+        out["processing_forward_ms"] = 1e3 * tp
+    return out
+
+
 def preflight(cfg, status):
     """Measure compile and steady step cost for EVERY arm, then project.
 
@@ -263,10 +304,15 @@ def preflight(cfg, status):
                          arm_total_s=arm_s,
                          params=TM.parameter_count(p),
                          state=TM.temporal_state_count(arm)))
+        es = TM.encode(p, args[0][0])
+        comp = component_timing(arm, p, cfg, es)
+        rows[-1]["components_ms"] = comp
         print(f"[preflight] {arm:24s} compile {compile_s:6.1f}s  "
               f"step {step_s * 1e3:7.2f}ms  arm {arm_s:6.1f}s  "
               f"params {TM.parameter_count(p):5d}  "
               f"states {TM.temporal_state_count(arm)['total']:3d}")
+        print("            components " + "  ".join(
+            f"{k.replace('_ms', '')}={v:.2f}ms" for k, v in comp.items()))
         del p2, opt2
     # evaluation, interventions, probes, checkpoints and the post-training
     # correctness checks. An allowance, measured only as such.

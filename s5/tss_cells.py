@@ -365,34 +365,72 @@ def complex_memory_step(params, z, u, dt=DT):
     return jnp.exp(lam) * z + _phi1(lam) * u * dt
 
 
+def complex_memory_coefficients(params, dt=DT):
+    """Per-unit discrete coefficients, computed ONCE outside any recurrence.
+
+    Returns (A_block, Phi) with A_block the REAL 2x2 rotation-scaling that
+    exp(lambda*dt) performs on (Re z, Im z), and Phi = phi1(lambda*dt) the
+    complex input weight. Every complex operation lives here, elementwise and
+    outside the scan.
+    """
+    lam = complex_memory_lambda(params) * dt
+    A = jnp.exp(lam)
+    re, im = jnp.real(A), jnp.imag(A)
+    A_block = jnp.stack([jnp.stack([re, -im], axis=-1),
+                         jnp.stack([im, re], axis=-1)], axis=-2)   # (P,2,2)
+    return A_block, _phi1(lam)
+
+
 def complex_memory_rollout(params, es, dt=DT):
     """Run the memory bank over an encoded sequence. Returns (L, 2*P) REAL.
 
     The readout is the real and imaginary parts, which is why P complex units
     cost exactly 2P real temporal coordinates.
 
-    The carry dtype is DERIVED from the parameters and the input rather than
-    hard-coded. An earlier revision started the scan at `complex64` while the
-    body promoted to `complex128` whenever x64 was enabled, so the carry dtype
-    changed between the initial value and the body and `lax.scan` rejected it.
-    That passed in the production float32 configuration and failed only in the
-    float64 checks - the reverse of the usual direction, and the reason both
-    dtype paths are exercised.
+    IMPLEMENTATION, and why it is not the obvious one. The memory is linear
+    with constant per-unit coefficients, so the recurrence
+    z_k = exp(lambda) z_{k-1} + phi1(lambda) u_k is an affine scan. Written as
+    a sequential `lax.scan` with a COMPLEX carry it measured 1259 ms per
+    training update on the cluster, against 27 ms for the two ODE arms that
+    take 512 sequential steps to this one's 64 - so neither sequential depth
+    nor arithmetic volume explains it, and the complex carry is what differs.
+
+    It is therefore written as a REAL 2x2 block associative scan: exp(lambda)
+    acting on (Re z, Im z) is a rotation-scaling, the affine composition is
+    associative, and `associative_scan` has logarithmic depth. The complex
+    arithmetic is confined to the elementwise coefficient computation outside
+    the scan. The mathematics is identical and is checked against a plain
+    sequential reference.
     """
+    from .gp_second_order import block_binary_operator
     Wr, Wi = params["W_in_re"], params["W_in_im"]
-    lam = complex_memory_lambda(params)
-    ctype = jnp.result_type(lam, es.dtype, jnp.complex64)
+    A_block, Phi = complex_memory_coefficients(params, dt)
+    ur = es @ Wr.T                                   # (L,P)
+    ui = es @ Wi.T
+    pr, pi = jnp.real(Phi), jnp.imag(Phi)
+    br = (pr * ur - pi * ui) * dt                    # Re(Phi u) dt
+    bi = (pr * ui + pi * ur) * dt
+    b = jnp.stack([br, bi], axis=-1)                 # (L,P,2)
+    L = es.shape[0]
+    A_elems = jnp.broadcast_to(A_block, (L,) + A_block.shape)
+    _, zs = jax.lax.associative_scan(block_binary_operator, (A_elems, b))
+    return jnp.concatenate([zs[..., 0], zs[..., 1]], axis=-1)      # (L, 2P)
+
+
+def complex_memory_rollout_sequential(params, es, dt=DT):
+    """The same recurrence, written plainly. Reference for the scan above."""
+    A_block, Phi = complex_memory_coefficients(params, dt)
+    Wr, Wi = params["W_in_re"], params["W_in_im"]
 
     def step(z, e):
-        u = ((Wr @ e) + 1j * (Wi @ e)).astype(ctype)
-        return complex_memory_step(params, z, u, dt).astype(ctype), None
+        u = (Wr @ e) + 1j * (Wi @ e)
+        bb = Phi * u * dt
+        z = ((A_block @ z[..., None])[..., 0]
+             + jnp.stack([jnp.real(bb), jnp.imag(bb)], axis=-1))
+        return z, jnp.concatenate([z[..., 0], z[..., 1]], axis=-1)
 
-    def emit(z, e):
-        z, _ = step(z, e)
-        return z, jnp.concatenate([jnp.real(z), jnp.imag(z)])
-
-    z0 = jnp.zeros(lam.shape, dtype=ctype)
-    _, out = jax.lax.scan(emit, z0, es)
+    z0 = jnp.zeros(A_block.shape[:1] + (2,), dtype=A_block.dtype)
+    _, out = jax.lax.scan(step, z0, es)
     return out
 
 
