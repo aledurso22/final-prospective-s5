@@ -124,20 +124,69 @@ def make_optimizer(args, steps_per_epoch):
     return tx, sched, groups
 
 
-def assert_response_is_not_trainable(params, arm):
-    """Abort if any coefficient of the added response became a parameter."""
+def assert_response_policy(params, arm, n_layers, P):
+    """Enforce the coefficient policy EXACTLY, per arm.
+
+    `gp_learned_response` is the one arm allowed to carry response leaves, and
+    only the two declared ones, at the declared shape and count. Every other
+    arm keeps the blanket prohibition: the earlier fixed-coefficient arms must
+    remain fixed, and the prohibition is NOT relaxed globally just because one
+    new arm learns.
+    """
     from flax.traverse_util import flatten_dict
-    names = ["/".join(k) for k in flatten_dict(params)]
-    bad = [n for n in names if any(tok in n.lower() for tok in
-                                   ("gp_response", "response_raw", "mu_ratio",
-                                    "rho_raw", "horizon", "so_"))]
-    if bad:
+    from s5.rawat_s5 import RESPONSE_PARAM_NAMES
+    flat = {"/".join(k): v for k, v in flatten_dict(params).items()}
+    banned = ("gp_response", "response_raw", "mu_ratio", "rho_raw", "horizon",
+              "so_")
+    found = {n: v for n, v in flat.items()
+             if n.rsplit("/", 1)[-1] in RESPONSE_PARAM_NAMES}
+    other = [n for n in flat if any(tok in n.lower() for tok in banned)]
+    if other:
+        raise SystemExit(
+            f"REFUSING TO RUN arm {arm!r}: unexpected response-like "
+            f"parameters {other}.")
+    if arm == "gp_learned_response":
+        want = n_layers * len(RESPONSE_PARAM_NAMES)
+        if len(found) != want:
+            raise SystemExit(
+                f"REFUSING: arm {arm!r} must carry exactly {want} response "
+                f"leaves ({RESPONSE_PARAM_NAMES} per layer), found "
+                f"{sorted(found)}.")
+        for n, v in found.items():
+            if v.shape != (P,):
+                raise SystemExit(
+                    f"REFUSING: response leaf {n} has shape {v.shape}, "
+                    f"expected {(P,)} (one scalar per STORED complex mode, "
+                    f"shared with its conjugate partner).")
+        added = sum(int(v.size) for v in found.values())
+        print(f"[*] response policy: learned, {len(found)} leaves, "
+              f"{added} added real parameters")
+    elif found:
         raise SystemExit(
             f"REFUSING TO RUN arm {arm!r}: the added physical response must be "
-            f"frozen configuration, but these look like trainable response "
-            f"parameters: {bad}. The coefficient policy is fixed coefficients "
-            f"with ordinary S5 learning.")
-    return len(names)
+            f"frozen configuration for this arm, but found trainable response "
+            f"leaves {sorted(found)}. The prohibition is not relaxed globally.")
+    return len(flat)
+
+
+def project_response_leaves(params):
+    """Project raw log leaves back into the declared admissible interval.
+
+    Applied AFTER the optimizer update, so a step cannot leave the raw leaves
+    outside the bounds. Optimizer state is untouched: only the parameters are
+    projected. This is a declared numerical policy, not a plasticity rule.
+    """
+    from s5.rawat_s5 import LOG_GAMMA_BOUNDS, LOG_RHO_BOUNDS
+
+    def fix(path, v):
+        name = path[-1].key if hasattr(path[-1], "key") else str(path[-1])
+        if name == "log_response_gamma":
+            return jnp.clip(v, *LOG_GAMMA_BOUNDS)
+        if name == "log_response_rho":
+            return jnp.clip(v, *LOG_RHO_BOUNDS)
+        return v
+
+    return jax.tree_util.tree_map_with_path(fix, params)
 
 
 def loss_and_logits(params, batch_stats, model, x, y, rng, training,
@@ -168,6 +217,8 @@ def train_step(state, x, y, rng, model, label_smoothing, _unused=None):
     (loss, (logits, new_bs)), grads = jax.value_and_grad(fn, has_aux=True)(
         state.params)
     state = state.apply_gradients(grads=grads)
+    # declared projection policy; a no-op for every arm without response leaves
+    state = state.replace(params=project_response_leaves(state.params))
     if new_bs is not None:
         state = state.replace(batch_stats=new_bs)
     acc = jnp.mean(jnp.argmax(logits, -1) == y)
@@ -215,7 +266,7 @@ def init_everything(args, steps_per_epoch):
                             "dropout": jax.random.PRNGKey(args.seed + 1)},
                            dummy, jnp.ones((2, SC.N_FRAMES)), None)
     params = variables["params"]
-    assert_response_is_not_trainable(params, args.arm)
+    assert_response_policy(params, args.arm, args.n_layers, args.ssm_size // 2)
     tx, sched, groups = make_optimizer(args, steps_per_epoch)
     state = TrainState.create(apply_fn=model.apply, params=params, tx=tx,
                               batch_stats=variables.get("batch_stats"))

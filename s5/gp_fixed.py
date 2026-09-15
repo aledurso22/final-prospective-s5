@@ -96,8 +96,25 @@ def fixed_m0_coefficients(a, b, T, gamma):
 
 
 # ---------------------------------------------------------------- M > 0 ----
+def _row_factor(v):
+    """Shape a scalar or per-mode (P,) coefficient for dividing (P, H) ROWS.
+
+    Dividing a (P, H) input matrix by a (P,) vector broadcasts along the
+    FEATURE axis H. That is silently valid whenever H == P and WRONG in every
+    other case, so a per-mode coefficient must be reshaped to (P, 1) first.
+    A scalar is returned unchanged. Tested with P != H.
+    """
+    v = np.asarray(v)
+    return v if v.ndim == 0 else v[..., None]
+
+
 def mass_block_generator(a, b, T, gamma, rho):
-    """Continuous per-mode (A, B) for the (s, v) carry. (P,2,2), (P,2,H)."""
+    """Continuous per-mode (A, B) for the (s, v) carry. (P,2,2), (P,2,H).
+
+    `gamma` and `rho` may be scalars (the fixed arms) or per-mode (P,) arrays
+    (the learned-response arm). `T` is always scalar: the published-comparison
+    horizon is FIXED and is not learned.
+    """
     T_c = np.asarray(T, dtype=a.dtype)
     g_c = np.asarray(gamma, dtype=a.dtype)
     r_c = np.asarray(rho, dtype=a.dtype)
@@ -108,7 +125,7 @@ def mass_block_generator(a, b, T, gamma, rho):
         np.stack([-J / gr, -((1.0 - r_c) / r_c) * one], axis=-1),
         np.stack([-J / (gr * T_c), -(one / (r_c * T_c))], axis=-1),
     ], axis=-2)
-    B = np.stack([b / gr, b / (gr * T_c)], axis=-2)
+    B = np.stack([b / _row_factor(gr), b / _row_factor(gr * T_c)], axis=-2)
     return A, B
 
 

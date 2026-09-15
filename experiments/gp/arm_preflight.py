@@ -1,4 +1,7 @@
-"""Preflight for the adaptive arms: two updates, measured cost, projection.
+"""Generic arm preflight: two real updates, measured cost, projection.
+
+Used by both the constrained-response and the (superseded) adaptive batches;
+the arms are supplied with --arms, so nothing here is specific to either.
 
 GPU only. Does NOT train. Prints a machine-readable projection so the launcher
 can decide whether the bounded batch fits the remaining budget.
@@ -20,8 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 import dataloaders.speech_commands10 as SC                        # noqa: E402
 from experiments.gp import rawat_benchmark as RB                  # noqa: E402
 
-NEW_ARMS = ("gp_adaptive_mass", "gp_frozen_adaptive", "ordinary_adaptive",
-            "prospective_recurrence")
+NEW_ARMS = ("gp_learned_response", "prospective_recurrence")
 
 
 def main():

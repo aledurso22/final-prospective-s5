@@ -47,6 +47,8 @@ coefficients are frozen configuration (`s5.physical_coefficients`), reachable
 by no gradient, optimizer state or weight decay.
 """
 
+import math
+
 import jax
 import jax.numpy as np
 
@@ -59,8 +61,18 @@ from .ssm import S5SSM
 
 INPUT_GAINS = ("native", "alpha")
 RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
-             "gp_adaptive_mass", "gp_frozen_adaptive", "prospective_recurrence",
-             "ordinary_adaptive")
+             "gp_learned_response", "prospective_recurrence",
+             # superseded by the constrained-response brief of 2026-09-15;
+             # RETAINED and still selectable, but not part of that batch.
+             "gp_adaptive_mass", "gp_frozen_adaptive", "ordinary_adaptive")
+
+#: the two constrained learned response leaves, and nothing else
+RESPONSE_PARAM_NAMES = ("log_response_gamma", "log_response_rho")
+#: declared numerical admissibility bounds, fixed BEFORE any score
+GAMMA_N_BOUNDS = (1e-2, 1e2)
+RHO_BOUNDS = (1e-4, 1.0 - 1e-4)
+LOG_GAMMA_BOUNDS = (math.log(GAMMA_N_BOUNDS[0]), math.log(GAMMA_N_BOUNDS[1]))
+LOG_RHO_BOUNDS = (math.log(RHO_BOUNDS[0]), math.log(RHO_BOUNDS[1]))
 
 #: the paper's clipping bound, Appendix E.3
 POLE_CLIP = -1e-4
@@ -148,12 +160,47 @@ class SubstrateSSM(S5SSM):
         if self.response.startswith(("gp_adaptive", "gp_frozen")):
             from .adaptive_circuit import validate_reference
             validate_reference()
+        if self.response == "gp_learned_response":
+            # Declared LAST, after super().setup() has drawn every ordinary
+            # parameter, so the common parameter tree is bit-identical to the
+            # fixed arm under the same key. That is asserted by a test, not
+            # assumed.
+            self.physical.validate()                 # host-side floats only
+            self.log_response_gamma = self.param(
+                "log_response_gamma",
+                lambda rng, shape: np.zeros(shape, dtype=np.float32),
+                (self.P,))                           # gamma_n = exp(0) = 1
+            self.log_response_rho = self.param(
+                "log_response_rho",
+                lambda rng, shape: np.full(shape, math.log(0.75),
+                                           dtype=np.float32),
+                (self.P,))                           # rho = 0.75
 
     def _native(self):
         B_tilde = self.B[..., 0] + 1j * self.B[..., 1]
         Delta = self.step_rescale * np.exp(self.log_step[:, 0])
         B_c = input_gain_matrix(self.Lambda, B_tilde, self.input_gain)
         return self.Lambda, B_c, Delta
+
+    def learned_response(self):
+        """(gamma_n, rho) per stored complex mode, both strictly positive.
+
+        gamma_n = exp(eta), rho = exp(zeta), with the raw logs CLIPPED before
+        exponentiation as a forward safety guard. The horizon T stays FIXED at
+        the published-comparison value and the mass is DERIVED,
+        mu = T gamma_n rho; neither is a separate learned quantity.
+
+        The conjugate partner of a stored mode shares these scalars, because
+        they are properties of one physical compartment pair.
+        """
+        eta = np.clip(self.log_response_gamma, *LOG_GAMMA_BOUNDS)
+        zeta = np.clip(self.log_response_rho, *LOG_RHO_BOUNDS)
+        return np.exp(eta), np.exp(zeta)
+
+    def derived_mass(self):
+        """mu = T gamma_n rho, derived and never learned independently."""
+        g_n, rho = self.learned_response()
+        return self.physical.T * g_n * rho
 
     def clock_absorbed(self):
         """(a, b) with the native clock absorbed EXACTLY once."""
@@ -173,6 +220,9 @@ class SubstrateSSM(S5SSM):
         if self.response == "gp_fixed_mass":
             return mass_block_zoh(a, b, self.physical.T, self.physical.gamma,
                                   self.physical.rho)
+        if self.response == "gp_learned_response":
+            g_n, rho = self.learned_response()
+            return mass_block_zoh(a, b, self.physical.T, g_n, rho)
         if self.response == "prospective_recurrence":
             # r + T r_dot = 0 with r = J s - b x, J = -diag(a). For invertible
             # J the driven realization is EXACT and memoryless:
@@ -192,8 +242,8 @@ class SubstrateSSM(S5SSM):
 
     def state_counts(self):
         """Executed carry sizes in REAL coordinates, derived from the law."""
-        two_state = self.response in ("gp_fixed_mass", "gp_adaptive_mass",
-                                      "gp_frozen_adaptive")
+        two_state = self.response in ("gp_fixed_mass", "gp_learned_response",
+                                      "gp_adaptive_mass", "gp_frozen_adaptive")
         c = state_counts(self.P, self.conj_sym,
                          "gp_fixed_mass" if two_state else "other")
         if self.response == "prospective_recurrence":
@@ -251,7 +301,7 @@ class SubstrateSSM(S5SSM):
                                reset_mask=reset_mask)
             return self._readout(zs[..., 0], Du)
 
-        if self.response == "gp_fixed_mass":
+        if self.response in ("gp_fixed_mass", "gp_learned_response"):
             zs = mass_scan(c["A_bar"], c["B_bar"], input_sequence,
                            reset_mask=reset_mask)
             s = zs[..., 0]
@@ -312,7 +362,11 @@ ARMS = {
                           response="gp_fixed_m0"),
     "gp_fixed_mass": dict(input_gain="alpha", clip_eigs=True,
                           response="gp_fixed_mass"),
-    # --- adaptive follow-up arms, all on the SAME gain-scaled clipped substrate
+    # --- constrained learned response: the current treatment
+    "gp_learned_response": dict(input_gain="alpha", clip_eigs=True,
+                                response="gp_learned_response"),
+    # --- RETAINED but superseded: within-sequence adaptation arms. Kept
+    #     selectable and tested; NOT part of the constrained-response batch.
     "gp_adaptive_mass": dict(input_gain="alpha", clip_eigs=True,
                              response="gp_adaptive_mass"),
     # frozen version of the NEW model, its own within-family control: the old

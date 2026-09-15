@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Adaptive prospective recurrence: preflight, then the bounded batch ONLY if
+# Constrained learned response: preflight, then the bounded batch ONLY if
 # the checks pass and the MEASURED projection fits the remaining budget.
 #
 # ONE hard 20-minute budget covers focused checks, compilation, preflight and
 # training. GPU only, no CPU fallback. Test split is never opened.
 #
 # Status contract, printed on EVERY terminal path:
-#   ADAPTIVE_STATUS=PASS|INCOMPLETE|FAILED   ADAPTIVE_EXIT=0|3|4
+#   CONSTRAINED_STATUS=PASS|INCOMPLETE|FAILED   CONSTRAINED_EXIT=0|3|4
 #     PASS       0  checks passed and the batch ran to completion
 #     INCOMPLETE 3  timeout, exhausted budget, or the projection did not fit
 #     FAILED     4  a required check failed, or an environment/runtime failure
@@ -19,11 +19,11 @@ RESERVE_S=${RESERVE_S:-30}
 START=$(date +%s)
 DEADLINE=$(( START + TOTAL_S ))
 STAMP=$(date +%Y%m%d-%H%M%S)
-ARMS=${ARMS:-gp_adaptive_mass,gp_frozen_adaptive,ordinary_adaptive,prospective_recurrence}
+ARMS=${ARMS:-gp_learned_response,prospective_recurrence}
 
 LOG_DIR=""
 finish() {
-  echo "ADAPTIVE_STATUS=$1"; echo "ADAPTIVE_EXIT=$2"
+  echo "CONSTRAINED_STATUS=$1"; echo "CONSTRAINED_EXIT=$2"
   [ -n "${3:-}" ] && echo "reason: $3"
   echo "total elapsed $(( $(date +%s) - START ))s of ${TOTAL_S}s"
   [ -n "$LOG_DIR" ] && echo "logs=$LOG_DIR"
@@ -33,7 +33,7 @@ remaining() { echo $(( DEADLINE - $(date +%s) )); }
 
 cluster_check_env || finish FAILED 4 "environment check failed"
 cd "$PROSPECTIVE_REPO" || finish FAILED 4 "cannot enter $PROSPECTIVE_REPO"
-OUT_ROOT=${OUT_ROOT:-$PROSPECTIVE_RUNS/adaptive}
+OUT_ROOT=${OUT_ROOT:-$PROSPECTIVE_RUNS/constrained}
 LOG_DIR="$OUT_ROOT/logs/$STAMP"
 mkdir -p "$LOG_DIR" || finish FAILED 4 "cannot create $LOG_DIR"
 
@@ -64,7 +64,7 @@ LEFT=$(( $(remaining) - RESERVE_S ))
 [ "$LEFT" -gt 30 ] || finish INCOMPLETE 3 "no time for the focused checks"
 rc=0
 timeout --kill-after=10 --signal=TERM "${LEFT}s" \
-  "$PY" -u -m pytest tests/test_adaptive_recurrence.py -q \
+  "$PY" -u -m pytest tests/test_constrained_response.py -q \
   > "$LOG_DIR/checks.log" 2>&1 || rc=$?
 echo "--- focused checks ---"; tail -8 "$LOG_DIR/checks.log"
 echo "checks raw exit: $rc  (elapsed $(( $(date +%s) - START ))s)"
