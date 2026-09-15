@@ -369,3 +369,154 @@ def test_budget_accepts_an_absolute_deadline_from_the_launcher():
     assert not b.incomplete
     b.mark("x", "skipped_budget")
     assert b.incomplete is True
+
+
+# ------------------------------------------------- offset helper (review 2) --
+# The external-input FD test does NOT validate the offset helper: it
+# differentiates a different function. These checks target the helper itself.
+
+def _tiny_loaded(arm="gp_fixed_mass", d_model=16, ssm_size=16, n_layers=2,
+                 batch=4, seed=0):
+    """A small model + params in the shape the diagnostic restores.
+
+    No Stage 2 checkpoint is touched; this builds a fresh module of the same
+    class so the helper can be validated without the saved artifacts.
+    """
+    import dataloaders.speech_commands10 as SC
+    from experiments.gp import rawat_benchmark as RB
+
+    class A:
+        pass
+    a = A()
+    a.arm, a.d_model, a.ssm_size, a.n_layers = arm, d_model, ssm_size, n_layers
+    a.label_smoothing, a.seed, a.batch = 0.1, seed, batch
+    model = RB.build_model(arm, d_model, ssm_size, n_layers, training=True)
+    eval_model = RB.build_model(arm, d_model, ssm_size, n_layers,
+                                training=False)
+    L = 24
+    x = np.asarray(jax.random.normal(jax.random.PRNGKey(seed + 5),
+                                     (batch, L, SC.N_MFCC)))
+    y = np.asarray(jax.random.randint(jax.random.PRNGKey(seed + 6), (batch,),
+                                      0, RB.D_OUTPUT))
+    v = model.init({"params": jax.random.PRNGKey(seed),
+                    "dropout": jax.random.PRNGKey(seed + 1)},
+                   x, np.ones((batch, L)), None)
+    loaded = dict(args=a, model=model, eval_model=eval_model,
+                  params=v["params"], batch_stats=v.get("batch_stats"),
+                  init_params=v["params"],
+                  init_batch_stats=v.get("batch_stats"))
+    return loaded, x, y
+
+
+def test_zero_offsets_reproduce_the_actual_inference_forward():
+    """The helper must BE the model at zero offsets, not merely resemble it."""
+    from experiments.gp import rawat_benchmark as RB
+    from experiments.gp.stage2_diagnostic import block_activation_report
+    loaded, x, y = _tiny_loaded()
+    rep = block_activation_report(loaded, x, y, return_raw=True)
+    logits_helper = onp.asarray(rep["_raw"]["logits"])
+    loss_ref, (logits_ref, _) = RB.loss_and_logits(
+        loaded["params"], loaded["batch_stats"], loaded["eval_model"],
+        x, y, None, False, loaded["args"].label_smoothing)
+    assert logits_helper.shape == onp.asarray(logits_ref).shape
+    assert float(onp.max(onp.abs(logits_helper - onp.asarray(logits_ref)))) \
+        < 1e-5
+    assert abs(rep["loss"] - float(loss_ref)) < 1e-6
+
+
+def test_offset_derivative_agrees_with_an_independent_finite_difference():
+    """Differentiate the helper's own loss along a fixed offset direction."""
+    from experiments.gp.stage2_diagnostic import block_activation_report
+    loaded, x, y = _tiny_loaded()
+    rep = block_activation_report(loaded, x, y, return_raw=True)
+    raw = rep["_raw"]
+    loss_fn, zeros, g = raw["loss_fn"], raw["zeros"], raw["grads"]
+    rs = onp.random.RandomState(4242)
+    # RMS-1 per site, so the float32 perturbation stays above resolution
+    d = {k: np.asarray(rs.randn(*v.shape), dtype=v.dtype)
+         for k, v in zeros.items()}
+    d = {k: v / np.std(v) for k, v in d.items()}
+    analytic = float(sum(float(np.sum(g[k] * d[k])) for k in zeros))
+    h = 1e-2
+    plus = float(loss_fn({k: zeros[k] + h * d[k] for k in zeros})[0])
+    minus = float(loss_fn({k: zeros[k] - h * d[k] for k in zeros})[0])
+    fd = (plus - minus) / (2 * h)
+    assert abs(analytic - fd) / max(abs(fd), 1e-8) < 5e-3, (analytic, fd)
+
+
+def test_shared_offset_cancels_opposite_per_example_gradients():
+    """Why offsets carry a batch axis.
+
+    A single offset shared across the batch differentiates to the SUM of signed
+    per-example gradients, so +g and -g cancel exactly while both per-example
+    magnitudes are large. Demonstrated analytically, then the reporting
+    convention is checked on the real helper.
+    """
+    def shared(off):                       # one vector used by both examples
+        return jnp.mean(jnp.stack([jnp.sum(off), -jnp.sum(off)]))
+
+    gshared = jax.grad(shared)(jnp.ones((5,)))
+    assert float(jnp.abs(gshared).max()) == 0.0        # total cancellation
+
+    def per_example(off):                  # (2, 5), one slice per example
+        return jnp.mean(jnp.stack([jnp.sum(off[0]), -jnp.sum(off[1])]))
+
+    gper = jax.grad(per_example)(jnp.ones((2, 5)))
+    assert float(jnp.abs(gper[0]).max()) > 0.0
+    assert float(jnp.abs(gper[1]).max()) > 0.0
+    assert float(jnp.sum(gper[0]) * jnp.sum(gper[1])) < 0.0   # opposite signs
+
+
+def test_helper_reports_per_example_not_shared_offset_magnitudes():
+    from experiments.gp.stage2_diagnostic import block_activation_report
+    loaded, x, y = _tiny_loaded(batch=4)
+    rep = block_activation_report(loaded, x, y, return_raw=True)
+    g = rep["_raw"]["grads"]
+    assert g["block"].shape[0] == 4, "offsets must carry a batch axis"
+    assert g["pre_pool"].shape[0] == 4
+    for s in rep["sites"]:
+        assert "per_example_grad_norm_mean" in s
+        assert s["batch_size"] == 4
+        # the shared-offset equivalent is reported SEPARATELY and is not the
+        # quantity called the per-example magnitude
+        assert "shared_offset_equivalent_norm" in s
+
+
+def test_site_names_distinguish_block_core_and_pre_pooling():
+    from experiments.gp.stage2_diagnostic import block_activation_report
+    loaded, x, y = _tiny_loaded()
+    rep = block_activation_report(loaded, x, y)
+    names = {s["site"] for s in rep["sites"]}
+    assert names == {"block_input_before_norm_and_skip",
+                     "recurrent_core_input_post_norm",
+                     "recurrent_core_output",
+                     "pre_pooling_encoder_output"}
+    skip = {s["site"] for s in rep["sites"] if s["includes_identity_skip"]}
+    assert skip == {"block_input_before_norm_and_skip"}
+    for a_ in rep["activations"]:
+        assert "block_output_rms" in a_ and "recurrent_core_output_rms" in a_
+
+
+def test_block_input_and_core_input_are_different_measurements():
+    """If they coincided, one of the two sites would be mislabelled."""
+    from experiments.gp.stage2_diagnostic import block_activation_report
+    loaded, x, y = _tiny_loaded()
+    rep = block_activation_report(loaded, x, y)
+    for layer in range(loaded["args"].n_layers):
+        b = next(s for s in rep["sites"]
+                 if s["site"] == "block_input_before_norm_and_skip"
+                 and s["layer"] == layer)
+        c = next(s for s in rep["sites"]
+                 if s["site"] == "recurrent_core_input_post_norm"
+                 and s["layer"] == layer)
+        assert abs(b["per_example_grad_norm_mean"]
+                   - c["per_example_grad_norm_mean"]) > 1e-9, layer
+
+
+def test_runtime_error_is_FAILED_while_interruption_is_INCOMPLETE(tmp_path):
+    from experiments.gp.stage2_diagnostic import Status
+    st = Status(str(tmp_path))
+    assert st.final(hashes_ok=True, budget_incomplete=False,
+                    runtime_error=True) == "FAILED"
+    assert st.final(hashes_ok=True, budget_incomplete=True,
+                    runtime_error=False) == "INCOMPLETE"

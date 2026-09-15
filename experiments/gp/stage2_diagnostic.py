@@ -97,8 +97,15 @@ class Status:
     def blocked(self, arm):
         return arm in self.blocked_arms
 
-    def final(self, hashes_ok, budget_incomplete):
-        if self.failed_required or hashes_ok is False:
+    def final(self, hashes_ok, budget_incomplete, runtime_error=False):
+        """FAILED for a genuine failure, INCOMPLETE for missing work.
+
+        A programming or runtime exception is a FAILURE, not missing work; an
+        earlier version routed it through the same flag as a timeout and
+        reported INCOMPLETE. INCOMPLETE is reserved for timeout, user
+        interruption, and intentionally unexecuted phases.
+        """
+        if runtime_error or self.failed_required or hashes_ok is False:
             return "FAILED"
         if budget_incomplete or hashes_ok is None or self.unexecuted:
             return "INCOMPLETE"
@@ -360,67 +367,165 @@ def fixed_subset(Xtr, Ytr):
     return idx, jnp.asarray(onp.asarray(Xtr[idx])), jnp.asarray(Ytr[idx])
 
 
-def block_activation_report(loaded, x, y):
-    """Per-layer activation RMS and gradients at each recurrent-core INPUT and
-    at the pre-pooling activation.
+def _layer_forward(lyr, x, off_block, off_core_in, off_core_out):
+    """SequenceLayer.__call__ replicated EXACTLY, with three offset sites.
 
-    R5: parameter-gradient norms alone cannot establish depth attenuation. The
-    stack is re-run through the bound submodules with an additive zero offset
-    at each layer input and before pooling; differentiating with respect to
-    those offsets gives the exact activation gradients without modifying the
-    model. Inference mode: saved batch statistics, dropout disabled.
+    The sites are physically distinct and are named for what they are:
+
+      off_block     block input, BEFORE prenormalization and BEFORE the skip
+                    branch is taken. Its derivative includes the identity skip,
+                    so it is NOT a recurrent-core gradient.
+      off_core_in   the ACTUAL input to `lyr.seq`, i.e. after normalization.
+      off_core_out  the core OUTPUT, before the pointwise GLU map.
+
+    With all offsets zero this must equal `lyr(x)`; the zero-offset check
+    verifies that at the level of logits and loss.
+    """
+    from flax import linen as nn
+    x = x + off_block
+    skip = x
+    if lyr.prenorm:
+        x = lyr.norm(x)
+    x = x + off_core_in
+    core_out = lyr.seq(x)
+    x = core_out + off_core_out
+    if lyr.activation in ["full_glu"]:
+        x = lyr.drop(nn.gelu(x))
+        x = lyr.out1(x) * jax.nn.sigmoid(lyr.out2(x))
+        x = lyr.drop(x)
+    elif lyr.activation in ["half_glu1"]:
+        x = lyr.drop(nn.gelu(x))
+        x = x * jax.nn.sigmoid(lyr.out2(x))
+        x = lyr.drop(x)
+    elif lyr.activation in ["half_glu2"]:
+        x1 = lyr.drop(nn.gelu(x))
+        x = x * jax.nn.sigmoid(lyr.out2(x1))
+        x = lyr.drop(x)
+    elif lyr.activation in ["gelu"]:
+        x = lyr.drop(nn.gelu(x))
+    else:
+        raise NotImplementedError(f"activation {lyr.activation}")
+    x = skip + x
+    if not lyr.prenorm:
+        x = lyr.norm(x)
+    return x, core_out
+
+
+def offset_forward(m, xx, tt, ll, offs):
+    """Forward pass with PER-EXAMPLE additive offsets at named sites."""
+    from flax import linen as nn
+    h = m.encoder.encoder(xx)
+    block_outputs, core_outputs = [], []
+    for i, lyr in enumerate(m.encoder.layers):
+        h, co = _layer_forward(lyr, h, offs["block"][i], offs["core_in"][i],
+                               offs["core_out"][i])
+        block_outputs.append(h)
+        core_outputs.append(co)
+    h = h + offs["pre_pool"]
+    z = m.readout_proj(m.readout_norm(h))
+    pooled = jnp.mean(z, axis=0)
+    out = m.mlp_out(m.drop(nn.gelu(m.mlp_in(pooled))))
+    return out, (block_outputs, core_outputs)
+
+
+def block_activation_report(loaded, x, y, return_raw=False):
+    """Per-example activation gradients at named sites, plus activation RMS.
+
+    Two corrections over the first version:
+
+    * **Site identity.** The earlier code injected before `lyr(h)` and called
+      the result `core_input_layer_i`. That site is the block input, ahead of
+      prenormalization and ahead of the residual split, so its derivative
+      carries the identity skip as well as the recurrent path. The sites are
+      now separated and named `block_input_before_norm_and_skip`,
+      `recurrent_core_input_post_norm` and `recurrent_core_output`.
+
+    * **Per-example offsets.** A single `(L, H)` offset shared across the batch
+      under `vmap` makes the derivative a SUM of signed per-example gradients,
+      so opposite examples cancel: +g and -g give exactly zero even when both
+      paths carry large gradients. Offsets now carry a leading batch axis and
+      are mapped with the examples, so the reported norms are per-example.
+
+    Loss normalization is explicit: the loss is a mean over the batch, so the
+    raw derivative of the mean carries a 1/B factor. Both the raw value and the
+    value rescaled by B are reported.
     """
     import optax
-    from flax import linen as nn
     a = loaded["args"]
     variables = {"params": loaded["params"]}
     if loaded["batch_stats"] is not None:
         variables["batch_stats"] = loaded["batch_stats"]
     single = single_module(a.arm, a.d_model, a.ssm_size, a.n_layers,
                            training=False)
-    L = x.shape[1]
-    n_sites = a.n_layers + 1                       # layer inputs + pre-pooling
-
-    def fwd(m, xx, tt, ll, offs):
-        h = m.encoder.encoder(xx)
-        acts = []
-        for i, lyr in enumerate(m.encoder.layers):
-            h = h + offs[i]
-            h = lyr(h)
-            acts.append(h)
-        h = h + offs[len(m.encoder.layers)]
-        z = m.readout_proj(m.readout_norm(h))
-        pooled = jnp.mean(z, axis=0)
-        out = m.mlp_out(m.drop(nn.gelu(m.mlp_in(pooled))))
-        return out, acts
+    B, L = x.shape[0], x.shape[1]
+    nl, dm = a.n_layers, a.d_model
 
     def loss_fn(offs):
-        def one(xx):
-            return single.apply(variables, xx, jnp.ones(L), None, offs,
-                                method=fwd)
-        logits, acts = jax.vmap(one)(x)
+        def one(xx, ob, oi, oo, op):
+            return single.apply(variables, xx, jnp.ones(L), None,
+                                dict(block=ob, core_in=oi, core_out=oo,
+                                     pre_pool=op), method=offset_forward)
+        logits, acts = jax.vmap(one)(x, offs["block"], offs["core_in"],
+                                     offs["core_out"], offs["pre_pool"])
         onehot = jax.nn.one_hot(y, RB.D_OUTPUT)
         loss = optax.softmax_cross_entropy(
             logits, optax.smooth_labels(onehot, a.label_smoothing)).mean()
-        return loss, acts
+        return loss, (logits, acts)
 
-    offs = [jnp.zeros((L, a.d_model)) for _ in range(n_sites)]
-    (loss, acts), g = jax.value_and_grad(loss_fn, has_aux=True)(offs)
+    zeros = dict(block=jnp.zeros((B, nl, L, dm)),
+                 core_in=jnp.zeros((B, nl, L, dm)),
+                 core_out=jnp.zeros((B, nl, L, dm)),
+                 pre_pool=jnp.zeros((B, L, dm)))
+    (loss, (logits, acts)), g = jax.value_and_grad(loss_fn, has_aux=True)(zeros)
+    block_outputs, core_outputs = acts
+
+    def per_example(gt):
+        """gt: (B, ..., L, dm). Norms per example, then summarized."""
+        gt = onp.asarray(gt)
+        axes = tuple(range(1, gt.ndim))
+        n = onp.sqrt((gt ** 2).sum(axis=axes))              # (B,)
+        return dict(
+            per_example_grad_norm_mean=float(n.mean()),
+            per_example_grad_norm_max=float(n.max()),
+            per_example_grad_norm_min=float(n.min()),
+            per_example_grad_rms=float(onp.sqrt((gt ** 2).mean())),
+            rescaled_by_batch_mean=float(n.mean() * gt.shape[0]),
+            shared_offset_equivalent_norm=float(
+                onp.sqrt((gt.sum(axis=0) ** 2).sum())),
+            batch_size=int(gt.shape[0]))
+
     sites = []
-    for i, gi in enumerate(g):
-        name = (f"core_input_layer_{i}" if i < a.n_layers
-                else "pre_pooling_activation")
-        gi = onp.asarray(gi)
-        sites.append(dict(site=name,
-                          grad_norm=float(onp.sqrt(onp.sum(gi ** 2))),
-                          grad_rms=float(onp.sqrt(onp.mean(gi ** 2)))))
-    act = []
-    for i, ai in enumerate(acts):
-        ai = onp.asarray(ai)
-        act.append(dict(layer=i, activation_rms=float(onp.sqrt(onp.mean(
-            ai ** 2)))))
-    return dict(loss=float(loss), sites=sites, activations=act,
-                mode="inference")
+    for i in range(nl):
+        sites.append(dict(site="block_input_before_norm_and_skip", layer=i,
+                          includes_identity_skip=True,
+                          **per_example(g["block"][:, i])))
+        sites.append(dict(site="recurrent_core_input_post_norm", layer=i,
+                          includes_identity_skip=False,
+                          **per_example(g["core_in"][:, i])))
+        sites.append(dict(site="recurrent_core_output", layer=i,
+                          includes_identity_skip=False,
+                          **per_example(g["core_out"][:, i])))
+    sites.append(dict(site="pre_pooling_encoder_output", layer=None,
+                      includes_identity_skip=False,
+                      **per_example(g["pre_pool"])))
+
+    acts_rec = []
+    for i in range(nl):
+        bo = onp.asarray(block_outputs[i])
+        co = onp.asarray(core_outputs[i])
+        acts_rec.append(dict(layer=i,
+                             block_output_rms=float(onp.sqrt((bo ** 2).mean())),
+                             recurrent_core_output_rms=float(
+                                 onp.sqrt((co ** 2).mean()))))
+
+    out = dict(loss=float(loss), sites=sites, activations=acts_rec,
+               mode="inference", offsets="per-example (batch axis mapped)",
+               loss_normalization="mean over batch; raw gradients carry 1/B",
+               logits_rms=float(onp.sqrt(onp.mean(onp.asarray(logits) ** 2))))
+    if return_raw:
+        out["_raw"] = dict(loss=loss, logits=logits, grads=g, zeros=zeros,
+                           loss_fn=loss_fn)
+    return out
 
 
 def grad_report(loaded, x, y, training_mode=False):
@@ -687,6 +792,20 @@ def main():
     B = Budget(args.budget_s, args.deadline)
     want = set(PHASES if not args.only_phases
                else [p.strip() for p in args.only_phases.split(",")])
+    # Prerequisites are AUTO-INCLUDED. Checkpoint loading happens only in B2,
+    # so `--only_phases D1,D2` would otherwise leave `loaded_arms` empty and
+    # silently produce no gradients at all. A, B and B2 are cheap and are the
+    # gate for everything downstream, so they are added rather than assumed.
+    needs_b2 = {"C", "C_init", "C_last", "D1", "D2", "D3"}
+    auto_added = set()
+    if want & needs_b2:
+        for pre in ("A", "B", "B2"):
+            if pre not in want:
+                want.add(pre)
+                auto_added.add(pre)
+    if auto_added:
+        print(f"[*] prerequisites auto-included: {sorted(auto_added)} "
+              f"(checkpoint loading and its restore checks live in B2)")
 
     hashes_before = None
     hashes_after = None
@@ -694,6 +813,7 @@ def main():
     loaded_arms = {}
     backend = "unknown"
     interrupted = None
+    runtime_error = None
 
     def _sigterm(signum, frame):
         raise KeyboardInterrupt(f"signal {signum}")
@@ -981,10 +1101,10 @@ def main():
 
     except KeyboardInterrupt as exc:
         interrupted = str(exc)
-        print(f"[!] interrupted: {exc}")
+        print(f"[!] interrupted (INCOMPLETE): {exc}")
     except Exception as exc:                      # preserve what exists
-        interrupted = f"{type(exc).__name__}: {exc}"
-        print(f"[!] ERROR: {interrupted}")
+        runtime_error = f"{type(exc).__name__}: {exc}"
+        print(f"[!] RUNTIME ERROR (FAILED): {runtime_error}")
         import traceback
         traceback.print_exc()
     finally:
@@ -1008,12 +1128,16 @@ def main():
             ST.skip("F_source_files_unchanged",
                     "could not be determined", required=True)
         budget_incomplete = bool(B.incomplete or interrupted)
-        status = ST.final(hashes_ok, budget_incomplete)
+        status = ST.final(hashes_ok, budget_incomplete,
+                          runtime_error=bool(runtime_error))
         summary = dict(
             run_id=run_id, out=out, backend=backend, status=status,
             wall_s=time.time() - B.t0, budget_s=B.limit,
             deadline_from_launcher=bool(args.deadline is not None),
             phases=B.phases, interrupted=interrupted,
+            runtime_error=runtime_error,
+            phases_requested=sorted(want),
+            prerequisites_auto_included=sorted(auto_added),
             failed_required_checks=ST.failed_required,
             unexecuted_checks=ST.unexecuted,
             source_hashes_unchanged=hashes_ok,

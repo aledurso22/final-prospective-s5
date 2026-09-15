@@ -280,8 +280,8 @@ restarted" has been withdrawn. To run only genuinely missing phases, pass
 |---|---|
 | reconstructed-initialization **cores** | implemented (phase `C_init`), labelled as reconstructed, not a saved checkpoint |
 | initialization **gradient** probes (D4) | **not implemented**; deferred by the priority order and recorded as such in the run summary |
-| per-layer activation RMS | implemented |
-| gradients at recurrent-core **inputs** and at the pre-pooling activation | implemented, by differentiating additive zero offsets injected through the bound submodules |
+| per-layer activation RMS | implemented, reported as **block output** RMS and **recurrent-core output** RMS separately |
+| activation gradients at named sites | implemented, by differentiating **per-example** additive zero offsets injected through the bound submodules |
 | last-vs-best checkpoint comparison | implemented, lightweight pole summary only, and only when best is not last |
 | dtype record | implemented; actual parameter and batch-statistic dtypes, with `cast_applied: false` |
 | schedule metadata | implemented; steps-per-epoch read from **saved run metadata**, not hardcoded |
@@ -290,6 +290,65 @@ Parameter-gradient norms alone do **not** establish depth attenuation or
 gradient quality, and no conclusion resting on the unimplemented item is drawn.
 "Core" is used throughout for the linear recurrent core; the superposition
 check validates that core, not the whole nonlinear residual `SequenceLayer`.
+
+## 14a. Activation-gradient sites, named for what they are
+
+**AMENDED after the second coordinator review.** The first implementation
+injected an offset before `lyr(h)` and labelled the derivative
+`core_input_layer_i`. That site is the **block input**, ahead of
+prenormalization and ahead of the residual split, so its derivative carries the
+identity skip as well as the recurrent path — it is not a core gradient. The
+sites are now distinct and named:
+
+| site | what it is | includes the identity skip |
+|---|---|---|
+| `block_input_before_norm_and_skip` | input to the whole `SequenceLayer` | **yes** |
+| `recurrent_core_input_post_norm` | the ACTUAL input to `lyr.seq` | no |
+| `recurrent_core_output` | output of `lyr.seq`, before the GLU map | no |
+| `pre_pooling_encoder_output` | final encoder output before mean pooling | no |
+
+Activation RMS values are reported as `block_output_rms` and
+`recurrent_core_output_rms`, never as an unqualified "activation".
+
+**Per-example offsets.** A single `(L, H)` offset shared across the batch under
+`vmap` differentiates to the SUM of signed per-example gradients, so opposite
+examples cancel exactly: `+g` and `-g` give a zero shared-offset derivative
+while both per-example magnitudes are large. Offsets now carry a leading batch
+axis and are mapped with the examples. Reported quantities are per-example
+norms (mean, min, max) and RMS; the shared-offset equivalent is reported
+separately under its own name and is never called the per-example magnitude.
+Loss normalization is explicit: the loss is a batch mean, so raw derivatives
+carry `1/B`, and the value rescaled by `B` is reported alongside.
+
+The helper is validated against the model itself, not assumed correct: at zero
+offsets its logits and loss must match the ordinary inference forward with the
+same saved parameters and batch statistics; a fixed offset direction must agree
+with an independent finite difference; the batch-axis behaviour is pinned by a
+test that distinguishes nonzero opposite per-example derivatives from a
+cancelling shared perturbation; and block-input and core-input gradients must
+differ, since coinciding values would mean one of them is mislabelled. The
+earlier external-input finite-difference check does **not** validate this
+helper: it differentiates a different function.
+
+## 14b. Status semantics, completed
+
+`FAILED` (exit 4) covers a failed required check, a changed source file, and
+any **runtime or programming error**. `INCOMPLETE` (exit 3) is reserved for
+timeout, user interruption, and intentionally unexecuted work. An earlier
+version routed a runtime exception through the same flag as a timeout and
+reported `INCOMPLETE`; that is corrected.
+
+The launcher prints `DIAGNOSTIC_STATUS` and `DIAGNOSTIC_EXIT` on **every**
+terminal path, including preflight refusals, and normalizes raw subprocess
+codes (`124`/`137` from the watchdog, pytest codes) to the contract while
+keeping the raw values in the logs. The backend probe is itself bounded by the
+remaining deadline, so a backend-initialization hang cannot exceed the cap.
+
+`ONLY_PHASES` auto-includes prerequisites: checkpoint loading and its restore
+checks live in `B2`, so `ONLY_PHASES=D1,D2` actually runs `A,B,B2,D1,D2`. The
+restore checks therefore **repeat** on every partial run, and the omitted
+analytical phases are simply not produced. A partial run is a **fresh partial
+diagnostic**, not a resumption.
 
 ## 15. Provenance of the finite-difference amendment
 
