@@ -58,7 +58,9 @@ from .physical_coefficients import SYMMETRIC_REFERENCE, PhysicalResponse
 from .ssm import S5SSM
 
 INPUT_GAINS = ("native", "alpha")
-RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass")
+RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
+             "gp_adaptive_mass", "gp_frozen_adaptive", "prospective_recurrence",
+             "ordinary_adaptive")
 
 #: the paper's clipping bound, Appendix E.3
 POLE_CLIP = -1e-4
@@ -132,13 +134,20 @@ class SubstrateSSM(S5SSM):
                 "step_rescale must be 1.0. The fixed horizon T is expressed in "
                 "native-clock intervals; rescaling the clock without rescaling "
                 "T silently changes the model.")
-        if self.response.startswith("gp_fixed"):
+        if self.response.startswith(("gp_fixed", "gp_adaptive", "gp_frozen")) \
+                or self.response == "prospective_recurrence":
             self.physical.validate()
             if not self.clip_eigs:
                 raise ValueError(
-                    "the fixed generalized response requires clip_eigs=True: "
-                    "sym(J) > 0 is what makes the construction stable, and a "
-                    "free unstable pole is outside the supported region.")
+                    "the generalized and prospective-recurrence responses "
+                    "require clip_eigs=True: sym(J) > 0 is what makes the "
+                    "construction stable, and a free unstable pole is outside "
+                    "the supported region. For the prospective recurrence it "
+                    "also keeps J invertible, which its exact realization "
+                    "s = J^-1 b x needs.")
+        if self.response.startswith(("gp_adaptive", "gp_frozen")):
+            from .adaptive_circuit import validate_reference
+            validate_reference()
 
     def _native(self):
         B_tilde = self.B[..., 0] + 1j * self.B[..., 1]
@@ -146,32 +155,101 @@ class SubstrateSSM(S5SSM):
         B_c = input_gain_matrix(self.Lambda, B_tilde, self.input_gain)
         return self.Lambda, B_c, Delta
 
+    def clock_absorbed(self):
+        """(a, b) with the native clock absorbed EXACTLY once."""
+        Lambda, B_c, Delta = self._native()
+        return Lambda * Delta, Delta[:, None] * B_c
+
     def coefficients(self):
         """Every realized coefficient, for diagnostics and tests."""
         Lambda, B_c, Delta = self._native()
         if self.response in ("one_tap", "alpha_p_two_tap"):
             return two_tap_coefficients(Lambda, B_c, Delta,
                                         self.prospective_horizon)
-        a, b = Lambda * Delta, Delta[:, None] * B_c      # clock absorbed once
+        a, b = self.clock_absorbed()
         if self.response == "gp_fixed_m0":
             return fixed_m0_coefficients(a, b, self.physical.T,
                                          self.physical.gamma)
-        return mass_block_zoh(a, b, self.physical.T, self.physical.gamma,
-                              self.physical.rho)
+        if self.response == "gp_fixed_mass":
+            return mass_block_zoh(a, b, self.physical.T, self.physical.gamma,
+                                  self.physical.rho)
+        if self.response == "prospective_recurrence":
+            # r + T r_dot = 0 with r = J s - b x, J = -diag(a). For invertible
+            # J the driven realization is EXACT and memoryless:
+            #     s_k = J^-1 b x_k = -(b / a) x_k
+            # computed by exact diagonal division, NOT a backward difference,
+            # which would introduce a spurious extra recurrent root.
+            return dict(s_gain=-b / a[:, None], a=a, b=b)
+        if self.response == "ordinary_adaptive":
+            # matched ordinary adaptive control: the SAME modulation
+            # information rescales the ordinary mode's time constant by
+            # tau_d(q)/tau_d(0) = G_d0/G_d(q); no prospective term, one state.
+            return dict(a=a, b=b)
+        # gp_adaptive_mass / gp_frozen_adaptive are token dependent, so their
+        # coefficients are formed inside __call__ where the input is available.
+        return dict(a=a, b=b, adaptive=True, frozen=(
+            self.response == "gp_frozen_adaptive"))
 
     def state_counts(self):
         """Executed carry sizes in REAL coordinates, derived from the law."""
+        two_state = self.response in ("gp_fixed_mass", "gp_adaptive_mass",
+                                      "gp_frozen_adaptive")
         c = state_counts(self.P, self.conj_sym,
-                         "gp_fixed_mass" if self.response == "gp_fixed_mass"
-                         else "other")
+                         "gp_fixed_mass" if two_state else "other")
+        if self.response == "prospective_recurrence":
+            c = dict(c, physical_real=0, total_real=0,
+                     note="memoryless by construction: s_k = J^-1 b x_k")
         if self.response == "alpha_p_two_tap":
             c = dict(c, previous_input_buffer=self.H,
                      total_real=c["total_real"] + self.H)
         return c
 
+    def _readout(self, s, Du):
+        if self.conj_sym:
+            ys = jax.vmap(lambda si: 2 * (self.C_tilde @ si).real)(s)
+        else:
+            ys = jax.vmap(lambda si: (self.C_tilde @ si).real)(s)
+        return ys + Du
+
     def __call__(self, input_sequence, reset_mask=None):
         c = self.coefficients()
         Du = jax.vmap(lambda u: self.D * u)(input_sequence)
+
+        if self.response == "prospective_recurrence":
+            # zero driven history beyond lag zero, by construction
+            s = jax.vmap(lambda u: c["s_gain"] @ u)(input_sequence)
+            return self._readout(s, Du)
+
+        if self.response == "ordinary_adaptive":
+            from .adaptive_circuit import (conductance_from_input,
+                                           coefficients_from_conductance)
+            from .gp_coefficients import phi1
+            a, b = c["a"], c["b"]
+            q = conductance_from_input(b, input_sequence)          # (L,P)
+            cc = coefficients_from_conductance(q)
+            scale = (cc["G_d"] / adaptive_G_D0())                  # >= 1
+            a_k = a[None, :] * scale                               # (L,P)
+            a_bar = np.exp(a_k)
+            b_bar = phi1(a_k)[..., None] * b[None, :, :]           # (L,P,H)
+            drive = np.einsum("lph,lh->lp", b_bar, input_sequence)
+            hs = time_varying_diagonal_scan(a_bar, drive, reset_mask)
+            return self._readout(hs, Du)
+
+        if self.response in ("gp_adaptive_mass", "gp_frozen_adaptive"):
+            from .adaptive_circuit import (adaptive_generator, adaptive_scan,
+                                           adaptive_zoh,
+                                           conductance_from_input)
+            a, b = c["a"], c["b"]
+            L = input_sequence.shape[0]
+            if self.response == "gp_frozen_adaptive":
+                q = np.zeros((L, a.shape[0]))
+            else:
+                q = conductance_from_input(b, input_sequence)
+            A, Bx, d_jump, _ = adaptive_generator(a, b, q)
+            A_bar, B_bar = adaptive_zoh(A, Bx)
+            zs = adaptive_scan(A_bar, B_bar, d_jump, input_sequence,
+                               reset_mask=reset_mask)
+            return self._readout(zs[..., 0], Du)
 
         if self.response == "gp_fixed_mass":
             zs = mass_scan(c["A_bar"], c["B_bar"], input_sequence,
@@ -202,8 +280,24 @@ class SubstrateSSM(S5SSM):
         return ys + Du
 
 
-#: The five arms of the benchmark comparison, as (input_gain, clip_eigs,
-#: response). Names are stable identifiers used by the manifest and the runner.
+def adaptive_G_D0():
+    from .adaptive_circuit import G_D0
+    return G_D0
+
+
+def time_varying_diagonal_scan(a_bar, drive, reset_mask=None):
+    """h_k = a_bar_k h_{k-1} + drive_k with a PER-TOKEN diagonal factor."""
+    from .ssm import binary_operator
+    A = a_bar
+    if reset_mask is not None:
+        keep = (~np.asarray(reset_mask, dtype=bool))[:, None].astype(A.dtype)
+        A = A * keep
+    _, hs = jax.lax.associative_scan(binary_operator, (A, drive))
+    return hs
+
+
+#: The arms of the comparison, as (input_gain, clip_eigs, response). Names are
+#: stable identifiers used by the manifest and the runner.
 ARMS = {
     # complete published recipes
     "native_s5":     dict(input_gain="native", clip_eigs=False,
@@ -218,6 +312,20 @@ ARMS = {
                           response="gp_fixed_m0"),
     "gp_fixed_mass": dict(input_gain="alpha", clip_eigs=True,
                           response="gp_fixed_mass"),
+    # --- adaptive follow-up arms, all on the SAME gain-scaled clipped substrate
+    "gp_adaptive_mass": dict(input_gain="alpha", clip_eigs=True,
+                             response="gp_adaptive_mass"),
+    # frozen version of the NEW model, its own within-family control: the old
+    # gp_fixed_mass result cannot substitute for it unless they are identical,
+    # which is a test, not an assumption.
+    "gp_frozen_adaptive": dict(input_gain="alpha", clip_eigs=True,
+                               response="gp_frozen_adaptive"),
+    # the professor equation, r + T r_dot = 0, as an exact cancellation control
+    "prospective_recurrence": dict(input_gain="alpha", clip_eigs=True,
+                                   response="prospective_recurrence"),
+    # ordinary adaptive SSM using the SAME modulation information
+    "ordinary_adaptive": dict(input_gain="alpha", clip_eigs=True,
+                              response="ordinary_adaptive"),
 }
 
 
