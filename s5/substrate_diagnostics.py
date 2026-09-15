@@ -41,7 +41,15 @@ warns about, so the two terms are formed explicitly.
 
 import numpy as onp
 
-RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass")
+RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
+             # same (s, v) block realization as gp_fixed_mass, with gamma_n = 1
+             # and a per-mode learned rho
+             "gp_rho", "gp_rho_frozen",
+             # memoryless by construction: K_0 only
+             "prospective_recurrence")
+
+#: the responses whose block realization is the (s, v) mass block
+_MASS_LIKE = ("gp_fixed_mass", "gp_rho", "gp_rho_frozen")
 
 
 def _np(x):
@@ -114,6 +122,10 @@ def impulse_matrices(core, n_lags):
             if resp == "alpha_p_two_tap" and l == 1:
                 state = state + second
             K[l] = R(state)
+    elif resp == "prospective_recurrence":
+        # s_k = J^-1 b x_k: a single lag-zero tap and nothing after it.
+        K[0] = R(_np(c["s_gain"]).astype(onp.complex128)) + onp.diag(D)
+        return K
     elif resp == "gp_fixed_m0":
         a_bar = _np(c["a_bar"]); b_bar = _np(c["b_bar"]); d_x = _np(c["d_x"])
         K[0] = R(b_bar + d_x) + onp.diag(D)
@@ -155,6 +167,8 @@ def frequency_response(core, n_freq=129):
                 Bu = (_np(c["B_plus"]).astype(onp.complex128)
                       + _np(c["B_minus"]).astype(onp.complex128) * u)
             return C @ (Bu / (1.0 - A * u)[:, None])
+        if resp == "prospective_recurrence":
+            return C @ _np(c["s_gain"]).astype(onp.complex128)
         if resp == "gp_fixed_m0":
             a = _np(c["a_bar"]).astype(onp.complex128)
             b = _np(c["b_bar"]).astype(onp.complex128)
@@ -212,6 +226,8 @@ def continuous_poles(core):
         return _np(core["a"]).ravel()
     if resp == "gp_fixed_m0":
         return _np(c["a_eff"]).ravel()
+    if resp == "prospective_recurrence":
+        return onp.zeros(0, dtype=complex)        # memoryless: no poles
     return onp.linalg.eigvals(_np(c["A"])).ravel()
 
 
@@ -223,6 +239,8 @@ def discrete_poles(core):
         return _np(c["A_bar"]).ravel()
     if resp == "gp_fixed_m0":
         return _np(c["a_bar"]).ravel()
+    if resp == "prospective_recurrence":
+        return onp.zeros(0, dtype=complex)
     return onp.linalg.eigvals(_np(c["A_bar"])).ravel()
 
 
@@ -296,7 +314,7 @@ def counterfactual_one_tap(core, n_lags):
 
 
 def spectral_radius(core):
-    """max |discrete pole| of the executed core. Descriptive only.
+    """max |discrete pole| of the executed core. Descriptive only. 0 if none.
 
     R2: this is NOT used to bound an impulse tail. The formula
     ||K_last|| * rho/(1-rho) is invalid for a multimode output: modes can
@@ -306,7 +324,8 @@ def spectral_radius(core):
     one. A nonnormal block also need not contract in Euclidean norm at its
     spectral radius. The invalid bound has been removed rather than loosened.
     """
-    return float(onp.max(onp.abs(discrete_poles(core))))
+    d = discrete_poles(core)
+    return float(onp.max(onp.abs(d))) if d.size else 0.0
 
 
 def frequency_window_remainder(core, n_lags, w):
@@ -343,6 +362,9 @@ def frequency_window_remainder(core, n_lags, w):
             # sum_{l<N} state_l u^l with state_0 = B_plus,
             # state_l = A^(l-1) G  =>  remainder = u (uA)^(N-1) (I-uA)^-1 G
             return C @ ((u * uA ** (N - 1) / (1.0 - uA))[:, None] * G)
+        if resp == "prospective_recurrence":
+            return onp.zeros((C.shape[0], _np(core["D"]).shape[0]),
+                             dtype=onp.complex128)     # no tail at all
         if resp == "gp_fixed_m0":
             a = _np(c["a_bar"]).astype(onp.complex128)
             b = _np(c["b_bar"]).astype(onp.complex128)

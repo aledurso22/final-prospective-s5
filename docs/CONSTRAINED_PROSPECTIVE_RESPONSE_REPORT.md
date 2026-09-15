@@ -3,8 +3,33 @@
 Contract and bounded plan, committed before execution:
 `docs/CONSTRAINED_PROSPECTIVE_RESPONSE_PROTOCOL.md`.
 
-**Outcome: the predeclared screen FAILED, and letting the response learn made
-it slightly worse than freezing it.** Reported, not adjusted.
+**Outcome: the predeclared screen FAILED.** This run scored 0.052 pp lower with
+the response learned than with it frozen. Reported, not adjusted.
+
+> **CORRECTIONS APPLIED 15 September 2026** after the coordinator's post-run
+> algebra review. The recorded scores and execution provenance are unchanged;
+> several *interpretations* below were too strong and are corrected in place,
+> and one analytic finding is added in s0.
+
+## 0. An exact redundancy, found analytically after the run
+
+`(Delta, gamma_n, rho)` is input-output equivalent to `(Delta/gamma_n, 1, rho)`
+for every admissible `rho`, not merely in a limit: dividing the whole equation
+by `gamma_n` and setting `hat_Delta = Delta/gamma_n` leaves the same continuous
+state and input matrices, hence the same ZOH blocks, scan and output
+trajectory, with the same carry.
+
+So of the 128 added leaves, **only the 64 `rho` coordinates add per-mode
+response-shape freedom** relative to the already-trainable clock; the 64
+`gamma_n` coordinates re-parameterize that clock. In the interior of the bounds
+and for the differentiable data loss,
+`dL/d(log Delta_i) = -dL/d(log gamma_n_i)`.
+
+The equivalence concerns the forward model and the data loss. It does **not**
+make the two training procedures identical: AdamW, log-coordinate weight decay,
+bounds and global gradient clipping can behave differently when a redundant
+coordinate is present. The observable clock coordinate is
+`log_step - log(gamma_n)`, alongside `rho` — not `gamma_n` alone.
 
 ## 1. Execution identity
 
@@ -53,9 +78,14 @@ Neither was a defect in the model, and no tolerance was loosened.
 
 1. **A bound I declared too wide.** `rho` down to `1e-4` with
    `gamma_n = 1e-2` gives `mu = 5e-6`, where the block matrix exponential is
-   not finite. The measured frontier is **identical in float32 and float64**,
-   so this is stiffness, not precision: smallest finite `mu` `5e-5`, largest
-   non-finite `5e-6`. The `rho` lower bound was raised to `1e-2`, putting the
+   not finite. Identical in float32 and float64, so not a
+   precision effect: smallest finite `mu` `5e-5`, largest non-finite `5e-6`
+   **on the probed matrices**. **Scope correction:** this is a non-finite
+   result of the TESTED numerical exponential implementation on THOSE matrices,
+   not a physical mass threshold and not a universal frontier determined by
+   mass alone. A finite matrix has a finite mathematical exponential; matrix
+   norm, pole scale, conditioning and the implementation's scaling-and-squaring
+   limits all matter. The `rho` lower bound was raised to `1e-2`, putting the
    worst corner at `mu = 5e-4` — ten times the smallest measured-good value.
    The excluded corner is kept as a regression test asserting it really is
    non-finite.
@@ -100,14 +130,20 @@ Best epochs: `gp_learned_response` 9, `prospective_recurrence` 7.
 | learned vs `gain_clip_s5` (matched ordinary) | **-0.398 pp** | fails the +0.3 pp target |
 | learned vs `alpha_p_s5` (Rawat reference) | **-0.795 pp** | fails the +0.3 pp target |
 | learned vs `native_s5` | +0.035 pp | — |
-| **learned vs `gp_fixed_mass` (frozen, same family)** | **-0.052 pp** | **learning did not help** |
+| **learned vs `gp_fixed_mass` (frozen, same family)** | **-0.052 pp** | this run scored lower |
 
-**The screen FAILED.** The fixed-versus-learned comparison is the one that
-isolates allowing response learning within this family, and it is the cleanest
-negative available: the two arms are the same model, the same initialization,
-the same data order and the same schedule, differing only in whether `gamma_n`
-and `rho` may move. Allowing them to move cost **0.052 pp** and **128
-parameters**.
+**The screen FAILED.** The shortfalls against the +0.3 pp target are
+**0.698 pp** (`gain_clip_s5`) and **1.095 pp** (`alpha_p_s5`); those are
+distinct quantities from the raw accuracy differences of -0.398 and -0.795 pp
+and must not be conflated.
+
+The fixed-versus-learned comparison is the internally controlled one: the two
+arms are the same model, the same initialization, the same data order and the
+same schedule, differing only in whether `gamma_n` and `rho` may move. **This
+run scored 0.052 pp lower with them free** — three examples out of 5,783 — at a
+cost of 128 parameters, of which only 64 add response-shape freedom (s0).
+**A difference of three examples on one seed establishes neither degradation
+nor improvement.**
 
 ### Reuse of the references, and why it is valid
 
@@ -137,23 +173,27 @@ All four layers, 64 stored modes:
 | `h` | 1.00 | 0.060 | 0.714 | 1.512 | 0.325 |
 | `g_L` | 1.00 | 0.926 | 1.072 | 1.443 | 0.110 |
 
-Largest movement `|d log gamma_n| = 0.41`, `|d log rho| = 0.29`. **No mode sat
-at any declared bound** in any layer (`0/0` at every layer), so the amended box
-never constrained the outcome.
+Largest movement `|d log gamma_n| = 0.41`, `|d log rho| = 0.29`. **In the saved best
+checkpoint no mode sits at any declared bound** (`0/0` at every layer). That is
+a statement about this checkpoint only: no trajectory was recorded, so it does
+not establish that the bounds were never active during training.
 
 The component identities hold on the **trained** values: maximum residual
 `1.8e-15`, all components strictly positive. Every learned pair therefore still
 has a positive physical realization.
 
-Structure worth recording, as an observation rather than a claim: `gamma_n`
-moved **down** ~15 % in median while `rho` moved **up** ~12 %, leaving the
-derived mass `mu` only ~7 % below its initial value. The optimizer moved the
-two learned quantities in partly compensating directions, largely along a level
-set of the derived mass, rather than driving the mass anywhere in particular.
-Some modes approach `rho -> 1`, where the axial coupling `h = G_s sqrt(1-rho)`
-becomes small — `h` reaches 0.060 — i.e. toward near-decoupled compartments.
-That is a boundary of the physical family, though not a declared numerical
-bound.
+Observed MARGINAL distributions: the median `gamma_n` is below its initial
+value and the median `rho` above it, with the median derived mass ~7 % below
+its initial value. These are marginals. They do **not** establish per-mode
+compensatory motion, a joint within-mode relationship, or an approximately
+constant-mass trajectory; that would need the per-mode joint values and the
+trajectory, which were not recorded.
+
+Some modes reach `rho` near 1, where `h = G_s sqrt(1-rho)` becomes small — `h`
+reaches 0.060. At `rho = 1` the transfer reduces to an ordinary memory-bearing
+SSM response with its clock rescaled, **not** to the professor equation's
+memoryless map. Movement toward that limit in part of the population does not
+show that the trained network became equivalent to ordinary S5.
 
 **Arithmetic note:** `tau_d` and `mu` are numerically identical in the table
 because `tau_d = gamma_ref gamma_n rho` and `mu = T gamma_n rho` with
@@ -164,16 +204,24 @@ constants, not an error.
 
 `prospective_recurrence` implements `r + T r' = 0` exactly as
 `s_k = J^-1 b x_k`, by diagonal division. Verified: **zero driven history at
-nonzero lag** on the isolated core, no dependence on earlier inputs with the
-current input held, and nonzero gradients to `B`, `C`, `D`, `Lambda_re` and
-`log_step`. It carries **zero recurrent state**.
+nonzero lag** on the isolated core, and no dependence on earlier inputs with
+the current input held. It carries **zero recurrent state**.
+
+**Correction.** The report previously listed a nonzero `log_step` gradient as a
+verified property. That is wrong as a property of this model: the map is
+`-Delta B_c/(Delta lambda) = -B_c/lambda`, so its exact data-loss gradient with
+respect to `log_step` is **ZERO**. A test asserting merely `> 0` was passing on
+floating-point cancellation residue, not on a genuine gradient path. The
+ordinary `B`, `C`, `D` and pole degrees of freedom can still learn. The executed
+run and its score are unchanged and are not rerun for this correction.
 
 It reached **84.85 %**. Low accuracy was declared in advance not to be a
-correctness condition, and it is not treated as one. The number is informative
-in a different way: a completely memoryless recurrence, on this pooled
-classification task, gets within about 10 points of every memory-bearing arm.
-The whole span that the recurrent mechanisms compete over here is roughly
-**84.85 % to 95.00 %**.
+correctness condition, and it is not treated as one.
+
+**What this number is not.** It is one trained architecture and configuration on
+this pooled classification task. It is **not** an additive decomposition of
+accuracy into static and memory contributions, **not** a performance floor, and
+**not** a ceiling on what recurrence could contribute.
 
 This arm illustrates the fully matched recurrence placement. It is **not** the
 TSS memory architecture, which includes memory-bearing non-prospective neurons.
@@ -216,20 +264,18 @@ response parameters to learn **did not help**: 94.21 % against 94.26 % for the
 same model with the response frozen, at a cost of 128 parameters, and 0.40 and
 0.80 pp below the matched ordinary and Rawat references.
 
-The result is not that learning failed to move anything. The response moved
-substantially — median `gamma_n` down 15 %, median `rho` up 12 %, `mu` spread
-over 2.35 to 5.34 against a fixed 3.75, no mode at a bound — and the model was
-no better for it. On this task, at this size and budget, the derived response
-appears to sit on a flat region of the objective: the optimizer explored the
-two-parameter family and found nothing materially better than the reference
-point the circuit prescribed.
+The response did move and the final accuracies are close.
 
-The supported next question is therefore **not** a wider response search, which
-this result gives no reason to expect would pay. It is whether the objective is
-sensitive to the response at all in this regime — a question that the flat
-outcome here, and the 84.85 % memoryless floor in s5, both bear on, and which
-would need a task where recurrent memory carries more of the decision than
-roughly ten accuracy points.
+**Withdrawn.** An earlier version of this section inferred from that pairing
+that the objective is flat in this family and that the optimizer "explored the
+family and found nothing better". Similar final accuracy does not establish
+objective curvature or search completeness, and neither claim is supported. The
+only flatness established here is the exact reparameterization direction in s0,
+which concerns the `gamma_n`/clock coordinate and says nothing comparable about
+the `rho` direction or the full training objective.
+
+What stands: the predeclared screen failed, and this single-seed run does not
+distinguish the learned and frozen responses.
 
 No larger run and no rescue sweep follows from this. The previous Stage 2
 verdict and the fixed positive-mass result are unchanged.

@@ -1681,10 +1681,18 @@ on the cluster at commit `4848ee4`, `CONSTRAINED_STATUS=PASS`, artifacts
 
 **Full findings: [`docs/CONSTRAINED_PROSPECTIVE_RESPONSE_REPORT.md`](CONSTRAINED_PROSPECTIVE_RESPONSE_REPORT.md).**
 
-**The predeclared screen FAILED and learning the response did not help.**
-`gp_learned_response` reached **94.21 %** against **94.26 %** for the same model
-with the response frozen (**-0.052 pp**, with 128 added parameters), -0.398 pp
-against the matched ordinary control and -0.795 pp against the Rawat reference.
+**The predeclared screen FAILED.** `gp_learned_response` reached **94.21 %**
+against **94.26 %** for the same model with the response frozen — this run
+scored **0.052 pp lower**, three examples out of 5,783, which establishes
+neither degradation nor improvement — and -0.398 pp against the matched
+ordinary control and -0.795 pp against the Rawat reference (shortfalls against
+the +0.3 pp target of 0.698 and 1.095 pp respectively).
+
+**Analytic finding recorded after the run:** `(Delta, gamma_n, rho)` is
+input-output equivalent to `(Delta/gamma_n, 1, rho)` for every admissible
+`rho`, so only the 64 `rho` coordinates added response-shape freedom; the 64
+`gamma_n` coordinates re-parameterized the already-learned clock. The observable
+clock coordinate is `log_step - log(gamma_n)`.
 
 The response did move: median `gamma_n` 1.00 -> 0.853, median `rho`
 0.75 -> 0.840, `mu` spread 2.35-5.34 against a fixed 3.75, with **no mode at any
@@ -1693,8 +1701,10 @@ declared bound** and the component identities holding on the trained values to
 the derived mass near its initial value.
 
 The professor control `prospective_recurrence` (`r + T r' = 0`, zero recurrent
-state, verified zero driven history) reached **84.85 %**, which bounds how much
-of this pooled task needs recurrent memory at all.
+state, verified zero driven history) reached **84.85 %**. That is one trained
+configuration on a mean-pooled task; it is not a decomposition of accuracy, a
+floor, or a ceiling on what recurrence could contribute. Its exact data-loss
+gradient with respect to `log_step` is ZERO, correcting an earlier claim.
 
 30 focused GPU checks passed. Two earlier check failures were resolved by
 measurement before training — a bound declared too wide, and a probe that ran
