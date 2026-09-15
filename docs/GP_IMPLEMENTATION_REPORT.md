@@ -1247,8 +1247,10 @@ throughout; never an eigendecomposition.
 .venv/bin/python tests/cluster_float32_probe.py  ->  CLUSTER_FLOAT32_OK
 ```
 
-Total 212, up from 178 at `a4c5b12`: 33 new in `tests/test_cluster_gp.py` plus
-one new resumable-checkpoint round-trip test.
+212 at the time of that local run, up from 178 at `a4c5b12`: 33 new in
+`tests/test_cluster_gp.py` plus one resumable-checkpoint round-trip test. Four
+further dataset front-end tests were added afterwards (see 12.10), bringing the
+suite to **216**, which is the count the GPU gate ran.
 
 New file `tests/test_cluster_gp.py`, **33 tests**, tolerances predeclared in
 the module header and unchanged since: ALGEBRAIC 1e-10, ODE 1e-6, GRADIENT
@@ -1392,3 +1394,86 @@ itself, which is what the test was supposed to check.
 | GPU integration for the new arms | — | — | **not run** |
 | Validation screening | — | — | **not run** |
 | Final benchmark comparison | — | — | **not run** |
+
+
+## 12.10 GPU correctness gate — EXECUTED AND PASSED
+
+First real GPU evidence for this revision. Run by the user on the cluster;
+I have no cluster access and did not execute it.
+
+| item | value |
+|---|---|
+| tested tree | **`129f73e0e36c06c7c2df6ca8c697bcfc9dbaf739`** |
+| host | `pgi15-gpu3.iff.kfa-juelich.de`, RTX 3090 |
+| SLURM job | 65870, `CUDA_VISIBLE_DEVICES=0` |
+| backend | `gpu`, `CudaDevice(id=0)`, jax 0.11.0 |
+| artifacts | `/Users/durso/s5-runs/gpu_checks/20260915-152008/` |
+| result | **216 passed in 866.81 s, exit 0** |
+| `GPU_CHECKS_EXIT` | **0** |
+
+Commits `4dac0ea` and `1f88a10` came after this run. They changed **only**
+`docs/GP_RAWAT_CLUSTER_PROTOCOL.md` and `bin/run_experiments/cluster_gpu_checks.sh`
+— verified with `git diff --name-only 129f73e..HEAD`, which lists nothing
+outside `docs/` and that script. No library or test code differs. The gate is
+nonetheless recorded against `129f73e`, the tree that actually ran, and is not
+relabelled to HEAD.
+
+Probe results on the GPU:
+
+| probe | measurement | value | gate |
+|---|---|---|---|
+| `cluster_float32_probe` | `gp_fixed_m0` float32 vs float64 reference | 1.103e-07 | — |
+| | `gp_fixed_mass` block scan vs sequential | 1.992e-07 | — |
+| | `rho = 1` reduction in float32 | 5.385e-07 | — |
+| | **worst** | **5.385e-07** | 1e-04, PASSED |
+| `gp_float32_probe` | parallel vs sequential, HIGHEST matmul | 4.748e-08 | 1e-05, PASSED |
+| | parallel vs sequential, backend DEFAULT | 7.498e-05 | recorded, not gated |
+| `so_float32_probe` | second-order block scan vs sequential | 7.295e-05 | PASSED |
+
+Two observations, stated at their actual scope:
+
+* The positive-mass arm **passes a pure float32 check on real GPU hardware**
+  (worst 5.385e-07 against a 1e-4 gate). The brief records that the older dense
+  positive-mass code failed pure float32. This is a per-fixture agreement
+  between two precisions of the same recurrence — **not** an exact-arithmetic
+  error bound, **not** a bound for a training run, and not to be compared
+  against losses or accuracies.
+* The GPU float32 figures are slightly larger than the same probes on CPU
+  (5.385e-07 vs 3.919e-07 worst). Both sit three orders of magnitude inside the
+  predeclared gate. No conclusion is drawn from the difference.
+* `gp_float32_probe` reproduced its historical backend-default value
+  **7.498e-05 exactly**, consistent with the TF32 characterization in s9.
+
+### Frozen data identity, produced before any training
+
+| split | examples | SHA-256 of the filename+label list |
+|---|---|---|
+| train | 26,984 | `73caf4e4cd760aa4972a3f1553c37260a357dd0eb06f17bcddafc4847e37a345` |
+| val | 5,783 | `dc4f65d666d832303364553d36f3a90c3e70e6b42aefa443fc7ad203407202e4` |
+| test | 5,779 | `d458e62d0e40fcc25bcc62e214702a4e6c9f311539eb3e4967cdb9ad845c9568` |
+
+38,546 clips, exactly the published 70/15/15 proportions; **843 optimizer steps
+per epoch** at batch 32. The documented empty-mel-filter warning appeared as
+expected.
+
+### What this does and does not establish
+
+**Does:** the fixed-coefficient arms and the Rawat port are numerically correct
+on the actual target hardware, in the production dtype, under the deterministic
+protocol, with every predeclared tolerance met and none loosened.
+
+**Does not:** anything whatsoever about accuracy, learning or benchmark
+standing. No training has been run. Stage 1 of
+`docs/GP_RAWAT_CLUSTER_PROTOCOL.md` has not been executed.
+
+### Updated evidence classes
+
+| class | scope | commit | status |
+|---|---|---|---|
+| CPU numerical verification | 212 tests | local, this revision | PASSED |
+| **GPU correctness, this revision** | **216 tests + 3 probes** | **`129f73e`** | **PASSED, exit 0** |
+| GPU correctness, earlier revision | 124 tests | `be225d4` | PASSED |
+| Integration smokes | 3 runs | `91f4988` | PASSED |
+| GPU integration for the new arms (stage 1) | — | — | **not run** |
+| Validation screening (stage 2) | — | — | **not run** |
+| Final benchmark comparison (stage 3) | — | — | **not run** |
