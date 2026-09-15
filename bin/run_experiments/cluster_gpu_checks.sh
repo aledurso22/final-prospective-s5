@@ -26,23 +26,29 @@ if [ "$rc_backend" -ne 0 ]; then
   exit 2
 fi
 
+# -u and -v so the log shows WHICH test is running, line by line, instead of
+# buffering dots for minutes. A silent log made a slow run indistinguishable
+# from a hung one. --durations exposes what is actually costing the time.
 rc=0
-"$PY" -m pytest tests/ -q > "$LOG_DIR/pytest.log" 2>&1 || rc=$?
-echo "--- pytest tail ---"; tail -15 "$LOG_DIR/pytest.log"
+"$PY" -u -m pytest tests/ -v --durations=15 \
+    > "$LOG_DIR/pytest.log" 2>&1 || rc=$?
+echo "--- pytest tail ---"; tail -25 "$LOG_DIR/pytest.log"
+echo "--- failures, if any ---"
+grep -E "^(FAILED|ERROR)" "$LOG_DIR/pytest.log" | head -20 || true
 echo "pytest exit: $rc"
 
 rc_p1=0
-"$PY" tests/cluster_float32_probe.py > "$LOG_DIR/cluster_float32.log" 2>&1 || rc_p1=$?
+"$PY" -u tests/cluster_float32_probe.py > "$LOG_DIR/cluster_float32.log" 2>&1 || rc_p1=$?
 echo "--- cluster float32 probe ---"; tail -15 "$LOG_DIR/cluster_float32.log"
 echo "probe exit: $rc_p1"
 
 rc_p2=0
-"$PY" tests/gp_float32_probe.py > "$LOG_DIR/gp_float32.log" 2>&1 || rc_p2=$?
+"$PY" -u tests/gp_float32_probe.py > "$LOG_DIR/gp_float32.log" 2>&1 || rc_p2=$?
 echo "--- gp float32 probe ---"; tail -10 "$LOG_DIR/gp_float32.log"
 echo "probe exit: $rc_p2"
 
 rc_p3=0
-"$PY" tests/so_float32_probe.py > "$LOG_DIR/so_float32.log" 2>&1 || rc_p3=$?
+"$PY" -u tests/so_float32_probe.py > "$LOG_DIR/so_float32.log" 2>&1 || rc_p3=$?
 echo "--- second-order probe ---"; tail -6 "$LOG_DIR/so_float32.log"
 echo "probe exit: $rc_p3"
 
