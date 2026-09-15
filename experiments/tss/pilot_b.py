@@ -248,8 +248,11 @@ _per_traj_param_grad = jax.jit(jax.vmap(
     jax.grad(loss, argnums=0), in_axes=(None, 0, 0, None, None, None)))
 _batch_param_grad = jax.jit(jax.grad(batch_loss, argnums=0))
 _batch_loss = jax.jit(batch_loss)
-_forward_batch = jax.jit(jax.vmap(forward, in_axes=(None, 0, 0, None, None,
-                                                    None)))
+#: NOTE the in_axes: `forward` takes (params, xs, d1, d2, coef) - it has no
+#: `ys` argument, because the targets enter only through the loss. An earlier
+#: revision vmapped it with six entries and called it with `ys`, which the
+#: production probe could not catch because it never reaches Part B.
+_forward_batch = jax.jit(jax.vmap(forward, in_axes=(None, 0, None, None, None)))
 
 
 def references(params, xs, ys, coef):
@@ -258,7 +261,7 @@ def references(params, xs, ys, coef):
     r1, r2 = _per_traj_drive_adj(params, xs, ys, d1, d2, coef)
     g_per = _per_traj_param_grad(params, xs, ys, d1, d2, coef)
     g_batch = _batch_param_grad(params, xs, ys, d1, d2, coef)
-    s1, s2 = _forward_batch(params, xs, ys, d1, d2, coef)
+    s1, s2 = _forward_batch(params, xs, d1, d2, coef)
     return dict(rho1=r1, rho2=r2, g_per=g_per, g_batch=g_batch, s1=s1, s2=s2)
 
 

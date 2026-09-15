@@ -370,16 +370,29 @@ def complex_memory_rollout(params, es, dt=DT):
 
     The readout is the real and imaginary parts, which is why P complex units
     cost exactly 2P real temporal coordinates.
+
+    The carry dtype is DERIVED from the parameters and the input rather than
+    hard-coded. An earlier revision started the scan at `complex64` while the
+    body promoted to `complex128` whenever x64 was enabled, so the carry dtype
+    changed between the initial value and the body and `lax.scan` rejected it.
+    That passed in the production float32 configuration and failed only in the
+    float64 checks - the reverse of the usual direction, and the reason both
+    dtype paths are exercised.
     """
     Wr, Wi = params["W_in_re"], params["W_in_im"]
+    lam = complex_memory_lambda(params)
+    ctype = jnp.result_type(lam, es.dtype, jnp.complex64)
 
     def step(z, e):
-        u = (Wr @ e) + 1j * (Wi @ e)
-        z = complex_memory_step(params, z, u, dt)
+        u = ((Wr @ e) + 1j * (Wi @ e)).astype(ctype)
+        return complex_memory_step(params, z, u, dt).astype(ctype), None
+
+    def emit(z, e):
+        z, _ = step(z, e)
         return z, jnp.concatenate([jnp.real(z), jnp.imag(z)])
 
-    z0 = jnp.zeros((params["log_decay"].shape[0],), dtype=jnp.complex64)
-    _, out = jax.lax.scan(step, z0, es)
+    z0 = jnp.zeros(lam.shape, dtype=ctype)
+    _, out = jax.lax.scan(emit, z0, es)
     return out
 
 

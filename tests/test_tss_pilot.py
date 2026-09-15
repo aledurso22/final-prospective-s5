@@ -606,6 +606,74 @@ def test_the_verdict_rule_is_applied_mechanically():
     assert v["per_filter"]["x"]["usable"] is False
 
 
+def test_every_vmap_in_axes_matches_the_wrapped_function_arity():
+    """A static guard for the class of bug that cost a cluster slot.
+
+    `_forward_batch` was vmapped with six in_axes entries and called with a
+    `ys` argument that `forward` does not take. Nothing in the import-time link
+    check or the production probe reaches Part B's reference path, so it
+    surfaced only when the focused checks ran on the cluster. This audit is
+    pure AST inspection: no execution, and it covers every vmap in the pilot.
+    """
+    import ast
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    files = ["s5/tss_cells.py", "s5/tss_models.py", "s5/causal_error.py",
+             "tasks/dual_recall.py", "experiments/tss/pilot_a.py",
+             "experiments/tss/pilot_b.py", "tests/test_tss_pilot.py"]
+    arity, trees = {}, {}
+    for f in files:
+        trees[f] = ast.parse((root / f).read_text())
+        for n in ast.walk(trees[f]):
+            if isinstance(n, ast.FunctionDef):
+                arity[n.name] = len(n.args.args)
+    checked, bad = 0, []
+    for f, tree in trees.items():
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "vmap"):
+                continue
+            ia = next((k for k in n.keywords if k.arg == "in_axes"), None)
+            if ia is None or not isinstance(ia.value, ast.Tuple):
+                continue
+            tgt = n.args[0] if n.args else None
+            name = None
+            if isinstance(tgt, ast.Name):
+                name = tgt.id
+            elif isinstance(tgt, ast.Attribute):
+                name = tgt.attr
+            elif isinstance(tgt, ast.Call) and tgt.args:
+                inner = tgt.args[0]
+                name = getattr(inner, "id", getattr(inner, "attr", None))
+            if name in arity:
+                checked += 1
+                if arity[name] != len(ia.value.elts):
+                    bad.append((f, n.lineno, name, arity[name],
+                                len(ia.value.elts)))
+    print(f"  checked {checked} vmap call sites")
+    assert checked >= 4, "the audit found too few sites to be meaningful"
+    assert not bad, bad
+
+
+def test_the_complex_memory_carry_dtype_follows_its_inputs():
+    """The x64 regression: a hard-coded complex64 carry with a promoting body.
+
+    `lax.scan` requires the carry's dtype to be invariant. Starting the memory
+    at complex64 while the body promoted to complex128 under x64 failed in the
+    float64 checks and PASSED in the production float32 configuration - the
+    reverse of the usual direction, which is why both are exercised.
+    """
+    from s5.tss_cells import complex_memory_rollout
+    p = TM.init_params("tss_memory_then_prospective", 100)
+    for dt in (onp.float32, onp.float64):
+        es = jnp.asarray(onp.random.RandomState(9).randn(12, TM.D_ENC),
+                         dtype=dt)
+        out = complex_memory_rollout(p["mem"], es)
+        assert out.shape == (12, 2 * TM.UNITS["tss_memory_then_prospective"])
+        assert onp.all(onp.isfinite(onp.asarray(out))), dt
+
+
 def test_production_entrypoints_in_the_production_dtype():
     """R1: x64 is process-global, so the production probe runs separately.
 
