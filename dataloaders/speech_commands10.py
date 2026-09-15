@@ -190,6 +190,35 @@ def prepare(root, cache_dir, seed=SPLIT_SEED, limit=None):
     return manifest
 
 
+def load_splits(cache_dir, splits=("train", "val")):
+    """Load ONLY the named splits, verifying each opened file's digest.
+
+    `load` opens all three. For a diagnostic that must not touch test data,
+    opening the test arrays at all is avoidable, so this exists to make the
+    stronger statement possible: the test files were never opened, not merely
+    never scored. (Opening a file is not training on it; the distinction is
+    kept because the two claims are different.)
+    """
+    with open(os.path.join(cache_dir, "manifest.json")) as fh:
+        manifest = json.load(fh)
+    unknown = set(splits) - {"train", "val", "test"}
+    if unknown:
+        raise ValueError(f"unknown splits {sorted(unknown)}")
+    out = {}
+    for name in splits:
+        fp = os.path.join(cache_dir, f"{name}_x.npy")
+        lp = os.path.join(cache_dir, f"{name}_y.npy")
+        got = dict(x=_sha256_file(fp), y=_sha256_file(lp))
+        want = manifest["feature_sha256"][name]
+        if got != want:
+            raise RuntimeError(
+                f"{name} split digest mismatch: cached data does not match the "
+                f"manifest. Re-run prepare(); do not analyse unverified data.\n"
+                f"  expected {want}\n  got      {got}")
+        out[name] = (onp.load(fp, mmap_mode="r"), onp.load(lp))
+    return out, manifest
+
+
 def load(cache_dir):
     """Load cached arrays and verify their digests against the manifest."""
     with open(os.path.join(cache_dir, "manifest.json")) as fh:
