@@ -51,7 +51,7 @@ from s5.checkpointing import (append_metrics, checkpoint_exists, make_run_dir,
 from s5.physical_coefficients import SYMMETRIC_REFERENCE, coefficient_table
 from s5.rawat_model import BatchRawatClassifier, parameter_report
 from s5.rawat_s5 import (ARMS, RESPONSE_PARAM_NAMES, RHO_ONLY_PARAM_NAME,
-                         init_substrate_ssm)
+                         T_ONLY_PARAM_NAME, init_substrate_ssm)
 from s5.response_projection import ALL_RESPONSE_LEAF_NAMES
 from s5.response_projection import \
     project_response_leaves as shared_project_response_leaves
@@ -137,6 +137,11 @@ ARM_RESPONSE_LEAVES = {
     "gp_rho": (RHO_ONLY_PARAM_NAME,),
     "gp_rho_frozen": (RHO_ONLY_PARAM_NAME,),
     "gp_rho_prospin": (RHO_ONLY_PARAM_NAME,),
+    # both learned-timescale arms STORE both leaves so their trees are
+    # identical; the fixed arm simply never updates eta. Stored is not
+    # trainable, and the runner reports the two counts separately.
+    "gp_rho_T": (RHO_ONLY_PARAM_NAME, T_ONLY_PARAM_NAME),
+    "gp_rho_T_fixed": (RHO_ONLY_PARAM_NAME, T_ONLY_PARAM_NAME),
 }
 
 

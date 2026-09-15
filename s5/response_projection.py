@@ -23,14 +23,16 @@ is a feasible-set projection and not a hidden optimizer reset.
 import jax
 import jax.numpy as jnp
 
-from .rawat_s5 import (LOG_GAMMA_BOUNDS, LOG_RHO_BOUNDS,
-                       RESPONSE_PARAM_NAMES, RHO_ONLY_PARAM_NAME)
+from .rawat_s5 import (LOG_GAMMA_BOUNDS, LOG_RHO_BOUNDS, LOG_T_BOUNDS,
+                       RESPONSE_PARAM_NAMES, RHO_ONLY_PARAM_NAME,
+                       T_ONLY_PARAM_NAME)
 
 #: every learned response leaf, with its declared RAW-log interval
 RESPONSE_LEAF_BOUNDS = {
     "log_response_gamma": LOG_GAMMA_BOUNDS,     # superseded gp_learned_response
     "log_response_rho": LOG_RHO_BOUNDS,         # superseded gp_learned_response
     RHO_ONLY_PARAM_NAME: LOG_RHO_BOUNDS,        # current rho-only arms
+    T_ONLY_PARAM_NAME: LOG_T_BOUNDS,            # learned response timescale
 }
 
 #: leaf names that are response parameters, in declaration order

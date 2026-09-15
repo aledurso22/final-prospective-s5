@@ -69,6 +69,9 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
              # Rawat's prospective INPUT correction composed with the
              # generalized prospective RECURRENCE (combined-model study)
              "gp_rho_prospin",
+             # learned per-mode response TIMESCALE T_i alongside rho_i; the
+             # `_fixed` variant stores eta but never updates it
+             "gp_rho_T", "gp_rho_T_fixed",
              # superseded by the constrained-response brief of 2026-09-15;
              # RETAINED and still selectable, but not part of that batch.
              "gp_adaptive_mass", "gp_frozen_adaptive", "ordinary_adaptive")
@@ -90,10 +93,43 @@ RHO_ONLY_PARAM_NAME = "log_response_rho_only"
 #: every response that carries the single rho leaf. Adding a member here is the
 #: ONLY place a new rho-only arm has to be registered for parameter creation,
 #: coefficient dispatch and the trainers' projection whitelist.
-RHO_ONLY_RESPONSES = ("gp_rho", "gp_rho_frozen", "gp_rho_prospin")
+RHO_ONLY_RESPONSES = ("gp_rho", "gp_rho_frozen", "gp_rho_prospin",
+                      "gp_rho_T", "gp_rho_T_fixed")
+
+#: The learned RESPONSE TIMESCALE leaf, one per stored complex mode, shared
+#: with its conjugate partner. Parameterized multiplicatively about the
+#: reference horizon:
+#:
+#:     T_i = T_REFERENCE * exp(eta_i),   eta_i in LOG_T_BOUNDS
+#:
+#: so eta = 0 is exactly the reference T = 5 and the two generalized arms start
+#: from the SAME function. The mass stays derived, mu_i = rho_i T_i; there is
+#: no independent mass parameter and gamma_n stays 1.
+#:
+#: NOTE, recorded rather than hidden: AdamW's decoupled decay shrinks eta
+#: toward 0, which biases T toward its REFERENCE value 5, not toward 0. Decay
+#: in a log coordinate is not coordinate invariant, and the direction it pulls
+#: is a property of this parameterization.
+T_ONLY_PARAM_NAME = "log_response_T_only"
+T_RESPONSES = ("gp_rho_T", "gp_rho_T_fixed")
+T_REFERENCE = 5.0
+#: DECLARED NUMERICAL GUARDRAILS for this bounded study, in sample intervals.
+#: T in [0.05, 500], i.e. eta in [log(0.01), log(100)]. These are numerical
+#: bounds for a bounded experiment; they are NOT physiological limits and were
+#: NOT selected from accuracy. A guardrail that fails a numerical check is
+#: reported and amended with numerical justification, never from a score.
+T_BOUNDS = (T_REFERENCE * 1e-2, T_REFERENCE * 1e2)
+LOG_T_BOUNDS = (math.log(1e-2), math.log(1e2))
+#: Declared initialization for the learned-timescale study: the earlier
+#: SYMMETRIC reference, not the near-one recall/composition initialization.
+#: At rho = 1 the state transfer is b/(p + j), INDEPENDENT of T, so
+#: d G/d T = b(1-rho)p^2 / [...]^2 vanishes there: starting at rho_0 = 0.9998
+#: would begin this parameter-freedom test almost at an unidentifiable limit.
+RHO_INIT_TIMESCALE = 0.75
 #: responses whose carry is the (s, v) block and therefore accept a z0 carry
 _BLOCK_CARRY_RESPONSES = ("gp_fixed_mass", "gp_learned_response", "gp_rho",
-                          "gp_rho_frozen", "gp_rho_prospin")
+                          "gp_rho_frozen", "gp_rho_prospin",
+                          "gp_rho_T", "gp_rho_T_fixed")
 #: declared initialization for the recall study; a declared choice, not a
 #: physiological measurement
 RHO_INIT_RECALL = 0.9998
@@ -225,6 +261,15 @@ class SubstrateSSM(S5SSM):
                 lambda rng, shape: np.full(shape, math.log(self.rho_init),
                                            dtype=np.float32),
                 (self.P,))
+        if self.response in T_RESPONSES:
+            # Declared AFTER rho, so both generalized arms draw an identical
+            # tree in an identical order. eta_0 = 0 exactly, computed on the
+            # host, so T = T_REFERENCE exactly and the fixed and learned arms
+            # start from the SAME forward function.
+            self.log_response_T_only = self.param(
+                T_ONLY_PARAM_NAME,
+                lambda rng, shape: np.zeros(shape, dtype=np.float32),
+                (self.P,))
         if self.response == "gp_learned_response":
             # Declared LAST, after super().setup() has drawn every ordinary
             # parameter, so the common parameter tree is bit-identical to the
@@ -246,6 +291,16 @@ class SubstrateSSM(S5SSM):
         Delta = self.step_rescale * np.exp(self.log_step[:, 0])
         B_c = input_gain_matrix(self.Lambda, B_tilde, self.input_gain)
         return self.Lambda, B_c, Delta
+
+    def response_timescale(self):
+        """The learned per-mode horizon T_i, clipped before exponentiation.
+
+        Returned as a (P,) array so every downstream user - coefficients,
+        derived mass, diagnostics - reads the EXECUTED value rather than the
+        static `physical.T` dataclass field.
+        """
+        eta = np.clip(self.log_response_T_only, *LOG_T_BOUNDS)
+        return T_REFERENCE * np.exp(eta)
 
     def rho_only(self):
         """The single learned response quantity, clipped before exponentiation.
@@ -272,6 +327,11 @@ class SubstrateSSM(S5SSM):
 
     def derived_mass(self):
         """mu = T gamma_n rho, derived and never learned independently."""
+        if self.response in T_RESPONSES:
+            # gamma_n = 1, and T is the EXECUTED learned horizon
+            return self.response_timescale() * self.rho_only()
+        if self.response in ("gp_rho", "gp_rho_frozen", "gp_rho_prospin"):
+            return self.physical.T * self.rho_only()
         g_n, rho = self.learned_response()
         return self.physical.T * g_n * rho
 
@@ -298,6 +358,16 @@ class SubstrateSSM(S5SSM):
             if self.response == "gp_rho_frozen":
                 rho = jax.lax.stop_gradient(rho)
             # gamma_n = 1: the clock coordinate already carries hat_Delta
+            if self.response in T_RESPONSES:
+                # per-mode horizon. `mass_block_generator` already shapes a
+                # (P,) denominator to (P,1) before dividing the (P,H) input
+                # row, so this is correct for P != H as well as P == H.
+                T = self.response_timescale()
+                d = mass_block_zoh(a, b, T, np.ones_like(rho), rho)
+                return dict(d, executed_T=T, executed_rho=rho,
+                            derived_mu=T * rho,
+                            # dimensionless per-mode product T_i j_i, j = -a
+                            T_times_j=T.astype(a.dtype) * (-a))
             if self.response == "gp_rho_prospin":
                 # the SAME recurrence, driven by x + T_in x_dot. The extra
                 # input correction COMPOSES with the recurrence's own
@@ -336,6 +406,7 @@ class SubstrateSSM(S5SSM):
         two_state = self.response in ("gp_fixed_mass", "gp_learned_response",
                                       "gp_rho", "gp_rho_frozen",
                                       "gp_rho_prospin",
+                                      "gp_rho_T", "gp_rho_T_fixed",
                                       "gp_adaptive_mass", "gp_frozen_adaptive")
         c = state_counts(self.P, self.conj_sym,
                          "gp_fixed_mass" if two_state else "other")
@@ -420,7 +491,8 @@ class SubstrateSSM(S5SSM):
             return self._readout(zs[..., 0], Du)
 
         if self.response in ("gp_fixed_mass", "gp_learned_response",
-                             "gp_rho", "gp_rho_frozen"):
+                             "gp_rho", "gp_rho_frozen",
+                             "gp_rho_T", "gp_rho_T_fixed"):
             zs = mass_scan(c["A_bar"], c["B_bar"], input_sequence, z0=z0,
                            reset_mask=reset_mask)
             s = zs[..., 0]
@@ -492,6 +564,14 @@ ARMS = {
     #     prospective RECURRENCE, on the same gain-scaled clipped substrate
     "gp_rho_prospin": dict(input_gain="alpha", clip_eigs=True,
                            response="gp_rho_prospin"),
+    # --- learned response TIMESCALE study. rho_0 = 0.75 (the symmetric
+    #     reference), NOT the near-one recall initialization, because
+    #     dG/dT vanishes at rho = 1 and the test would start unidentifiable.
+    "gp_rho_T": dict(input_gain="alpha", clip_eigs=True, response="gp_rho_T",
+                     rho_init=RHO_INIT_TIMESCALE),
+    "gp_rho_T_fixed": dict(input_gain="alpha", clip_eigs=True,
+                           response="gp_rho_T_fixed",
+                           rho_init=RHO_INIT_TIMESCALE),
     # --- RETAINED but superseded: within-sequence adaptation arms. Kept
     #     selectable and tested; NOT part of the constrained-response batch.
     "gp_adaptive_mass": dict(input_gain="alpha", clip_eigs=True,

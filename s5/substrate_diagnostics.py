@@ -56,19 +56,51 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
              # same (s, v) block realization as gp_fixed_mass, with gamma_n = 1
              # and a per-mode learned rho
              "gp_rho", "gp_rho_frozen",
+             # same ONE-tap (s, v) block, with a learned per-mode horizon T_i
+             "gp_rho_T", "gp_rho_T_fixed",
              # the (s, v) block driven by x + T_in x_dot: a TWO-tap block law
              "gp_rho_prospin",
              # memoryless by construction: K_0 only
              "prospective_recurrence")
 
 #: the responses whose block realization is the ONE-tap (s, v) mass block
-_MASS_LIKE = ("gp_fixed_mass", "gp_rho", "gp_rho_frozen")
+#: The learned-timescale arms belong here because their realization IS the
+#: one-tap (s, v) block - only the horizon inside A and B changed, and the
+#: coefficients dict carries the EXECUTED T. They are listed explicitly rather
+#: than matched by prefix, so a future response cannot join by accident.
+_MASS_LIKE = ("gp_fixed_mass", "gp_rho", "gp_rho_frozen",
+              "gp_rho_T", "gp_rho_T_fixed")
 #: the TWO-tap block law; extracted separately, never through _MASS_LIKE
 _MASS_TWO_TAP = ("gp_rho_prospin",)
 
 
 def _np(x):
     return onp.asarray(x)
+
+
+def _executed_response(seq):
+    """The response quantities the bound module actually used.
+
+    For a fixed-coefficient arm these are the static reference values. For a
+    rho-only arm rho is learned and T is the fixed horizon. For a
+    learned-timescale arm BOTH are per-mode learned arrays and the derived mass
+    is mu_i = rho_i T_i. Returned as a dict of arrays or scalars, never as the
+    dataclass field, so a caller cannot read a stale constant by accident.
+    """
+    from .rawat_s5 import RHO_ONLY_RESPONSES, T_RESPONSES
+    if seq.response in T_RESPONSES:
+        T = seq.response_timescale()
+        rho = seq.rho_only()
+        return dict(kind="learned_T_and_rho", T=T, rho=rho, gamma_n=1.0,
+                    mu=T * rho, T_is_per_mode=True)
+    if seq.response in RHO_ONLY_RESPONSES:
+        rho = seq.rho_only()
+        return dict(kind="learned_rho_fixed_T", T=seq.physical.T, rho=rho,
+                    gamma_n=1.0, mu=seq.physical.T * rho,
+                    T_is_per_mode=False)
+    return dict(kind="fixed_reference", T=seq.physical.T,
+                rho=seq.physical.rho, gamma_n=seq.physical.gamma,
+                mu=seq.physical.mass, T_is_per_mode=False)
 
 
 def read_core(module, variables, layer):
@@ -94,9 +126,15 @@ def read_core(module, variables, layer):
                     a=Lam * Delta, b=Delta[:, None] * B_c,
                     C_tilde=seq.C_tilde, D=seq.D,
                     coefficients=seq.coefficients(),
+                    # the STATIC dataclass reference, kept for traceability
                     physical=dict(T=seq.physical.T, gamma=seq.physical.gamma,
                                   rho=seq.physical.rho,
-                                  mass=seq.physical.mass))
+                                  mass=seq.physical.mass),
+                    # the EXECUTED response, which for a learned-timescale arm
+                    # is NOT the static field above. Reporting `physical.T` for
+                    # those arms would mislabel both the horizon and the
+                    # derived mass.
+                    executed_response=_executed_response(seq))
     out = module.apply(variables, method=_read)
     if out["response"] not in RESPONSES:
         raise ValueError(f"unknown response {out['response']!r}; refusing to "
