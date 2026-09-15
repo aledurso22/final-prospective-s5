@@ -140,4 +140,24 @@ r_big = m2.apply({"params": big},
 print(f"  forward clip at the ceiling: max rho after +1.0 in log space = "
       f"{float(jnp.max(r_big)):.6f} (bound {1 - 1e-4})")
 assert float(jnp.max(r_big)) <= (1 - 1e-4) * (1 + 1e-6)
+
+# production float32 coverage of the projection repair
+from s5.rawat_s5 import LOG_RHO_BOUNDS                                     # noqa
+_, p3 = RS.init_params("gp_rho", 0)
+f3 = dict(flatten_dict(p3))
+k3 = [k for k in f3 if k[-1] == RHO_ONLY_PARAM_NAME][0]
+dt3 = f3[k3].dtype
+lo3, hi3 = onp.asarray(LOG_RHO_BOUNDS[0], dt3), onp.asarray(LOG_RHO_BOUNDS[1],
+                                                            dt3)
+out3 = unflatten_dict({**f3, k3: jnp.full_like(f3[k3], hi3 + 0.5)})
+proj = flatten_dict(RS.project_response_leaves(out3))[k3]
+print(f"  projection in production dtype: leaf {dt3}, projected {proj.dtype}, "
+      f"max {float(jnp.max(proj)):.8f} vs bound {float(hi3):.8f}")
+assert proj.dtype == dt3
+assert float(jnp.max(proj)) <= float(hi3)
+assert float(jnp.min(proj)) >= float(lo3)
+below3 = unflatten_dict({**f3, k3: jnp.full_like(f3[k3], lo3 - 0.5)})
+proj_lo = flatten_dict(RS.project_response_leaves(below3))[k3]
+assert float(jnp.min(proj_lo)) >= float(lo3)
+print("  projection holds both bounds in float32")
 print("RECALL_F32_OK")

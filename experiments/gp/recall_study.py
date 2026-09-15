@@ -224,6 +224,60 @@ def evaluate(model, params, x, y, batch=EVAL_BATCH):
 
 
 # ------------------------------------------------------------ cloning ------
+#: arms whose response must be close to the warm-up function at initialization
+GATED_ARMS = ("gp_rho", "gp_rho_frozen")
+
+
+def evaluate_gate(arms, tol=INIT_RESPONSE_TOL, abs_tol=INIT_RESPONSE_ABS_TOL,
+                  gated=GATED_ARMS):
+    """Decide the initialization gate. PURE: dicts in, decision out.
+
+    Enforces BOTH declared criteria, impulse and frequency. Non-finite values
+    fail. A zero-reference layer - one where the ordinary core response is
+    numerically zero - is NOT dropped: it must satisfy an absolute criterion
+    instead, because an arm with a response where the reference has none is not
+    matched either.
+
+    Separated from the runner so the decision can be exercised directly rather
+    than inferred from the source.
+    """
+    failures, worst_imp, worst_freq = [], 0.0, 0.0
+    for name in gated:
+        if name not in arms:
+            failures.append(f"{name}: no gate record")
+            continue
+        for lay in arms[name]["layers"]:
+            for kind, rel, absd in (
+                    ("impulse", lay["impulse_rel"], lay["impulse_abs_diff"]),
+                    ("frequency", lay["freq_rel"], lay["freq_abs_diff"])):
+                tag = f"{name} L{lay['layer']} {kind}"
+                if absd is None or not onp.isfinite(absd):
+                    failures.append(f"{tag}: non-finite absolute difference")
+                    continue
+                if rel is None:                      # zero reference
+                    if absd > abs_tol:
+                        failures.append(
+                            f"{tag}: zero reference but abs {absd:.3e} > "
+                            f"{abs_tol:.0e}")
+                    continue
+                if not onp.isfinite(rel):
+                    failures.append(f"{tag}: non-finite relative difference")
+                    continue
+                if kind == "impulse":
+                    worst_imp = max(worst_imp, rel)
+                else:
+                    worst_freq = max(worst_freq, rel)
+                if rel > tol:
+                    failures.append(f"{tag}: {rel:.3e} > {tol:.0e}")
+    return dict(gp_worst_impulse_rel=worst_imp,
+                gp_worst_frequency_rel=worst_freq,
+                tolerance=tol, abs_tolerance_zero_reference=abs_tol,
+                failures=failures, passed=not failures,
+                scope=("finite-window impulse over 0..127 lags and a 65-point "
+                       "frequency grid, at THIS seed's warm-up. Not a uniform "
+                       "transfer-function theorem."))
+
+
 def trainable_count(params, arm):
     """STORED values and TRAINABLE degrees of freedom are not the same number.
 
@@ -525,49 +579,8 @@ def main():
                       f"{('%.4e' % w) if w is not None else 'n/a'}"
                       f"   query-logit rel = "
                       f"{('%.4e' % ql['rel']) if ql['rel'] is not None else 'n/a'}")
-            # BOTH declared criteria are enforced, not just the impulse one,
-            # non-finite values fail, and the zero-reference branch applies an
-            # ABSOLUTE criterion instead of silently dropping the layer.
-            failures, worst_imp, worst_freq = [], 0.0, 0.0
-            for k in ("gp_rho", "gp_rho_frozen"):
-                for lay in gate["arms"][k]["layers"]:
-                    for kind, rel, absd in (
-                            ("impulse", lay["impulse_rel"],
-                             lay["impulse_abs_diff"]),
-                            ("frequency", lay["freq_rel"],
-                             lay["freq_abs_diff"])):
-                        if not onp.isfinite(absd):
-                            failures.append(f"{k} L{lay['layer']} {kind}: "
-                                            f"non-finite")
-                            continue
-                        if rel is None:                 # zero reference
-                            if absd > INIT_RESPONSE_ABS_TOL:
-                                failures.append(
-                                    f"{k} L{lay['layer']} {kind}: zero "
-                                    f"reference but abs {absd:.3e} > "
-                                    f"{INIT_RESPONSE_ABS_TOL:.0e}")
-                            continue
-                        if not onp.isfinite(rel):
-                            failures.append(f"{k} L{lay['layer']} {kind}: "
-                                            f"non-finite relative")
-                            continue
-                        if kind == "impulse":
-                            worst_imp = max(worst_imp, rel)
-                        else:
-                            worst_freq = max(worst_freq, rel)
-                        if rel > INIT_RESPONSE_TOL:
-                            failures.append(f"{k} L{lay['layer']} {kind}: "
-                                            f"{rel:.3e} > "
-                                            f"{INIT_RESPONSE_TOL:.0e}")
-            gate["gp_worst_impulse_rel"] = worst_imp
-            gate["gp_worst_frequency_rel"] = worst_freq
-            gate["tolerance"] = INIT_RESPONSE_TOL
-            gate["abs_tolerance_zero_reference"] = INIT_RESPONSE_ABS_TOL
-            gate["failures"] = failures
-            gate["passed"] = not failures
-            gate["scope"] = ("finite-window impulse over 0..127 lags and a "
-                             "65-point frequency grid, at THIS seed's warm-up. "
-                             "Not a uniform transfer-function theorem.")
+            decision = evaluate_gate(gate["arms"])
+            gate.update(decision)
             status.setdefault("gates", []).append(gate)
             status["gate"] = gate
             write(os.path.join(out, "status.json"), status)
@@ -579,8 +592,9 @@ def main():
                 write(os.path.join(out, "status.json"), status)
                 print(f"RECALL_STATUS=GATE_STOP out={out}")
                 return 3
-            print(f"[gate] seed {seed} PASSED: worst impulse {worst_imp:.4e}, "
-                  f"worst frequency {worst_freq:.4e}, both <= "
+            print(f"[gate] seed {seed} PASSED: worst impulse "
+                  f"{gate['gp_worst_impulse_rel']:.4e}, worst frequency "
+                  f"{gate['gp_worst_frequency_rel']:.4e}, both <= "
                   f"{INIT_RESPONSE_TOL:.0e}")
 
         # ---- projection before comparative training

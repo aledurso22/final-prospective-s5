@@ -30,6 +30,19 @@ the task generator and the data streams are **unchanged**.
 * the realized delay mix is reported and is **not** equal thirds;
 * the gate enforces both criteria and implements the zero-reference branch.
 
+## Second correction pass (after the review of `43142d7`)
+
+| item | defect | repair |
+|---|---|---|
+| stale interface | a focused test still unpacked the five-value `train_step`, which now returns telemetry as a sixth | all callers updated; every caller audited |
+| summary reader | `recall_summary` assumed the old `rho` list schema and would fail on new artifacts | reads **both** schemas; old JSON is never rewritten; prints per-seed gates, stored-vs-trainable counts and the projection telemetry |
+| bound comparisons | tests compared float32 leaves against double-precision bounds at 1e-12, which fails on representation alone | bounds cast to the **leaf's** dtype, dtype asserted, float32 coverage added to the production probe |
+| weak regressions | `n_projected >= 0` and `max_overshoot >= 0` pass when nothing happens | a **deterministic** outward start forces a crossing: the event count must equal the leaf size and the overshoot must be positive; then a controlled inward objective, **carrying optimizer state forward**, must move the leaf **strictly** off the boundary |
+| gate test | searched source text for field names | replaced by executable cases against `evaluate_gate`: both-pass, frequency-only failure, impulse-only failure, non-finite, zero-reference pass and zero-reference fail, missing record |
+
+`evaluate_gate` is now a pure function, so the decision is exercised directly
+rather than inferred from the runner.
+
 ## Cluster verification plan, when a run is authorized
 
 Same launcher, same 1,200 s cap, same seeds, data streams, equation and

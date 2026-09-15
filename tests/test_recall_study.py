@@ -266,7 +266,7 @@ def test_rho_updates_when_learned_and_not_when_frozen():
         m, p = RS.init_params(arm, 0)
         tx = RS.make_tx(freeze_rho=frozen)
         opt = tx.init(p)
-        q, opt, loss, acc, gn = RS.train_step(m, tx, p, opt, x, y)
+        q, opt, loss, acc, gn, _tel = RS.train_step(m, tx, p, opt, x, y)
         before = [v for k, v in flatten_dict(p).items()
                   if k[-1] == RHO_ONLY_PARAM_NAME]
         after = [v for k, v in flatten_dict(q).items()
@@ -437,19 +437,28 @@ def test_raw_response_is_projected_back_after_an_outward_update():
     """
     from flax.traverse_util import flatten_dict, unflatten_dict
     from s5.rawat_s5 import LOG_RHO_BOUNDS
-    lo, hi = LOG_RHO_BOUNDS
     m, p = RS.init_params("gp_rho", 0)
     flat = dict(flatten_dict(p))
     key = [k for k in flat if k[-1] == RHO_ONLY_PARAM_NAME][0]
+    # The leaf is stored float32 even when x64 is enabled, so the bounds must be
+    # compared in the LEAF's dtype: float32(log(0.01)) is a rounded
+    # representation of the double-precision endpoint, and a 1e-12 comparison
+    # against the double value would fail on representation alone. This is a
+    # dtype issue, not a widening of the admissible interval.
+    dt = flat[key].dtype
+    assert dt == onp.float32, dt
+    lo, hi = onp.asarray(LOG_RHO_BOUNDS[0], dt), onp.asarray(
+        LOG_RHO_BOUNDS[1], dt)
 
     # 1. a raw value pushed far outside is projected back onto the bound
     outside = unflatten_dict({**flat, key: np.full_like(flat[key], hi + 5.0)})
     back = flatten_dict(RS.project_response_leaves(outside))[key]
-    assert float(np.max(back)) <= hi + 1e-12
-    assert float(np.min(back)) >= lo - 1e-12
+    assert back.dtype == dt
+    assert float(np.max(back)) <= float(hi)
+    assert float(np.min(back)) >= float(lo)
     below = unflatten_dict({**flat, key: np.full_like(flat[key], lo - 5.0)})
-    assert float(np.min(flatten_dict(
-        RS.project_response_leaves(below))[key])) >= lo - 1e-12
+    got = flatten_dict(RS.project_response_leaves(below))[key]
+    assert got.dtype == dt and float(np.min(got)) >= float(lo)
 
     # 2. an UNPROJECTED outward value has exactly zero task gradient: the
     #    failure mode the projection exists to prevent
@@ -469,28 +478,65 @@ def test_raw_response_is_projected_back_after_an_outward_update():
     assert float(np.max(np.abs(grad_at(projected)))) > 0.0
 
 
-def test_a_training_step_projects_and_reports_the_bound_interaction():
-    """The production train_step, not a helper: an outward step must be
-    projected, counted, and its overshoot reported."""
+def test_forced_outward_crossing_is_projected_counted_and_then_reversible():
+    """The real update path, with a DETERMINISTIC crossing and real movement.
+
+    Three things, none of which the previous version established:
+      1. starting outside the interval, the production step projects back and
+         reports a POSITIVE event count and overshoot - not `>= 0`, which any
+         no-op satisfies;
+      2. on the boundary the task gradient is available again;
+      3. under a controlled INWARD objective, carrying the SAME optimizer state
+         forward rather than resetting it, the leaf moves STRICTLY back inside.
+    """
+    import optax
     from flax.traverse_util import flatten_dict, unflatten_dict
     from s5.rawat_s5 import LOG_RHO_BOUNDS
-    lo, hi = LOG_RHO_BOUNDS
     rng = onp.random.RandomState(53)
     x, y = T.generate_fixed_delay(rng, 32, delay=32)
     x, y = np.asarray(x), np.asarray(y)
     m, p = RS.init_params("gp_rho", 0)
     flat = dict(flatten_dict(p))
     key = [k for k in flat if k[-1] == RHO_ONLY_PARAM_NAME][0]
-    start = unflatten_dict({**flat, key: np.full_like(flat[key], hi - 1e-9)})
+    dt = flat[key].dtype
+    lo, hi = onp.asarray(LOG_RHO_BOUNDS[0], dt), onp.asarray(
+        LOG_RHO_BOUNDS[1], dt)
+
+    # (1) start OUTSIDE: the crossing is deterministic, not gradient-dependent
+    overshoot = 0.5
+    start = unflatten_dict({**flat,
+                            key: np.full_like(flat[key], hi + overshoot)})
     tx = RS.make_tx()
     opt = tx.init(start)
     q, opt, loss, acc, gn, tel = RS.train_step(m, tx, start, opt, x, y)
     raw = flatten_dict(q)[key]
-    assert float(np.max(raw)) <= hi + 1e-12, "projection did not hold the bound"
-    assert float(np.min(raw)) >= lo - 1e-12
-    assert int(tel["n_projected"]) >= 0
-    assert float(tel["max_overshoot"]) >= 0.0
-    assert float(tel["rho_grad_norm"]) >= 0.0
+    assert raw.dtype == dt
+    assert float(np.max(raw)) <= float(hi), "projection did not hold the bound"
+    assert int(tel["n_projected"]) == raw.size, int(tel["n_projected"])
+    assert float(tel["max_overshoot"]) > 0.4, float(tel["max_overshoot"])
+    assert float(np.max(np.abs(raw - hi))) < 1e-6, "should sit ON the bound"
+
+    # (2) on the boundary the task gradient exists again
+    def L(params):
+        return RS.loss_fn(params, m, x, y)[0]
+
+    assert float(np.max(np.abs(flatten_dict(jax.grad(L)(q))[key]))) > 0.0
+
+    # (3) a controlled inward objective must move it STRICTLY inside, with the
+    #     optimizer state carried forward - Adam's first steps are
+    #     momentum-limited, so several updates are taken.
+    def inward(params):
+        return sum(np.sum(v) for v in RS._rho_leaves(params))
+
+    for _ in range(12):
+        g = jax.grad(inward)(q)
+        upd, opt = tx.update(g, opt, q)
+        q = RS.project_response_leaves(optax.apply_updates(q, upd))
+    moved = flatten_dict(q)[key]
+    assert float(np.max(moved)) < float(hi) - 1e-5, (
+        "an inward objective did not move the leaf off the boundary: "
+        f"max {float(np.max(moved)):.8f} vs bound {float(hi):.8f}")
+    assert float(np.min(moved)) >= float(lo)
 
 
 def test_the_frozen_arm_is_unchanged_by_the_projection():
@@ -507,6 +553,7 @@ def test_the_frozen_arm_is_unchanged_by_the_projection():
         if k[-1] == RHO_ONLY_PARAM_NAME:
             assert float(np.max(np.abs(a[k] - b[k]))) == 0.0, "/".join(k)
     assert int(tel["n_projected"]) == 0
+    assert float(tel["max_overshoot"]) == 0.0
     moved = max(float(np.max(np.abs(a[k] - b[k]))) for k in a if k[-1] == "B")
     assert moved > 0.0, "ordinary weights must still train"
 
@@ -529,13 +576,61 @@ def test_realized_delay_distribution_is_reported_not_assumed_equal():
     assert T.realized_delay_counts(15)["equal"] is True
 
 
-def test_gate_enforces_both_criteria_and_the_zero_reference_branch():
-    """The decision must use impulse AND frequency, and must not drop a
-    zero-reference layer."""
-    assert RS.INIT_RESPONSE_ABS_TOL > 0.0
+def _layer(imp_rel, freq_rel, imp_abs=1.0, freq_abs=1.0, layer=0):
+    return dict(layer=layer, impulse_rel=imp_rel, freq_rel=freq_rel,
+                impulse_abs_diff=imp_abs, freq_abs_diff=freq_abs)
+
+
+def _arms(layers):
+    return {a: dict(layers=layers) for a in RS.GATED_ARMS}
+
+
+def test_gate_decision_both_criteria_pass():
+    d = RS.evaluate_gate(_arms([_layer(1e-3, 2e-3)]))
+    assert d["passed"] and d["failures"] == []
+    assert d["gp_worst_impulse_rel"] == pytest.approx(1e-3)
+    assert d["gp_worst_frequency_rel"] == pytest.approx(2e-3)
+
+
+def test_gate_decision_fails_when_only_the_FREQUENCY_criterion_is_violated():
+    """The defect being pinned: a decision on the impulse alone would PASS."""
+    d = RS.evaluate_gate(_arms([_layer(1e-3, 5e-1)]))
+    assert not d["passed"]
+    assert any("frequency" in f for f in d["failures"]), d["failures"]
+    assert not any("impulse" in f for f in d["failures"]), d["failures"]
+
+
+def test_gate_decision_fails_when_only_the_impulse_criterion_is_violated():
+    d = RS.evaluate_gate(_arms([_layer(5e-1, 1e-3)]))
+    assert not d["passed"]
+    assert any("impulse" in f for f in d["failures"]), d["failures"]
+
+
+def test_gate_decision_rejects_non_finite_values():
+    for bad in (float("nan"), float("inf")):
+        d = RS.evaluate_gate(_arms([_layer(bad, 1e-3)]))
+        assert not d["passed"], bad
+        d2 = RS.evaluate_gate(_arms([_layer(1e-3, 1e-3, imp_abs=bad)]))
+        assert not d2["passed"], bad
+
+
+def test_gate_decision_zero_reference_passes_only_when_the_arm_is_also_zero():
+    """A zero-reference layer is NOT dropped: it gets an absolute criterion."""
+    ok = RS.evaluate_gate(_arms([_layer(None, None, imp_abs=1e-12,
+                                        freq_abs=1e-12)]))
+    assert ok["passed"], ok["failures"]
+    bad = RS.evaluate_gate(_arms([_layer(None, None, imp_abs=1e-3,
+                                         freq_abs=1e-12)]))
+    assert not bad["passed"]
+    assert any("zero reference" in f for f in bad["failures"]), bad["failures"]
+
+
+def test_gate_decision_requires_a_record_for_every_gated_arm():
+    d = RS.evaluate_gate({"gp_rho": dict(layers=[_layer(1e-3, 1e-3)])})
+    assert not d["passed"]
+    assert any("no gate record" in f for f in d["failures"]), d["failures"]
+
+
+def test_gate_runs_for_every_seed():
     assert RS.GATE_EVERY_SEED is True
-    src = open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "experiments", "gp",
-        "recall_study.py")).read()
-    assert "freq_rel" in src.split("failures, worst_imp")[1][:2000]
-    assert "zero reference" in src
+    assert RS.INIT_RESPONSE_ABS_TOL > 0.0

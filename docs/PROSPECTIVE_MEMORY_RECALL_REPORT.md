@@ -35,9 +35,13 @@ case.
 compatible with a genuine boundary optimum, with clipping lockout, or with a
 mixture. My earlier conclusion that *"the learned direction was overwhelmingly
 toward the ordinary-SSM limit"* is therefore **withdrawn**: the data cannot
-distinguish a preference from a lockout. Everything else in this report - the
-accuracies, the controls, the professor result, the interventions - is
-unaffected, because the forward law stayed in bounds throughout.
+distinguish a preference from a lockout.
+
+The accuracies, controls, professor result and interventions **remain on
+record** as measurements of the optimization procedure that was actually run.
+The forward law stayed in bounds throughout, so they are valid measurements of
+*that* procedure — but the defect's causal effect on accuracy is **unknown**,
+and an earlier phrasing that they were "unaffected" claimed more than that.
 
 **What cannot be recovered.** The completed run saved only clipped summaries.
 No warm-up or final parameter trees, optimizer states or raw trajectories were
@@ -83,12 +87,16 @@ balance deviation 0.148.
 Signal-only core impulse change from the warm-up model, native `D` removed,
 relative Frobenius over lags 0..127, measured on the executed modules:
 
-| arm | worst core impulse rel | query-logit rel | function-matched? |
+| arm | worst core impulse rel | query-logit rel | scope of the claim |
 |---|---|---|---|
-| `gp_rho` | **1.99e-03** | 1.17e-03 | yes, by measurement |
-| `gp_rho_frozen` | **1.99e-03** | 1.17e-03 | yes, by measurement |
-| `rawat` | **2.09e+00** | 1.48e+00 | **no** |
-| `professor` | **7.57e+00** | 1.18e+00 | **no** |
+| `gp_rho` | **1.99e-03** | 1.17e-03 | approximately matched **on the seed-100 impulse probe** |
+| `gp_rho_frozen` | **1.99e-03** | 1.17e-03 | approximately matched **on the seed-100 impulse probe** |
+| `rawat` | **2.09e+00** | 1.48e+00 | **not matched** |
+| `professor` | **7.57e+00** | 1.18e+00 | **not matched** |
+
+No cell here says "function-matched": the executed gate probed one seed with one
+of the two declared criteria, so none of these is a verified match across the
+study.
 
 Gate **PASSED** for the generalized arms at 1.99e-03 against the predeclared
 1e-2.
@@ -188,9 +196,16 @@ runtime claims.
 | 101 | 0.9998 | 0.9323 | **0.9999** | 5 / 32 |
 | 102 | 0.9998 | 0.8212 | **0.9999** | 4 / 32 |
 
-**The median final `rho` is 0.9999, which is the declared ceiling.** So 27-28 of
-32 modes moved *up* and are pinned at the bound; only 4-5 modes per seed fell,
-though those fell substantially (to 0.82-0.95).
+**The median final `rho` is 0.9999, the clip value.** Since the executed `rho`
+cannot exceed it, a median at the clip means **at least 16 of 32 modes sit at
+it**. Only 4-5 modes per seed fell below the initialization, though those fell
+substantially (to 0.82-0.95).
+
+**The exact bound occupancy was not recorded for this run**, so the count at the
+margin is bounded (at least 16, at most 28) rather than known. An earlier
+version of this report stated "27-28 of 32 modes" — that was inferred from the
+median plus `n_fell` and is withdrawn. The repaired runner records occupancy
+directly.
 
 **Two statements I put in the protocol before the run were wrong.**
 
@@ -230,8 +245,9 @@ each other diverged by more than the effect being screened for, which is a
 useful caution about the resolution of this setup.
 
 Effective clocks were essentially identical across `ordinary`, `gp_rho` and
-`gp_rho_frozen` (median 0.0071, range 0.0012-0.105), so the arms did not
-diverge by silently retiming.
+`gp_rho_frozen` **for seed 100**, the only seed whose clocks were printed
+(median 0.0071, range 0.0012-0.105). That is not generalized to the other seeds
+here; the repaired summary prints all of them.
 
 ## 6. The professor control, and what it says about the earlier speech result
 
