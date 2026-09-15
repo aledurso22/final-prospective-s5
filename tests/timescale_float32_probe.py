@@ -33,8 +33,20 @@ from s5.gp_fixed import mass_block_zoh, mass_scan                  # noqa: E402
 from s5.rawat_s5 import (RHO_INIT_TIMESCALE, RHO_ONLY_PARAM_NAME,  # noqa: E402
                          T_BOUNDS, T_ONLY_PARAM_NAME, T_REFERENCE,
                          init_substrate_ssm)
-from tests.test_learned_timescale import (_reference_block,        # noqa: E402
-                                          _ssm_kwargs)
+# Imported from the NEUTRAL reference module. Importing these from the test
+# module would execute its `jax.config.update("jax_enable_x64", True)` and this
+# probe would measure float64 while reporting float32 - which is exactly what
+# happened on the first cluster run.
+from tests.response_reference import (reference_block as _reference_block,
+                                      ssm_kwargs as _ssm_kwargs)  # noqa: E402
+
+# Re-checked AFTER the imports: the first cluster run passed the pre-import
+# assertion and still ran in float64, because an imported module had switched
+# x64 back on. The invariant has to hold at the point of measurement.
+assert not jax.config.read("jax_enable_x64"), \
+    "x64 was switched back ON by an import; this probe would measure float64"
+assert jnp.zeros(1).dtype == onp.float32, jnp.zeros(1).dtype
+assert jnp.zeros(1, dtype=jnp.complex64).dtype == onp.complex64
 
 F32 = 2e-4
 print(f"  backend={jax.default_backend()}  "

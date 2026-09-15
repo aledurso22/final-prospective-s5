@@ -28,8 +28,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from s5.gp_fixed import (mass_block_two_tap, mass_scan_two_tap,    # noqa: E402
                          mass_scan_two_tap_sequential)
 from s5.rawat_s5 import RHO_ONLY_PARAM_NAME, init_substrate_ssm    # noqa: E402
-from tests.test_combined_input_recurrence import (_reference_two_tap,  # noqa: E402,E501
-                                                  _ssm_kwargs)
+# Imported from the NEUTRAL reference module: importing these from the test
+# module would execute its `jax.config.update("jax_enable_x64", True)` and this
+# probe would measure float64 while reporting float32.
+from tests.response_reference import (reference_two_tap as _reference_two_tap,
+                                      ssm_kwargs as _ssm_kwargs)  # noqa: E402
+
+# Re-checked AFTER the imports, not only before them: an imported module can
+# switch x64 back on, and then this probe would measure float64 silently.
+assert not jax.config.read("jax_enable_x64"), \
+    "x64 was switched back ON by an import; this probe would measure float64"
+assert jnp.zeros(1).dtype == onp.float32, jnp.zeros(1).dtype
 
 F32 = 2e-4
 T_IN = 5.0

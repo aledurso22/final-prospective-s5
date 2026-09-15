@@ -9,6 +9,7 @@ PREDECLARED TOLERANCES, by dtype:
     LIMIT64  1e-10  T = 5 reproduces the fixed-horizon law; rho = 1 reduction
     IDENT64  1e-12  the two generalized arms are the same function at init
     FD64     1e-6   best central-difference agreement for d/d(log T)
+    FREQ64   1e-8   frequency response vs measured impulse + exact remainder
     ZEROT    1e-9   |d(physical output)/dT| at the rho = 1 boundary
     F32      2e-4   production float32/complex64, in `timescale_float32_probe.py`
 
@@ -24,8 +25,6 @@ import sys
 import jax
 import numpy as onp
 import pytest
-from scipy.linalg import expm as sp_expm
-
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as np                                            # noqa: E402
 
@@ -44,57 +43,22 @@ from s5.response_projection import (RESPONSE_LEAF_BOUNDS,          # noqa: E402
                                     projection_telemetry)
 
 EXACT64, LIMIT64, IDENT64, FD64, ZEROT = 1e-10, 1e-10, 1e-12, 1e-6, 1e-9
+#: frequency response vs the measured impulse plus its EXACT remainder
+FREQ64 = 1e-8
 #: the declared guardrail corners, exercised as corners and not as a sweep
 T_CORNERS = (T_BOUNDS[0], 1.0, T_REFERENCE, T_BOUNDS[1])
 RHO_CORNERS = (0.01, 0.25, 0.75, 0.9999)
 
 
-# ------------------------------------------------- independent reference ---
-def _to_real_pair(M):
-    return onp.block([[onp.real(M), -onp.imag(M)],
-                      [onp.imag(M), onp.real(M)]])
-
-
-def _from_real_pair(R):
-    n = R.shape[0] // 2
-    return R[:n, :n] + 1j * R[n:, :n]
-
-
-def _reference_block(a, b, T, rho, nodes=64):
-    """Per-mode A, B, A_bar, B_bar computed INDEPENDENTLY of production.
-
-    `scipy.linalg.expm` is a different exponential implementation from JAX's,
-    the complex 2x2 is exponentiated through its REAL-PAIR embedding, and the
-    integral is Gauss-Legendre quadrature rather than production's augmented
-    4x4 trick. `T` and `rho` may be per-mode.
-    """
-    a = onp.asarray(a); b = onp.asarray(b)
-    P, H = b.shape
-    T = onp.broadcast_to(onp.asarray(T, dtype=float), (P,))
-    rho = onp.broadcast_to(onp.asarray(rho, dtype=float), (P,))
-    xg, wg = onp.polynomial.legendre.leggauss(nodes)
-    ug, wg = 0.5 * (xg + 1.0), 0.5 * wg
-    A = onp.zeros((P, 2, 2), dtype=complex)
-    B = onp.zeros((P, 2, H), dtype=complex)
-    A_bar = onp.zeros_like(A); Phi = onp.zeros_like(A)
-    for p in range(P):
-        J, r, t = -a[p], rho[p], T[p]
-        A[p] = onp.array([[-J / r, -(1.0 - r) / r],
-                          [-J / (r * t), -1.0 / (r * t)]], dtype=complex)
-        B[p] = onp.stack([b[p] / r, b[p] / (r * t)], axis=0)
-        Ar = _to_real_pair(A[p])
-        A_bar[p] = _from_real_pair(sp_expm(Ar))
-        Phi[p] = _from_real_pair(
-            sum(w * sp_expm(Ar * u) for u, w in zip(ug, wg)))
-    return dict(A=A, B=B, A_bar=A_bar, Phi=Phi,
-                B_bar=onp.einsum("pij,pjh->pih", Phi, B))
-
-
-def _modes(rs, P, H):
-    a = onp.asarray(-onp.exp(rs.uniform(-3.0, -0.5, P))
-                    + 1j * rs.uniform(-2.5, 2.5, P))
-    b = onp.asarray(rs.randn(P, H) + 1j * rs.randn(P, H))
-    return a, b
+# The independent reference lives in `tests/response_reference.py`, which must
+# NOT be imported the other way round: that module never touches `jax.config`,
+# so the production-dtype probes can import it without x64 being switched back
+# on underneath them.
+from tests.response_reference import (block_conditioning,          # noqa: E402
+                                      frequency_with_exact_tail,
+                                      modes as _modes,
+                                      reference_block as _reference_block,
+                                      ssm_kwargs as _ssm_kwargs)
 
 
 @pytest.mark.parametrize("P,H", [(5, 3), (3, 7), (4, 4)])
@@ -430,14 +394,26 @@ def test_the_diagnostic_impulse_matches_an_actual_forward_call():
         conj_sym=m.conj_sym, P=m.P, H=m.H, C_tilde=m.C_tilde, D=m.D,
         coefficients=m.coefficients()))
     K = SD.impulse_matrices(core, n_lags)
+    # the measured impulse, from ACTUAL forward calls
+    K_meas = onp.zeros_like(K)
     for i in range(H):
         u = onp.zeros((n_lags, H)); u[0, i] = 1.0
         y = onp.asarray(ssm.apply({"params": params}, np.asarray(u)))
-        assert onp.max(onp.abs(y - K[:, :, i])) < 1e-6, i
+        K_meas[:, :, i] = y
+    assert onp.max(onp.abs(K_meas - K)) < 1e-6
+
+    # The frequency response is checked against the DFT of the MEASURED
+    # impulse PLUS the exact resolvent remainder. A bare window DFT is not
+    # the frequency response: `log_step` starts as low as 1e-3, so A_bar is
+    # close to the identity and the response has not decayed within any
+    # affordable window. Truncating it and calling the difference agreement
+    # would be the invalid-tail-bound error in another form.
     w, Hf = SD.frequency_response(core, 33)
-    for k, wk in enumerate(w):
-        dft = sum(K[l] * onp.exp(-1j * wk * l) for l in range(n_lags))
-        assert onp.max(onp.abs(dft - Hf[k])) < 1e-4, k
+    want = frequency_with_exact_tail(
+        K_meas, core["coefficients"]["A_bar"], core["C_tilde"], core["D"],
+        2.0, w, core["response"], core["coefficients"])
+    assert onp.max(onp.abs(want - Hf)) < FREQ64, float(
+        onp.max(onp.abs(want - Hf)))
 
 
 def test_state_counts_are_identical_for_the_two_generalized_arms():

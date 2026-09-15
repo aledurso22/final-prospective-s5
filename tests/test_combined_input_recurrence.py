@@ -11,6 +11,7 @@ PREDECLARED TOLERANCES, by dtype:
     ODE64    1e-8   float64 against an independently integrated trajectory
     LIMIT64  1e-10  the T_in = 0 and rho = 1 reductions, float64
     GRAD64   1e-9   gradient agreement in those limits, float64
+    FREQ64   1e-8   frequency response vs measured impulse + exact remainder
     F32      2e-4   production float32/complex64, in `combined_float32_probe.py`
 
 The float64 figures are reference-quality checks of the algebra; the float32
@@ -25,7 +26,6 @@ import sys
 import jax
 import numpy as onp
 import pytest
-from scipy.linalg import expm as sp_expm
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as np                                            # noqa: E402
@@ -43,60 +43,18 @@ from s5.response_projection import (project_response_leaves,        # noqa: E402
                                     projection_telemetry)
 
 EXACT64, ODE64, LIMIT64, GRAD64 = 1e-10, 1e-8, 1e-10, 1e-9
+#: frequency response vs the measured impulse plus its EXACT remainder
+FREQ64 = 1e-8
 T_IN = 5.0
 
 
-# ------------------------------------------------- independent reference ---
-def _to_real_pair(M):
-    """Complex (n,n) -> real (2n,2n) acting on [Re q; Im q]."""
-    X, Y = onp.real(M), onp.imag(M)
-    return onp.block([[X, -Y], [Y, X]])
-
-
-def _from_real_pair(R):
-    n = R.shape[0] // 2
-    return R[:n, :n] + 1j * R[n:, :n]
-
-
-def _reference_two_tap(a, b, T, rho, horizon_in, nodes=64):
-    """A, B, A_bar, Phi, B_plus, B_minus per mode, computed INDEPENDENTLY.
-
-    Independent of the production helper in both respects that matter:
-    `scipy.linalg.expm` is a different exponential implementation from JAX's,
-    and Phi is formed by Gauss-Legendre quadrature of exp(A u) rather than by
-    the augmented-matrix trick production uses. The complex 2x2 block is
-    exponentiated through its REAL-PAIR embedding, so the reference never
-    relies on a complex matrix exponential either.
-    """
-    a = onp.asarray(a); b = onp.asarray(b)
-    rho = onp.broadcast_to(onp.asarray(rho, dtype=float), a.shape)
-    T = onp.broadcast_to(onp.asarray(T, dtype=float), a.shape)
-    P, H = b.shape
-    xg, wg = onp.polynomial.legendre.leggauss(nodes)
-    ug, wg = 0.5 * (xg + 1.0), 0.5 * wg
-    A = onp.zeros((P, 2, 2), dtype=complex)
-    B = onp.zeros((P, 2, H), dtype=complex)
-    A_bar = onp.zeros_like(A); Phi = onp.zeros_like(A)
-    for p in range(P):
-        J, r, t = -a[p], rho[p], T[p]
-        A[p] = onp.array([[-J / r, -(1.0 - r) / r],
-                          [-J / (r * t), -1.0 / (r * t)]], dtype=complex)
-        B[p] = onp.stack([b[p] / r, b[p] / (r * t)], axis=0)
-        Ar = _to_real_pair(A[p])
-        A_bar[p] = _from_real_pair(sp_expm(Ar))
-        Phi[p] = _from_real_pair(
-            sum(w * sp_expm(Ar * u) for u, w in zip(ug, wg)))
-    B_bar = onp.einsum("pij,pjh->pih", Phi, B)
-    J_in = horizon_in * onp.einsum("pij,pjh->pih", A_bar, B)
-    return dict(A=A, B=B, A_bar=A_bar, Phi=Phi, B_bar=B_bar, J_in=J_in,
-                B_plus=B_bar + J_in, B_minus=-J_in)
-
-
-def _modes(rs, P, H):
-    a = onp.asarray(-onp.exp(rs.uniform(-3.0, -0.5, P))
-                    + 1j * rs.uniform(-2.5, 2.5, P))
-    b = onp.asarray(rs.randn(P, H) + 1j * rs.randn(P, H))
-    return a, b
+# The independent reference lives in `tests/response_reference.py`. It never
+# touches `jax.config`, so the production-dtype probe can import it without x64
+# being switched back on underneath it.
+from tests.response_reference import (frequency_with_exact_tail,    # noqa: E402
+                                      modes as _modes,
+                                      reference_two_tap as _reference_two_tap,
+                                      ssm_kwargs as _ssm_kwargs)
 
 
 @pytest.mark.parametrize("rho", [0.05, 0.25, 0.5, 0.75, 0.9999])
@@ -160,6 +118,7 @@ def test_the_jump_law_matches_an_independently_integrated_trajectory():
     an ODE solver and the result is compared with the closed-form law.
     """
     from scipy.integrate import solve_ivp
+    from tests.response_reference import to_real_pair
     rs = onp.random.RandomState(3)
     P, H, L = 3, 2, 6
     a, b = _modes(rs, P, H)
@@ -173,7 +132,7 @@ def test_the_jump_law_matches_an_independently_integrated_trajectory():
         q = q + T_IN * ref["B"] @ (x[k] - x_prev)          # the jump
         nxt = onp.zeros_like(q)
         for p in range(P):                                  # held-input leg
-            Ar = _to_real_pair(ref["A"][p])
+            Ar = to_real_pair(ref["A"][p])
             drive = onp.concatenate([onp.real(ref["B"][p] @ x[k]),
                                      onp.imag(ref["B"][p] @ x[k])])
             y0 = onp.concatenate([onp.real(q[p]), onp.imag(q[p])])
@@ -316,17 +275,6 @@ def test_streaming_in_chunks_equals_one_whole_call():
 
 
 # -------------------------------------------------- the executed module ----
-def _ssm_kwargs(P, H):
-    rs = onp.random.RandomState(29)
-    return dict(H=H, P=P,
-                Lambda_re_init=-onp.exp(rs.uniform(-3, -0.5, P)),
-                Lambda_im_init=rs.uniform(-2, 2, P),
-                V=onp.eye(2 * P, dtype=complex)[:, :P],
-                Vinv=onp.eye(2 * P, dtype=complex)[:P],
-                C_init="trunc_standard_normal", discretization="zoh",
-                dt_min=0.001, dt_max=0.1, conj_sym=True, bidirectional=False)
-
-
 def _bind(arm, P=4, H=6, L=12, seed=0):
     ssm = init_substrate_ssm(arm, **_ssm_kwargs(P, H))()
     x = np.asarray(onp.random.RandomState(seed).randn(L, H))
@@ -392,14 +340,22 @@ def test_diagnostics_agree_with_the_ACTUAL_executed_forward_response():
         coefficients=m.coefficients()))
     n_lags = 64
     K = SD.impulse_matrices(core, n_lags)
+    K_meas = onp.zeros_like(K)
     for i in range(H):
         u = onp.zeros((n_lags, H)); u[0, i] = 1.0
-        y = onp.asarray(ssm.apply({"params": params}, np.asarray(u)))
-        assert onp.max(onp.abs(y - K[:, :, i])) < 1e-5, i
+        K_meas[:, :, i] = onp.asarray(
+            ssm.apply({"params": params}, np.asarray(u)))
+    assert onp.max(onp.abs(K_meas - K)) < 1e-6
+
+    # DFT of the MEASURED impulse plus the exact resolvent remainder. A bare
+    # window DFT is not the frequency response: `log_step` starts as low as
+    # 1e-3, so the response has not decayed within any affordable window.
     w, Hf = SD.frequency_response(core, 33)
-    for k, wk in enumerate(w):
-        dft = sum(K[l] * onp.exp(-1j * wk * l) for l in range(n_lags))
-        assert onp.max(onp.abs(dft - Hf[k])) < 1e-4, k
+    want = frequency_with_exact_tail(
+        K_meas, core["coefficients"]["A_bar"], core["C_tilde"], core["D"],
+        2.0, w, core["response"], core["coefficients"])
+    assert onp.max(onp.abs(want - Hf)) < FREQ64, float(
+        onp.max(onp.abs(want - Hf)))
 
 
 # -------------------------------------- production optimizer + projection --
