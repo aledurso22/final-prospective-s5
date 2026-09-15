@@ -502,17 +502,24 @@ def test_forced_outward_crossing_is_projected_counted_and_then_reversible():
     lo, hi = onp.asarray(LOG_RHO_BOUNDS[0], dt), onp.asarray(
         LOG_RHO_BOUNDS[1], dt)
 
-    # (1) start OUTSIDE: the crossing is deterministic, not gradient-dependent
+    # (1) start EVERY rho leaf outside, so the projection count is exactly the
+    #     total number of response entries. Forcing only one leaf makes the
+    #     count depend on whether the OTHER leaf also happens to cross, which
+    #     it does - see the dedicated test below.
     overshoot = 0.5
-    start = unflatten_dict({**flat,
-                            key: np.full_like(flat[key], hi + overshoot)})
+    forced = {k: (np.full_like(v, hi + overshoot)
+                  if k[-1] == RHO_ONLY_PARAM_NAME else v)
+              for k, v in flat.items()}
+    start = unflatten_dict(forced)
+    n_rho = sum(int(v.size) for k, v in flat.items()
+                if k[-1] == RHO_ONLY_PARAM_NAME)
     tx = RS.make_tx()
     opt = tx.init(start)
     q, opt, loss, acc, gn, tel = RS.train_step(m, tx, start, opt, x, y)
     raw = flatten_dict(q)[key]
     assert raw.dtype == dt
     assert float(np.max(raw)) <= float(hi), "projection did not hold the bound"
-    assert int(tel["n_projected"]) == raw.size, int(tel["n_projected"])
+    assert int(tel["n_projected"]) == n_rho, (int(tel["n_projected"]), n_rho)
     assert float(tel["max_overshoot"]) > 0.4, float(tel["max_overshoot"])
     assert float(np.max(np.abs(raw - hi))) < 1e-6, "should sit ON the bound"
 
@@ -634,3 +641,40 @@ def test_gate_decision_requires_a_record_for_every_gated_arm():
 def test_gate_runs_for_every_seed():
     assert RS.GATE_EVERY_SEED is True
     assert RS.INIT_RESPONSE_ABS_TOL > 0.0
+
+
+
+def test_the_declared_initialization_crosses_the_bound_on_the_FIRST_update():
+    """The defect is reachable from the actual initialization, not only from a
+    contrived start.
+
+    rho_0 = 0.9998 sits 1.0e-4 below the upper bound in log space, while an
+    AdamW step is of order the learning rate, 1e-3 - ten times the headroom. So
+    entries whose gradient points outward cross on step one. Without the
+    post-update projection those entries would then have had zero task gradient
+    for the rest of training, with no way back.
+
+    This was observed incidentally: a forced-crossing test counted 21
+    projections where 16 were forced, the other 5 coming from an untouched leaf
+    still at its initialization.
+    """
+    from flax.traverse_util import flatten_dict
+    from s5.rawat_s5 import LOG_RHO_BOUNDS
+    rng = onp.random.RandomState(53)
+    x, y = T.generate_fixed_delay(rng, 32, delay=32)
+    x, y = np.asarray(x), np.asarray(y)
+    m, p = RS.init_params("gp_rho", 0)          # untouched: rho_0 = 0.9998
+    hi = onp.asarray(LOG_RHO_BOUNDS[1],
+                     [v for k, v in flatten_dict(p).items()
+                      if k[-1] == RHO_ONLY_PARAM_NAME][0].dtype)
+    tx = RS.make_tx()
+    opt = tx.init(p)
+    q, opt, loss, acc, gn, tel = RS.train_step(m, tx, p, opt, x, y)
+    assert int(tel["n_projected"]) > 0, (
+        "no entry crossed on the first update from the declared "
+        "initialization; the headroom argument needs re-deriving")
+    assert float(tel["max_overshoot"]) > 0.0
+    # and the projection keeps every entry admissible
+    for k, v in flatten_dict(q).items():
+        if k[-1] == RHO_ONLY_PARAM_NAME:
+            assert float(np.max(v)) <= float(hi), "/".join(k)

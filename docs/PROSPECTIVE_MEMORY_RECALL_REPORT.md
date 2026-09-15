@@ -43,6 +43,16 @@ The forward law stayed in bounds throughout, so they are valid measurements of
 *that* procedure — but the defect's causal effect on accuracy is **unknown**,
 and an earlier phrasing that they were "unaffected" claimed more than that.
 
+**The crossing happens immediately from this initialization.** Measured while
+repairing the regression: a single production update from the declared
+`rho_0 = 0.9998` already pushed **5 of 16** entries in an untouched layer across
+the upper bound. The headroom is `1.0e-4` in log space and an AdamW step is of
+order `1e-3` — ten times larger — so outward-pointing entries cross on step one.
+Under the defective procedure those entries would then have carried zero task
+gradient for the rest of training. This makes the lockout hypothesis for the
+completed run concrete rather than theoretical, and it is the main reason the
+`rho` distribution from that run cannot be interpreted.
+
 **What cannot be recovered.** The completed run saved only clipped summaries.
 No warm-up or final parameter trees, optimizer states or raw trajectories were
 written, so the raw overshoot of *this* run cannot be reconstructed after the

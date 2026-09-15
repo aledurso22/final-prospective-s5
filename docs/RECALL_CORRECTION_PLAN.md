@@ -43,6 +43,24 @@ the task generator and the data streams are **unchanged**.
 `evaluate_gate` is now a pure function, so the decision is exercised directly
 rather than inferred from the runner.
 
+### An incidental behavioural confirmation of R1
+
+While repairing the forced-crossing test, the cluster reported **21** projection
+events where only **16** were forced. The other **5 came from a leaf left at the
+declared initialization**, which crossed the upper bound on its **first** update.
+
+That is the analytic argument made concrete: `rho_0 = 0.9998` sits `1.0e-4`
+below the bound in log space, while an AdamW step is of order the learning rate,
+`1e-3` — **ten times the headroom**. Entries whose gradient points outward
+therefore cross immediately, and without post-update projection they would have
+had zero task gradient for the remainder of training with no way back.
+
+So the defect was not merely reachable in principle; it is reached on step one
+from the initialization this study actually used. That strengthens the case for
+the repair and, equally, for **not** interpreting the previous run's `rho`
+distribution. A dedicated regression now pins this
+(`test_the_declared_initialization_crosses_the_bound_on_the_FIRST_update`).
+
 ## Cluster verification plan, when a run is authorized
 
 Same launcher, same 1,200 s cap, same seeds, data streams, equation and
