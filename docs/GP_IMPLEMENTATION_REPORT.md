@@ -1770,3 +1770,20 @@ protocol reversed the mass direction (`mu = T rho`, so lowering `rho` lowers
 mass); the `+0.3` pp threshold was never declared for this study and is
 withdrawn; and the realized training-delay mix is 37.5/31.25/31.25 per cent
 rather than equal thirds.
+
+## 12.16 Learned response timescale — executed, report linked
+
+Seed 100, ten epochs, five arms, `d07380c`, `TIMESCALE_STATUS=PASS`, 657 s of
+1200. Endpoint validation accuracy: `alpha_p_s5` 95.00 %, `gain_clip_s5`
+94.60 %, `gp_rho_T_fixed` 94.29 %, `gp_rho_T` 94.26 %, `native_s5` 94.17 %. The
+three controls reproduce the earlier batch exactly.
+
+**Learning a per-mode response timescale changed the endpoint by -0.035 pp**,
+and the freedom was genuinely exercised rather than left idle: `T` rose from
+the declared 5.000 to layer medians of 4.95-5.57 with a per-mode spread up to
+2.65, never touching its `[0.05, 500]` guardrails, while the frozen arm held
+`T` at exactly 5.0000 with a zero update norm. Both generalized arms finished
+behind the matched ordinary substrate (-0.3 pp) and Rawat (-0.7 pp), carrying
+twice the state. One seed: a development screen, not a robust effect.
+
+See [`docs/LEARNED_RESPONSE_TIMESCALE_REPORT.md`](LEARNED_RESPONSE_TIMESCALE_REPORT.md).
