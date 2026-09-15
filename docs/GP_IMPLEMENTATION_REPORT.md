@@ -1709,3 +1709,31 @@ gradient with respect to `log_step` is ZERO, correcting an earlier claim.
 30 focused GPU checks passed. Two earlier check failures were resolved by
 measurement before training — a bound declared too wide, and a probe that ran
 at TF32 default instead of production precision — with no tolerance loosened.
+
+## 12.15 Memory-recall study — executed, report linked
+
+A controlled recall task (length 128, two marked cues among distractors, target
+is the latest cue, query token carries no symbol) with six arms on one causal
+stack, paired continuation from a shared warm-up, seeds 100/101/102. Executed
+at commit `b5d7211`; `RECALL_STATUS=PASS`, 18/18 rows, 739 s of a 1200 s cap.
+
+**Full findings: [`docs/PROSPECTIVE_MEMORY_RECALL_REPORT.md`](PROSPECTIVE_MEMORY_RECALL_REPORT.md).**
+
+**The predeclared screen FAILED.** `gp_rho` beat `ordinary` by **+0.098 pp**
+(about two examples of 2,048) and was inconsistent in sign against `rawat`,
+against a +0.3 pp target.
+
+**The dominant result is a control:** `ordinary_2x`, ordinary S5 with twice the
+stored modes, beat `gp_rho` by **2.9-5.0 pp in every seed at equal total
+recurrent carry** (128 real coordinates each), using 58 % more parameters.
+
+The memoryless professor control scored **0.1203 against a 0.125 chance level**,
+with exactly zero logit response to any input change. That confirms the task is
+a real recall probe, and it puts the earlier 84.85 % on mean-pooled speech in
+context: the same mechanism is at chance here.
+
+Learning `rho` helped against freezing it in all three seeds (+0.911 pp), but
+the median final `rho` is the declared **ceiling** — 27-28 of 32 modes moved
+*up* into the clip, toward the ordinary-SSM limit — so it does not support the
+generalized response being the active ingredient. A protocol statement of mine
+that `rho` could "effectively only fall" is corrected in the report.
