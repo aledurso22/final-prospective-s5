@@ -53,8 +53,9 @@ import jax
 import jax.numpy as np
 
 from .gp_coefficients import phi1
-from .gp_fixed import (fixed_m0_coefficients, mass_block_zoh, mass_scan,
-                       state_counts)
+from .gp_fixed import (PROSPECTIVE_INPUT_HORIZON, fixed_m0_coefficients,
+                       mass_block_two_tap, mass_block_zoh, mass_scan,
+                       mass_scan_two_tap, state_counts)
 from .gp_ssm import gp_readout, gp_scan_reset
 from .physical_coefficients import SYMMETRIC_REFERENCE, PhysicalResponse
 from .ssm import S5SSM
@@ -65,6 +66,9 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
              # current parameterization: gamma_n removed as redundant with the
              # learned clock, rho the only learned response quantity
              "gp_rho", "gp_rho_frozen",
+             # Rawat's prospective INPUT correction composed with the
+             # generalized prospective RECURRENCE (combined-model study)
+             "gp_rho_prospin",
              # superseded by the constrained-response brief of 2026-09-15;
              # RETAINED and still selectable, but not part of that batch.
              "gp_adaptive_mass", "gp_frozen_adaptive", "ordinary_adaptive")
@@ -83,6 +87,13 @@ RESPONSE_PARAM_NAMES = ("log_response_gamma", "log_response_rho")
 #: and the mass is derived, mu = T rho. One real leaf per stored complex mode,
 #: shared with its conjugate partner.
 RHO_ONLY_PARAM_NAME = "log_response_rho_only"
+#: every response that carries the single rho leaf. Adding a member here is the
+#: ONLY place a new rho-only arm has to be registered for parameter creation,
+#: coefficient dispatch and the trainers' projection whitelist.
+RHO_ONLY_RESPONSES = ("gp_rho", "gp_rho_frozen", "gp_rho_prospin")
+#: responses whose carry is the (s, v) block and therefore accept a z0 carry
+_BLOCK_CARRY_RESPONSES = ("gp_fixed_mass", "gp_learned_response", "gp_rho",
+                          "gp_rho_frozen", "gp_rho_prospin")
 #: declared initialization for the recall study; a declared choice, not a
 #: physiological measurement
 RHO_INIT_RECALL = 0.9998
@@ -205,7 +216,7 @@ class SubstrateSSM(S5SSM):
         if self.response.startswith(("gp_adaptive", "gp_frozen")):
             from .adaptive_circuit import validate_reference
             validate_reference()
-        if self.response in ("gp_rho", "gp_rho_frozen"):
+        if self.response in RHO_ONLY_RESPONSES:
             # Declared LAST, after super().setup(), so the common parameter
             # draw is bit-identical to the ordinary arm under the same key.
             self.physical.validate()
@@ -282,11 +293,18 @@ class SubstrateSSM(S5SSM):
         if self.response == "gp_fixed_mass":
             return mass_block_zoh(a, b, self.physical.T, self.physical.gamma,
                                   self.physical.rho)
-        if self.response in ("gp_rho", "gp_rho_frozen"):
+        if self.response in RHO_ONLY_RESPONSES:
             rho = self.rho_only()
             if self.response == "gp_rho_frozen":
                 rho = jax.lax.stop_gradient(rho)
             # gamma_n = 1: the clock coordinate already carries hat_Delta
+            if self.response == "gp_rho_prospin":
+                # the SAME recurrence, driven by x + T_in x_dot. The extra
+                # input correction COMPOSES with the recurrence's own
+                # prospective residual; it does not replace it.
+                return mass_block_two_tap(a, b, self.physical.T,
+                                          np.ones_like(rho), rho,
+                                          self.prospective_horizon)
             return mass_block_zoh(a, b, self.physical.T,
                                   np.ones_like(rho), rho)
         if self.response == "gp_learned_response":
@@ -317,13 +335,16 @@ class SubstrateSSM(S5SSM):
         """Executed carry sizes in REAL coordinates, derived from the law."""
         two_state = self.response in ("gp_fixed_mass", "gp_learned_response",
                                       "gp_rho", "gp_rho_frozen",
+                                      "gp_rho_prospin",
                                       "gp_adaptive_mass", "gp_frozen_adaptive")
         c = state_counts(self.P, self.conj_sym,
                          "gp_fixed_mass" if two_state else "other")
         if self.response == "prospective_recurrence":
             c = dict(c, physical_real=0, total_real=0,
                      note="memoryless by construction: s_k = J^-1 b x_k")
-        if self.response == "alpha_p_two_tap":
+        if self.response in ("alpha_p_two_tap", "gp_rho_prospin"):
+            # the second tap carries the PREVIOUS token, which is real carried
+            # state even though it costs no parameters
             c = dict(c, previous_input_buffer=self.H,
                      total_real=c["total_real"] + self.H)
         return c
@@ -335,7 +356,21 @@ class SubstrateSSM(S5SSM):
             ys = jax.vmap(lambda si: (self.C_tilde @ si).real)(s)
         return ys + Du
 
-    def __call__(self, input_sequence, reset_mask=None):
+    def __call__(self, input_sequence, reset_mask=None, z0=None, prev_x=None):
+        """`z0` / `prev_x` are the STREAMING carries, used by chunked calls.
+
+        Both default to zero prehistory, the declared convention. Only the
+        two-tap block response consumes `prev_x`; passing it to a response with
+        no second tap is an error rather than a silent no-op.
+        """
+        if prev_x is not None and self.response != "gp_rho_prospin":
+            raise ValueError(
+                f"response {self.response!r} has no delayed-input tap, so a "
+                f"prev_x carry would be silently discarded")
+        if z0 is not None and self.response not in _BLOCK_CARRY_RESPONSES:
+            raise ValueError(
+                f"response {self.response!r} does not accept a block carry z0; "
+                f"refusing to discard it silently")
         c = self.coefficients()
         Du = jax.vmap(lambda u: self.D * u)(input_sequence)
 
@@ -375,9 +410,18 @@ class SubstrateSSM(S5SSM):
                                reset_mask=reset_mask)
             return self._readout(zs[..., 0], Du)
 
+        if self.response == "gp_rho_prospin":
+            # Exact two-tap interval law. `prev_x` and the block carry are BOTH
+            # reset together: clearing only the block state would leak the
+            # previous sequence's last token through the second tap.
+            zs = mass_scan_two_tap(c["A_bar"], c["B_plus"], c["B_minus"],
+                                   input_sequence, z0=z0, prev_x=prev_x,
+                                   reset_mask=reset_mask)
+            return self._readout(zs[..., 0], Du)
+
         if self.response in ("gp_fixed_mass", "gp_learned_response",
                              "gp_rho", "gp_rho_frozen"):
-            zs = mass_scan(c["A_bar"], c["B_bar"], input_sequence,
+            zs = mass_scan(c["A_bar"], c["B_bar"], input_sequence, z0=z0,
                            reset_mask=reset_mask)
             s = zs[..., 0]
             if self.conj_sym:
@@ -444,6 +488,10 @@ ARMS = {
     "gp_rho": dict(input_gain="alpha", clip_eigs=True, response="gp_rho"),
     "gp_rho_frozen": dict(input_gain="alpha", clip_eigs=True,
                           response="gp_rho_frozen"),
+    # --- combined model: Rawat's prospective INPUT + the generalized
+    #     prospective RECURRENCE, on the same gain-scaled clipped substrate
+    "gp_rho_prospin": dict(input_gain="alpha", clip_eigs=True,
+                           response="gp_rho_prospin"),
     # --- RETAINED but superseded: within-sequence adaptation arms. Kept
     #     selectable and tested; NOT part of the constrained-response batch.
     "gp_adaptive_mass": dict(input_gain="alpha", clip_eigs=True,

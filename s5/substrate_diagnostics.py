@@ -23,6 +23,17 @@ lag 0 means the output after consuming the CURRENT held token.
     gp_fixed_m0      K_0 = R(b_bar + d_x) + diag(D)
                      K_l = R(a_bar^l b_bar)                        l >= 1
     gp_fixed_mass    K_l = R( [A_block^l B_block]_s ), native D at l = 0 only
+    gp_rho_prospin   K_0 = R( [B_plus]_s ) + diag(D)
+                     K_l = R( [A_bar^(l-1)(A_bar B_plus + B_minus)]_s ) l >= 1
+
+The last one is the reason this module does not simply add the combined
+response to the mass-like set: it is a TWO-tap block law, and extracting it
+with the one-tap block formula would silently return a different response that
+still looks plausible. Its frequency response is
+
+    H(w) = C_block (I - A_bar u)^-1 (B_plus + B_minus u) + D,   u = e^{-i w}
+
+assembled from conjugate partners exactly as the other arms are.
 
 "Current tap" here includes the within-interval dynamic update. It is NOT a
 synonym for continuous-time algebraic feedthrough.
@@ -45,11 +56,15 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
              # same (s, v) block realization as gp_fixed_mass, with gamma_n = 1
              # and a per-mode learned rho
              "gp_rho", "gp_rho_frozen",
+             # the (s, v) block driven by x + T_in x_dot: a TWO-tap block law
+             "gp_rho_prospin",
              # memoryless by construction: K_0 only
              "prospective_recurrence")
 
-#: the responses whose block realization is the (s, v) mass block
+#: the responses whose block realization is the ONE-tap (s, v) mass block
 _MASS_LIKE = ("gp_fixed_mass", "gp_rho", "gp_rho_frozen")
+#: the TWO-tap block law; extracted separately, never through _MASS_LIKE
+_MASS_TWO_TAP = ("gp_rho_prospin",)
 
 
 def _np(x):
@@ -133,6 +148,17 @@ def impulse_matrices(core, n_lags):
         for l in range(1, n_lags):
             state = a_bar[:, None] * state
             K[l] = R(state)
+    elif resp in _MASS_TWO_TAP:
+        A = _np(c["A_bar"]).astype(onp.complex128)      # (P,2,2)
+        Bp = _np(c["B_plus"]).astype(onp.complex128)    # (P,2,H)
+        Bm = _np(c["B_minus"]).astype(onp.complex128)
+        state = Bp.copy()
+        K[0] = R(state[:, 0, :]) + onp.diag(D)
+        for l in range(1, n_lags):
+            state = onp.einsum("pij,pjh->pih", A, state)
+            if l == 1:
+                state = state + Bm          # the delayed tap enters ONCE
+            K[l] = R(state[:, 0, :])
     else:                                              # gp_fixed_mass
         A = _np(c["A_bar"]).astype(onp.complex128)     # (P,2,2)
         Bb = _np(c["B_bar"]).astype(onp.complex128)    # (P,2,H)
@@ -176,8 +202,11 @@ def frequency_response(core, n_freq=129):
             # s = h + d_x x, and h has transfer b/(1 - a u); d_x is lag 0
             return C @ (b / (1.0 - a * u)[:, None] + dx)
         A = _np(c["A_bar"]).astype(onp.complex128)      # (P,2,2)
-        Bb = _np(c["B_bar"]).astype(onp.complex128)     # (P,2,H)
-        P = A.shape[0]
+        if resp in _MASS_TWO_TAP:
+            Bb = (_np(c["B_plus"]).astype(onp.complex128)
+                  + _np(c["B_minus"]).astype(onp.complex128) * u)
+        else:
+            Bb = _np(c["B_bar"]).astype(onp.complex128)  # (P,2,H)
         I2 = onp.eye(2, dtype=onp.complex128)
         M = I2[None] - A * u
         X = onp.linalg.solve(M, Bb)                     # (P,2,H)

@@ -208,3 +208,118 @@ def fixed_coefficients(mechanism, a, b, response: PhysicalResponse):
         return mass_block_zoh(a, b, response.T, response.gamma, response.rho)
     raise ValueError(f"unknown fixed mechanism {mechanism!r}; expected one of "
                      f"{FIXED_MECHANISMS}")
+
+
+# ------------------------------------------- prospective INPUT correction ---
+#: Rawat's input horizon, in native-clock intervals. FIXED, never learned.
+PROSPECTIVE_INPUT_HORIZON = 5.0
+
+
+def mass_block_two_tap(a, b, T, gamma, rho, horizon_in=PROSPECTIVE_INPUT_HORIZON):
+    """Exact interval law for q' = A q + B (x + T_in x'), held tokens + jumps.
+
+    The input correction is a DISTRIBUTIONAL jump, not a sampled derivative.
+    With the token held on [k, k+1) and jumping from x_{k-1} to x_k at the
+    start of interval k,
+
+        q(0+) - q(0-) = T_in B (x_k - x_{k-1}),
+
+    followed by ordinary held-input evolution over one unit interval. Hence
+
+        q_k = A_bar q_{k-1} + B_plus x_k + B_minus x_{k-1},
+        J_in    = T_in * A_bar @ B          (CONTINUOUS B, not B_bar),
+        B_plus  = B_bar + J_in,
+        B_minus = -J_in.
+
+    Three ways to get this wrong, all excluded here:
+
+    * `T_in * B_bar` - that integrates the jump as if it were a held input;
+    * `T_in * A_bar @ B_bar` - that advances the jump twice;
+    * an extra `Delta` factor - the clock is absorbed exactly once, upstream,
+      when `a` and `b` are formed. There is no second absorption here.
+
+    The autonomous poles are untouched: only the input coupling and the output
+    residues change. `B_plus + B_minus = B_bar`, so the DC response is
+    unchanged. At `horizon_in = 0` this returns the plain generalized
+    recurrence, and at `rho = 1` the s component reduces to Rawat's two-tap
+    alpha-P-S5 for the same common parameters and zero prehistory; both are
+    tested rather than asserted.
+    """
+    d = mass_block_zoh(a, b, T, gamma, rho)
+    T_in = np.asarray(horizon_in, dtype=d["A_bar"].dtype)
+    J_in = T_in * np.einsum("pij,pjh->pih", d["A_bar"], d["B"])
+    return dict(d, J_in=J_in, B_plus=d["B_bar"] + J_in, B_minus=-J_in,
+                horizon_in=horizon_in)
+
+
+def _delayed_inputs(input_sequence, prev_x=None, reset_mask=None):
+    """x_{k-1} with the carried previous token and per-token resets.
+
+    Clearing only the block state `q` at a sequence boundary is NOT a reset:
+    the second tap would still read the last token of the PREVIOUS sequence.
+    Both carries are cleared here.
+    """
+    if prev_x is None:
+        head = np.zeros_like(input_sequence[:1])
+    else:
+        head = np.asarray(prev_x, dtype=input_sequence.dtype)[None]
+    x_prev = np.concatenate([head, input_sequence[:-1]], axis=0)
+    if reset_mask is not None:
+        keep = (~np.asarray(reset_mask, dtype=bool))[:, None]
+        x_prev = x_prev * keep.astype(x_prev.dtype)
+    return x_prev
+
+
+def mass_two_tap_drive(B_plus, B_minus, input_sequence, prev_x=None,
+                       reset_mask=None):
+    """B_plus x_k + B_minus x_{k-1} over 2x2 blocks; shape (L, P, 2)."""
+    x_prev = _delayed_inputs(input_sequence, prev_x, reset_mask)
+    cur = jax.vmap(lambda u: B_plus @ u)(input_sequence)
+    prev = jax.vmap(lambda u: B_minus @ u)(x_prev)
+    return cur + prev
+
+
+def mass_scan_two_tap(A_bar, B_plus, B_minus, input_sequence, z0=None,
+                      prev_x=None, reset_mask=None):
+    """q_k = A_bar q_{k-1} + B_plus x_k + B_minus x_{k-1}, parallel scan."""
+    L = input_sequence.shape[0]
+    P = A_bar.shape[0]
+    A_elems = np.broadcast_to(A_bar, (L, P, 2, 2))
+    if reset_mask is not None:
+        keep = (~np.asarray(reset_mask, dtype=bool))[:, None, None, None]
+        A_elems = A_elems * keep.astype(A_bar.dtype)
+    B_elems = mass_two_tap_drive(B_plus, B_minus, input_sequence, prev_x,
+                                 reset_mask)
+    if z0 is not None:
+        B_elems = B_elems.at[0].add((A_elems[0] @ z0[..., None])[..., 0])
+    _, zs = jax.lax.associative_scan(block_binary_operator, (A_elems, B_elems))
+    return zs
+
+
+def mass_scan_two_tap_sequential(A_bar, B_plus, B_minus, input_sequence,
+                                 z0=None, prev_x=None, reset_mask=None):
+    """The same recurrence by `lax.scan`. Differentiable; for scan-order checks.
+
+    Written independently of the parallel path - it carries the previous token
+    in the scan state rather than building a shifted array - so agreement
+    between the two is evidence, not a restatement.
+    """
+    P = A_bar.shape[0]
+    H = input_sequence.shape[-1]
+    z_init = np.zeros((P, 2), dtype=A_bar.dtype) if z0 is None else z0
+    x_init = (np.zeros((H,), dtype=input_sequence.dtype) if prev_x is None
+              else np.asarray(prev_x, dtype=input_sequence.dtype))
+    mask = (np.zeros(input_sequence.shape[0], dtype=bool)
+            if reset_mask is None else np.asarray(reset_mask, dtype=bool))
+
+    def step(carry, xm):
+        z, x_prev = carry
+        u, drop = xm
+        z_prev = np.where(drop, np.zeros_like(z), z)
+        x_del = np.where(drop, np.zeros_like(x_prev), x_prev)
+        z_next = ((A_bar @ z_prev[..., None])[..., 0]
+                  + B_plus @ u + B_minus @ x_del)
+        return (z_next, u), z_next
+
+    _, zs = jax.lax.scan(step, (z_init, x_init), (input_sequence, mask))
+    return zs

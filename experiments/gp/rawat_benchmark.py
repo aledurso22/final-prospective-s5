@@ -50,7 +50,11 @@ from s5.checkpointing import (append_metrics, checkpoint_exists, make_run_dir,
                               write_config)
 from s5.physical_coefficients import SYMMETRIC_REFERENCE, coefficient_table
 from s5.rawat_model import BatchRawatClassifier, parameter_report
-from s5.rawat_s5 import ARMS, init_substrate_ssm
+from s5.rawat_s5 import (ARMS, RESPONSE_PARAM_NAMES, RHO_ONLY_PARAM_NAME,
+                         init_substrate_ssm)
+from s5.response_projection import ALL_RESPONSE_LEAF_NAMES
+from s5.response_projection import \
+    project_response_leaves as shared_project_response_leaves
 from s5.ssm_init import make_DPLR_HiPPO
 
 #: Appendix E.3 defaults for the depth-4 width-32 MFCC row of Table 6
@@ -124,34 +128,52 @@ def make_optimizer(args, steps_per_epoch):
     return tx, sched, groups
 
 
+#: which response leaves each arm is allowed to carry, per layer. Every arm
+#: absent from this table keeps the blanket prohibition: the historical
+#: fixed-coefficient arms must stay fixed, and the prohibition is NOT relaxed
+#: globally just because a newer arm learns a response.
+ARM_RESPONSE_LEAVES = {
+    "gp_learned_response": RESPONSE_PARAM_NAMES,
+    "gp_rho": (RHO_ONLY_PARAM_NAME,),
+    "gp_rho_frozen": (RHO_ONLY_PARAM_NAME,),
+    "gp_rho_prospin": (RHO_ONLY_PARAM_NAME,),
+}
+
+
 def assert_response_policy(params, arm, n_layers, P):
     """Enforce the coefficient policy EXACTLY, per arm.
 
-    `gp_learned_response` is the one arm allowed to carry response leaves, and
-    only the two declared ones, at the declared shape and count. Every other
-    arm keeps the blanket prohibition: the earlier fixed-coefficient arms must
-    remain fixed, and the prohibition is NOT relaxed globally just because one
-    new arm learns.
+    The allowed leaves come from `ARM_RESPONSE_LEAVES`, which is keyed by arm.
+    The earlier version hard-coded the two superseded leaf names, so the
+    rho-only arms would have tripped the blanket prohibition while a stray
+    `log_response_rho_only` on a FIXED arm would have gone unnoticed - it was
+    not in the set being searched for. Both directions are now covered.
     """
     from flax.traverse_util import flatten_dict
-    from s5.rawat_s5 import RESPONSE_PARAM_NAMES
     flat = {"/".join(k): v for k, v in flatten_dict(params).items()}
     banned = ("gp_response", "response_raw", "mu_ratio", "rho_raw", "horizon",
               "so_")
+    allowed = ARM_RESPONSE_LEAVES.get(arm, ())
     found = {n: v for n, v in flat.items()
-             if n.rsplit("/", 1)[-1] in RESPONSE_PARAM_NAMES}
+             if n.rsplit("/", 1)[-1] in ALL_RESPONSE_LEAF_NAMES}
     other = [n for n in flat if any(tok in n.lower() for tok in banned)]
     if other:
         raise SystemExit(
             f"REFUSING TO RUN arm {arm!r}: unexpected response-like "
             f"parameters {other}.")
-    if arm == "gp_learned_response":
-        want = n_layers * len(RESPONSE_PARAM_NAMES)
+    stray = sorted(n for n in found if n.rsplit("/", 1)[-1] not in allowed)
+    if stray:
+        raise SystemExit(
+            f"REFUSING TO RUN arm {arm!r}: response leaves {stray} are not "
+            f"declared for this arm (allowed: {list(allowed)}). The added "
+            f"physical response must stay frozen configuration wherever it is "
+            f"not explicitly declared learnable.")
+    if allowed:
+        want = n_layers * len(allowed)
         if len(found) != want:
             raise SystemExit(
                 f"REFUSING: arm {arm!r} must carry exactly {want} response "
-                f"leaves ({RESPONSE_PARAM_NAMES} per layer), found "
-                f"{sorted(found)}.")
+                f"leaves ({list(allowed)} per layer), found {sorted(found)}.")
         for n, v in found.items():
             if v.shape != (P,):
                 raise SystemExit(
@@ -159,34 +181,16 @@ def assert_response_policy(params, arm, n_layers, P):
                     f"expected {(P,)} (one scalar per STORED complex mode, "
                     f"shared with its conjugate partner).")
         added = sum(int(v.size) for v in found.values())
-        print(f"[*] response policy: learned, {len(found)} leaves, "
-              f"{added} added real parameters")
-    elif found:
-        raise SystemExit(
-            f"REFUSING TO RUN arm {arm!r}: the added physical response must be "
-            f"frozen configuration for this arm, but found trainable response "
-            f"leaves {sorted(found)}. The prohibition is not relaxed globally.")
+        print(f"[*] response policy: learned {list(allowed)}, {len(found)} "
+              f"leaves, {added} added real parameters")
     return len(flat)
 
 
-def project_response_leaves(params):
-    """Project raw log leaves back into the declared admissible interval.
-
-    Applied AFTER the optimizer update, so a step cannot leave the raw leaves
-    outside the bounds. Optimizer state is untouched: only the parameters are
-    projected. This is a declared numerical policy, not a plasticity rule.
-    """
-    from s5.rawat_s5 import LOG_GAMMA_BOUNDS, LOG_RHO_BOUNDS
-
-    def fix(path, v):
-        name = path[-1].key if hasattr(path[-1], "key") else str(path[-1])
-        if name == "log_response_gamma":
-            return jnp.clip(v, *LOG_GAMMA_BOUNDS)
-        if name == "log_response_rho":
-            return jnp.clip(v, *LOG_RHO_BOUNDS)
-        return v
-
-    return jax.tree_util.tree_map_with_path(fix, params)
+#: Imported, NOT redefined. The local copy here recognized only the two
+#: superseded leaf names and would have left `log_response_rho_only` stranded
+#: outside its interval with zero task gradient - the exact lockout that
+#: reversed the recall study's one positive finding. One whitelist, one module.
+project_response_leaves = shared_project_response_leaves
 
 
 def loss_and_logits(params, batch_stats, model, x, y, rng, training,
