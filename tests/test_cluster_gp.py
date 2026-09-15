@@ -459,3 +459,89 @@ def test_float32_production_dtype_probe_runs_and_passes():
     r = subprocess.run([sys.executable, probe], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "CLUSTER_FLOAT32_OK" in r.stdout
+
+
+# --------------------------------------------------------- dataset front end
+def _write_wav(path, samples_int16, sr=16000):
+    import wave
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes(samples_int16.tobytes())
+
+
+def test_wav_decoding_matches_scipy_bit_for_bit(tmp_path):
+    """torchaudio 2.11 routes `load` through TorchCodec, absent on the shared
+    cluster env. We decode with the standard library instead; this pins the
+    convention (int16/32768) against an independent reader."""
+    import scipy.io.wavfile as wf
+    from dataloaders.speech_commands10 import _decode_wav
+    x = (onp.random.RandomState(0).randn(16000) * 8000).astype(onp.int16)
+    p = str(tmp_path / "a.wav")
+    _write_wav(p, x)
+    _, raw = wf.read(p)
+    assert float(onp.abs(_decode_wav(p) - raw.astype(onp.float32) / 32768.0
+                         ).max()) == 0.0
+
+
+def test_wav_decoder_refuses_unexpected_formats(tmp_path):
+    import wave
+    from dataloaders.speech_commands10 import _decode_wav
+    p = str(tmp_path / "stereo.wav")
+    with wave.open(p, "wb") as w:
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(onp.zeros(32000, dtype=onp.int16).tobytes())
+    with pytest.raises(ValueError):
+        _decode_wav(p)
+    q = str(tmp_path / "wrongrate.wav")
+    _write_wav(q, onp.zeros(8000, dtype=onp.int16), sr=8000)
+    with pytest.raises(ValueError):
+        _decode_wav(q)
+
+
+def test_prepare_and_load_round_trip_with_digest_verification(tmp_path):
+    """Runs the ACTUAL prepare() entry point on a small synthetic word tree."""
+    from dataloaders import speech_commands10 as SC
+    root = tmp_path / "sc"
+    for i, word in enumerate(SC.WORDS):
+        d = root / word
+        d.mkdir(parents=True)
+        for j in range(4):
+            n = 16000 if j % 2 else 11000            # include short clips
+            x = (onp.random.RandomState(i * 50 + j).randn(n) * 5000).astype(
+                onp.int16)
+            _write_wav(str(d / f"s{j}_nohash_0.wav"), x)
+    cache = tmp_path / "cache"
+    m = SC.prepare(str(root), str(cache))
+    assert sum(m["counts"].values()) == 40
+    assert m["mfcc"]["n_mfcc"] == 20 and m["mfcc"]["n_fft"] == 200
+    data, _ = SC.load(str(cache))
+    for split, (x, y) in data.items():
+        assert x.shape[1:] == (SC.N_FRAMES, SC.N_MFCC), (split, x.shape)
+        assert x.shape[0] == y.shape[0]
+    # standardization is fitted on TRAIN only
+    xt = onp.asarray(data["train"][0])
+    assert abs(float(xt.mean())) < 1e-4 and abs(float(xt.std()) - 1.0) < 1e-3
+    # corrupting a cached file must be refused, not silently trained on
+    with open(cache / "train_x.npy", "r+b") as fh:
+        fh.write(b"\x00")
+    with pytest.raises(RuntimeError):
+        SC.load(str(cache))
+
+
+def test_splits_are_deterministic_disjoint_and_cover_every_file(tmp_path):
+    from dataloaders import speech_commands10 as SC
+    root = tmp_path / "sc"
+    for i, word in enumerate(SC.WORDS):
+        d = root / word
+        d.mkdir(parents=True)
+        for j in range(10):
+            _write_wav(str(d / f"s{j}.wav"),
+                       onp.zeros(16000, dtype=onp.int16))
+    a = SC.build_splits(str(root))
+    b = SC.build_splits(str(root))
+    assert a == b                                        # seed 0 alone decides
+    files = {k: {p for p, _ in v} for k, v in a.items()}
+    assert not (files["train"] & files["val"])
+    assert not (files["train"] & files["test"])
+    assert not (files["val"] & files["test"])
+    assert sum(len(v) for v in files.values()) == 100

@@ -16,6 +16,9 @@ Resolved details and declared differences (also in docs/RAWAT_BASELINE_MAP.md):
   with `n_fft=200, hop_length=100, n_mels=64, n_mfcc=20` because the stated
   parameters are torchaudio's argument names. If torchaudio is absent we RAISE;
   substituting a different MFCC silently would be an undeclared difference.
+* WAV DECODING uses the standard library, not `torchaudio.load`, which from
+  torchaudio 2.11 requires TorchCodec. Same convention (int16/32768), and the
+  MFCC transform itself is unchanged. See `_decode_wav`.
 * The paper does not give the stratification algorithm. We shuffle each class's
   file list with `numpy.random.RandomState(0)` and cut 70/15/15. DECLARED.
 * CAVEAT, recorded because it affects the absolute numbers: a stratified random
@@ -99,14 +102,42 @@ def _mfcc_transform():
     return torch, torchaudio, tf
 
 
-def _load_wav(torch, torchaudio, path):
-    wav, sr = torchaudio.load(path)
+def _decode_wav(path):
+    """Decode a 16-bit PCM mono WAV with the STANDARD LIBRARY.
+
+    Why not `torchaudio.load`: from torchaudio 2.11 that function delegates
+    decoding to TorchCodec, which is not installed in the shared cluster
+    environment and pulls in FFmpeg. Installing it would mean modifying a
+    shared environment for a decode step, so the decode is done here instead.
+
+    This changes NOTHING about the published front end: the MFCC transform is
+    still `torchaudio.transforms.MFCC` with the paper's parameters, which is
+    pure tensor arithmetic and needs no codec. Only the bytes-to-samples step
+    differs, and it uses the same convention `torchaudio.load` documents for
+    16-bit PCM with `normalize=True`: float32 samples equal to int16/32768.
+
+    Speech Commands v0.02 is uniformly 16 kHz, mono, 16-bit PCM. Anything else
+    raises rather than being silently resampled or downmixed.
+    """
+    import wave
+    with wave.open(path, "rb") as w:
+        ch, width, sr, nframes = (w.getnchannels(), w.getsampwidth(),
+                                  w.getframerate(), w.getnframes())
+        raw = w.readframes(nframes)
     if sr != SAMPLE_RATE:
         raise ValueError(f"{path}: expected {SAMPLE_RATE} Hz, got {sr}")
-    wav = wav.mean(0)                                     # mono
-    if wav.shape[0] < SAMPLE_RATE:                        # pad short clips
-        wav = torch.nn.functional.pad(wav, (0, SAMPLE_RATE - wav.shape[0]))
-    return wav[:SAMPLE_RATE]
+    if ch != 1:
+        raise ValueError(f"{path}: expected mono, got {ch} channels")
+    if width != 2:
+        raise ValueError(f"{path}: expected 16-bit PCM, got {8 * width}-bit")
+    return onp.frombuffer(raw, dtype="<i2").astype(onp.float32) / 32768.0
+
+
+def _load_wav(torch, torchaudio, path):
+    y = _decode_wav(path)
+    if y.shape[0] < SAMPLE_RATE:                          # pad short clips
+        y = onp.pad(y, (0, SAMPLE_RATE - y.shape[0]))
+    return torch.from_numpy(onp.ascontiguousarray(y[:SAMPLE_RATE]))
 
 
 def prepare(root, cache_dir, seed=SPLIT_SEED, limit=None):

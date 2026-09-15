@@ -50,6 +50,13 @@ for w in $WORDS; do
 done
 echo "  total  $total wav across 10 words"
 df -h "$DEST" | tail -1 | sed 's/^/  disk: /'
+# The archive is no longer needed once extracted. /Local is shared and was
+# observed at 100% use, so reclaim the 2.3 GB rather than leave it lying about.
+if [ "$rc" -eq 0 ] && [ -s "$DEST/speech_commands_v0.02.tar.gz" ]; then
+  echo "  removing archive to reclaim space: $DEST/speech_commands_v0.02.tar.gz"
+  rm -f "$DEST/speech_commands_v0.02.tar.gz"
+  df -h "$DEST" | tail -1 | sed 's/^/  disk after: /'
+fi
 echo "DATA_ROOT=$DEST"
 [ "$rc" -eq 0 ] && echo "FETCH_OK" || echo "FETCH_INCOMPLETE"
 exit $rc
