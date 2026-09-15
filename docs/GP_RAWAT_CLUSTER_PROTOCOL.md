@@ -287,3 +287,23 @@ Paths default to the handoff's values and are **verified, not assumed** —
 is missing. Override with `PROSPECTIVE_VENV`, `PROSPECTIVE_REPO`,
 `PROSPECTIVE_RUNS`, `PROSPECTIVE_DATA`. The scripts never install, upgrade or
 replace anything in the shared environment.
+
+
+---
+
+## 11. OUTCOME (appended after execution, 15 September 2026)
+
+Stages 1 and 2 executed on `pgi15-gpu3`, SLURM 65870. Stage 2 finished in 716 s
+against a 7200 s cap, all nine runs exit 0.
+
+**The predeclared criterion in s6 FAILED.** `gp_fixed_mass` reached 94.26 %
+validation accuracy against 94.60 % for its matched `gain_clip_s5` control
+(-0.35 pp) and 95.00 % for the reproduced `alpha_p_s5` (-0.74 pp); the target
+was at least +0.3 pp above both. `gp_fixed_m0` was the worst arm at 93.60 %.
+
+Per s4 and s5 of this protocol, **stage 3 is not triggered and no rescue sweep
+was started**. Full detail, including what the result does and does not
+establish, is in `docs/GP_IMPLEMENTATION_REPORT.md` s12.12.
+
+Budget was not the limiting factor: at the measured epoch times a full stage 3
+would have cost 3.77 GPU-h of the 8 GPU-hour cap.

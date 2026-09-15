@@ -1513,3 +1513,127 @@ recorded before stage 3 starts.
 
 Still true at this point: **no accuracy result exists, and stage 2 has not
 run.**
+
+## 12.12 Stage 2 — validation screening: the predeclared criterion FAILED
+
+Executed by the user on `pgi15-gpu3`, SLURM 65870, 15 September 2026.
+`STAGE2 done. elapsed 716s`, all nine runs `exit: 0`.
+Artifacts `/Users/durso/s5-runs/stage2/`, manifest `manifest.jsonl`.
+Development seed 100, 10 epochs, validation only. The test split was never
+touched.
+
+Selected configuration per arm by the predeclared rule (validation accuracy,
+then validation cross entropy, then declared candidate order). Every family's
+better learning rate was 1e-3; 3e-4 was worse for all four, by 4.7 to 6.8
+points.
+
+| arm | lr | val accuracy | val cross entropy |
+|---|---|---|---|
+| `alpha_p_s5` | 1e-3 | **95.00 %** | 0.28953 |
+| `gain_clip_s5` | 1e-3 | 94.60 % | 0.29908 |
+| `gp_fixed_mass` | 1e-3 | 94.26 % | 0.30020 |
+| `native_s5` | 1e-3 | 94.17 % | 0.30953 |
+| `gp_fixed_m0` | 1e-3 | 93.60 % | 0.32600 |
+
+Cross entropy orders the arms identically to accuracy, so the tie-break never
+had to be used.
+
+### The criterion, and the outcome
+
+Predeclared (s6 of the protocol): mean accuracy improvement over **both** the
+reproduced `alpha_p_s5` **and** the matched `gain_clip_s5` control, screening
+target at least 0.3 percentage points.
+
+| comparison | delta | verdict |
+|---|---|---|
+| `gp_fixed_mass` vs `gain_clip_s5` (its MATCHED substrate control) | **-0.35 pp** | fails |
+| `gp_fixed_mass` vs `alpha_p_s5` (reproduced baseline) | **-0.74 pp** | fails |
+| `gp_fixed_m0` vs `gain_clip_s5` | **-1.00 pp** | fails, worst arm overall |
+
+**The criterion FAILED. It is reported, not loosened.**
+
+`gp_fixed_mass` is +0.09 pp above `native_s5`, and that number must not be
+quoted as a success. `gp_fixed_mass` runs ON the gain-scaled, clipped
+substrate, so `gain_clip_s5` is its control; comparing it to `native_s5`
+credits the generalized prospective law with the input-gain and clipping gain
+that belongs to the substrate. That confound is precisely why `gain_clip_s5`
+was added as an arm.
+
+### Consequences, per the protocol
+
+* **Stage 3 confirmation is NOT triggered.** It was conditional on the primary
+  physical candidate improving on validation. It did not.
+* **No rescue sweep.** The protocol forbids an undeclared sweep after seeing
+  the screen, and none was run.
+* `gp_fixed_m0` succeeding alone could have triggered a separately labelled
+  reduced-model confirmation. It is the worst arm, so that is not triggered
+  either.
+* The bounded batch therefore ends here with a **negative screening result for
+  the physical candidate**.
+
+### The reproduction, as a secondary observation
+
+| step | delta |
+|---|---|
+| `gain_clip_s5` over `native_s5` (input gain + pole clipping) | +0.43 pp |
+| `alpha_p_s5` over `gain_clip_s5` (the second tap alone) | +0.40 pp |
+| `alpha_p_s5` over `native_s5` (the complete construction) | +0.83 pp |
+
+Directionally consistent with Table 6, which reports 96.31 vs 95.84 (+0.47 pp)
+at depth 4, width 32, MFCC. Ours is **10 epochs and one seed** against the
+paper's 300 epochs and five seeds, and the absolute values are correspondingly
+lower (95.00 vs 96.31). This is agreement in direction only; it is not a
+reproduction of the published numbers, and the paired-seed comparison that
+would support a quantitative claim was not run.
+
+Worth recording separately: the split of alpha-P's advantage into roughly half
+input-gain-plus-clipping and half second tap is a measurement the published
+table cannot make, because those three changes move together there. It rests
+on one seed at 10 epochs and is not asserted as more than an indication.
+
+### What this result does and does not establish
+
+**Does:** within this bounded, predeclared batch, at depth 4, width 32, MFCC,
+10 epochs, one development seed, neither fixed-coefficient generalized
+prospective arm reached its matched control, and the positive-mass arm did so
+while costing 1.93x the per-step time and doubling the recurrent carry.
+
+**Does not:** establish that the mechanism is worse in general. One seed at 10
+epochs cannot resolve differences of a few tenths of a point; no variance
+estimate exists; the 10-epoch regime is not the paper's 300-epoch regime. The
+honest statement is that the candidate **did not pass the screen it was
+predeclared against**, not that it has been refuted.
+
+A properly powered comparison (paired seeds, full schedule) is a **separate
+study that would have to be declared before it is run**. It is not started
+here, because starting it now — after seeing an unfavourable screen — is
+exactly the undeclared rescue sweep the protocol prohibits.
+
+### Measured epoch times, for any future budget
+
+| arm | s/epoch (real, including data pipeline) |
+|---|---|
+| `alpha_p_s5` | 2.70 |
+| `native_s5` | 2.75 |
+| `gain_clip_s5` | 2.80 |
+| `gp_fixed_mass` | **6.85** |
+
+Real training epochs are FASTER than the stage-1 compute-only projection
+(2.70-2.80 s against 4.15 s), because stage 1 measured two steps immediately
+after compilation and the training loop benefits from asynchronous dispatch.
+The positive-mass ratio in real training is **2.49x**, higher than the 1.93x
+per-step ratio measured in stage 1.
+
+For the record, a stage 3 at these measured rates would have fit its cap
+comfortably: 12 runs at 100 epochs is 1.26 GPU-h and at the full 300 epochs
+3.77 GPU-h, against the 8 GPU-hour cap. **Budget was not the reason stage 3 did
+not run; the failed criterion was.**
+
+### Evidence classes, updated
+
+| class | scope | commit / artifact | status |
+|---|---|---|---|
+| GPU correctness, this revision | 216 tests + 3 probes | `129f73e`, `gpu_checks/20260915-152008` | PASSED |
+| GPU integration, stage 1 | 5 arms | `stage1/20260915-153757` | PASSED, exit 0 |
+| **Validation screening, stage 2** | **9 runs, seed 100** | **`stage2/manifest.jsonl`** | **EXECUTED — criterion FAILED** |
+| Final benchmark comparison, stage 3 | — | — | **not triggered** |
