@@ -453,18 +453,18 @@ def test_shared_offset_cancels_opposite_per_example_gradients():
     convention is checked on the real helper.
     """
     def shared(off):                       # one vector used by both examples
-        return jnp.mean(jnp.stack([jnp.sum(off), -jnp.sum(off)]))
+        return np.mean(np.stack([np.sum(off), -np.sum(off)]))
 
-    gshared = jax.grad(shared)(jnp.ones((5,)))
-    assert float(jnp.abs(gshared).max()) == 0.0        # total cancellation
+    gshared = jax.grad(shared)(np.ones((5,)))
+    assert float(np.abs(gshared).max()) == 0.0        # total cancellation
 
     def per_example(off):                  # (2, 5), one slice per example
-        return jnp.mean(jnp.stack([jnp.sum(off[0]), -jnp.sum(off[1])]))
+        return np.mean(np.stack([np.sum(off[0]), -np.sum(off[1])]))
 
-    gper = jax.grad(per_example)(jnp.ones((2, 5)))
-    assert float(jnp.abs(gper[0]).max()) > 0.0
-    assert float(jnp.abs(gper[1]).max()) > 0.0
-    assert float(jnp.sum(gper[0]) * jnp.sum(gper[1])) < 0.0   # opposite signs
+    gper = jax.grad(per_example)(np.ones((2, 5)))
+    assert float(np.abs(gper[0]).max()) > 0.0
+    assert float(np.abs(gper[1]).max()) > 0.0
+    assert float(np.sum(gper[0]) * np.sum(gper[1])) < 0.0   # opposite signs
 
 
 def test_helper_reports_per_example_not_shared_offset_magnitudes():
