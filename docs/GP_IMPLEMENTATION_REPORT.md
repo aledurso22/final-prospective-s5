@@ -1157,3 +1157,238 @@ Remaining development candidates are the rest of the table in
 `--gp_init_scale`. Confirmation runs use `--updates 2000 --batch 64 --seed 1..5`
 on each primary arm. **Report every configuration that is run, including the
 ones that lose.**
+
+---
+
+# 12. Revision 5 — fixed physical coefficients, Rawat reference, cluster prep
+
+Implementing `docs/handoff_2026_09_15/CLUSTER_CODING_BRIEF.md` under
+`DERIVATION_CONTRACT.md`, both copied into the repository at
+`docs/handoff_2026_09_15/`.
+
+**No GPU evidence exists in this revision. No training was run, locally or on
+the cluster. No cluster job was submitted.** Everything below is local CPU
+static verification and preparation.
+
+## 12.1 Checkout
+
+| item | value |
+|---|---|
+| checkout | `/Users/alessandrodurso/Documents/final-prospective-s5` |
+| branch | `cluster-gp-rawat` (new; `generalized-prospective-s5` untouched) |
+| base commit | `a4c5b12599c247923ee0425c25a09d92e8556ce3` |
+| Python / JAX / Flax / optax | 3.14.4 / 0.11.1 / 0.12.9 / 0.2.8 |
+| backend | CPU only |
+
+Nothing existing was replaced: `gp_diagonal`, `modal_ssm`, the second-order
+prototype, the cue/recall task and every historical result remain as they were.
+The new arms are additional mechanisms with new names.
+
+## 12.2 Coefficient policy, as implemented
+
+Resolved by the user as "just do as in nla and/or tss": the added physical
+coefficients are **fixed declared hyperparameters**; ordinary S5 parameters,
+including the native learned steps, train with full BPTT.
+
+`s5/physical_coefficients.py` holds them in a **frozen dataclass**, not in a
+trainable parameter with a nominal zero learning rate:
+
+```
+T = 5 intervals      gamma_n = 1      rho = 3/4
+mu = M/gamma = 3.75  M_physical = 18.75   gamma_physical = 5
+```
+
+Derived from the symmetric intrinsic reference (`c_s = c_d = c`, `g_L = h = g`,
+no background synaptic conductance), with the tie `M = rho gamma T` enforced by
+`validate()`. The full circuit-to-code chain is `docs/DERIVATION_TRACE.md`.
+
+Verified behaviourally, not by inspection:
+
+* for both fixed arms the parameter tree is exactly
+  `{B, C, D, Lambda_im, Lambda_re, log_step}` — **no response parameter
+  exists**, so no gradient, optimizer slot or weight-decay term can reach the
+  physical coefficients;
+* the runner independently **refuses to start** if a response-like parameter
+  appears (`assert_response_is_not_trainable`);
+* and the converse, so the claim is not empty: **changing `T` or `rho` changes
+  the model output**.
+
+## 12.3 Equations implemented
+
+M = 0 (`gp_fixed_m0`), general solve form and the executed scalar reduction:
+
+```
+W = gamma I + T J    D_x = W^-1 T B    F = -W^-1 J    B_h = W^-1(B - J D_x)
+J = -a diagonal, T = 5I scalar:
+  W = gamma - T a    F = a/W    D_x = T b/W    B_h = gamma b/W^2
+  a_bar = exp(F)     b_bar = phi1(F) B_h
+  h_k = a_bar h_{k-1} + b_bar x_k ,  s_k = h_k + D_x x_k
+```
+
+M > 0 (`gp_fixed_mass`), carry `z = (s, v)`:
+
+```
+gamma rho s' = -J s - gamma(1-rho) v + B x        T v' = s' - v
+A = [[-J/(gamma rho), -(1-rho)I/rho], [-T^-1 J/(gamma rho), -T^-1/rho]]
+B_blk = [B/(gamma rho) ; T^-1 B/(gamma rho)]
+expm([[A, I2],[0,0]]) = [[A_bar, Phi],[0,I]] ,  B_bar = Phi B_blk
+z_k = A_bar z_{k-1} + B_bar x_k ,  s_k = z_k[0] ,  no D_x at positive mass
+```
+
+Per the brief, the prototype's `(2+H)x(2+H)` augmented exponential is replaced
+by a **per-mode 4x4** exponential for transition and integral, then multiplied
+by the 2xH drive, so cost no longer scales with feature width. `expm`
+throughout; never an eigendecomposition.
+
+## 12.4 Actual test results (local CPU)
+
+```
+.venv/bin/python -m pytest tests/ -q             ->  212 passed in 143.72s
+.venv/bin/python tests/cluster_float32_probe.py  ->  CLUSTER_FLOAT32_OK
+```
+
+Total 212, up from 178 at `a4c5b12`: 33 new in `tests/test_cluster_gp.py` plus
+one new resumable-checkpoint round-trip test.
+
+New file `tests/test_cluster_gp.py`, **33 tests**, tolerances predeclared in
+the module header and unchanged since: ALGEBRAIC 1e-10, ODE 1e-6, GRADIENT
+1e-5, FLOAT32 1e-4.
+
+Measured results worth naming:
+
+| check | result |
+|---|---|
+| `gp_fixed_m0` vs the audited M=0 law at `t = T` | `a_bar` and `b_bar` differ by **0.0**; `d_x` by 1.0e-15 |
+| `rho = 1`, zero prehistory, vs ordinary S5 | **6.2e-16** (float64), **3.9e-07** (float32) |
+| `(s,v)` block vs the target law, SciPy | satisfied at `M = 3.75`, derivatives taken from the ODE |
+| block scan vs sequential | < 1e-10, all three fixtures |
+| chunked streaming vs full sequence | < 1e-10 |
+| reset / nonzero initialization | < 1e-10 |
+| repeated (coalescing) poles | value and gradient both finite |
+| parameter and **clock** gradients vs central differences | within 1e-5 |
+| `native_s5` vs upstream `S5SSM` | params identical; output max|diff| **0.0** |
+| alpha-P two-tap vs sequential reference | **4.4e-16** |
+| production float32, worst of three arms | **3.9e-07** against a 1e-4 gate |
+| trainable parameter count, all five arms | **identical** |
+
+**Float32 note.** The brief records that the old dense positive-mass code
+failed pure float32 checks. The per-mode 4x4 formulation passes at 3.9e-07.
+That is a per-fixture agreement between two precisions of the same recurrence;
+it is **not** an exact-arithmetic error bound and not a bound for a training
+run, and it must not be compared against losses or accuracies.
+
+## 12.5 Rawat reference
+
+`docs/RAWAT_BASELINE_MAP.md`. The linked reference repository
+`Sequel-Institute/prospective-rqf` returns **404 — repository not found**, so
+**this port is paper-based and no reference commit can be pinned**; that status
+is recorded rather than worked around. The paper itself was retrieved and
+Appendix E.3/E.4 and Table 6 are quoted verbatim in the map.
+
+Implemented as published: `B_c = diag(-Re lambda) B_tilde`; pole clipping at
+`-1e-4` before forming alpha; `B_plus = B_bar + 5 diag(Delta) A_bar B_c`,
+`B_minus = -5 diag(Delta) A_bar B_c`; delayed input starting at zero;
+instantaneous `D`; no trainable parameters added.
+
+**Architecture reconstruction check:** depth 4, width 32, MFCC gives
+**35,050 parameters** against the paper's reported 35.1k.
+
+Recorded differences and findings, all in the map: the half-GLU variant and MLP
+dropout placement are unspecified and declared; weight decay on SSM parameters
+follows the **paper**, which differs from upstream S5; the published MFCC
+configuration leaves **2 of 64 mel filters empty**; and the stratified
+70/15/15 split is **not speaker-disjoint**, unlike the official Speech Commands
+lists, which inflates absolute accuracy but is shared by every arm.
+
+Because the published alpha-P-S5 row changes gain, clipping and the second tap
+together — as the paper states — a fifth arm `gain_clip_s5` isolates the tap.
+
+## 12.6 Runner infrastructure: both reported gaps fixed
+
+**Checkpointing.** `cue_recall_runner.py` imported `save_checkpoint` and never
+called it. It now writes an **atomic** `best` checkpoint at every improvement,
+so the selected parameters can actually be re-evaluated later; a summary scalar
+is not a checkpoint. `s5/checkpointing.py` gained atomic writes (temp file plus
+`os.replace`) and a real `loop_state`: epoch/step counters, dropout RNG,
+selection and early-stopping counters. Data order needs no RNG snapshot because
+it is a pure function of `(data_seed, epoch)`. **A resumed epoch restarts at its
+first batch** — stated in the docstring and in the checkpoint metadata rather
+than implied.
+
+The R4 test that asserted resume was DEFERRED was **updated, not deleted**: the
+honest record is that the scope changed, and a new behavioural test round-trips
+a resumable checkpoint.
+
+**State counts.** `n_state_coords = 2 * SSM_SIZE_BASE * N_LAYERS` double
+counted. With conjugate symmetry a layer stores `P = SSM_SIZE_BASE/2` complex
+modes, which is `2P = SSM_SIZE_BASE` real coordinates per layer. The two-layer
+width-32 model has **64** recurrent real coordinates, not 128. Counts are now
+derived from the executed carry and reported per kind — physical, auxiliary,
+previous-input buffer — never summed into one number.
+
+**Pipelines.** `bin/run_experiments/cluster_gpu_checks.sh` saves the log,
+captures the real process status and only then prints a tail; it never reports
+`tail`'s exit code as success.
+
+**Nonlinear end-to-end checks include the executed runner:** all five arms run
+`main()` end to end, plus train, resume and evaluate modes.
+
+## 12.7 Two bugs found by running things, recorded
+
+**Resume crashed on the first attempt.** `_to_jsonable` did not recurse into
+containers, so `loop_state["best"]` was serialized as the *text* of a dict and
+the resume path failed with `TypeError: string indices must be integers`. Fixed
+by recursing; covered by the new round-trip test. Found by actually resuming a
+run, not by reading the code.
+
+**Four tests in the new suite failed on first execution.** All four were
+defects in the tests, not the model: `float()` inside a differentiated
+function, a duplicated `bidirectional` keyword, and — the one worth keeping —
+a central second difference whose `O(h^2)` truncation error exceeded the
+predeclared ODE tolerance at the repeated-pole fixture. **The tolerance was not
+loosened.** The measurement was replaced with derivatives taken from the ODE
+itself, which is what the test was supposed to check.
+
+## 12.8 Limitations, stated before any training
+
+* **No GPU evidence, no training, no cluster job, no benchmark result.** The
+  earlier GPU evidence remains attached to its own commits: 124 tests at
+  `be225d4`, smokes at `91f4988`. Nothing here may be relabelled as GPU
+  evidence at this commit.
+* The measured throughput and memory numbers in the protocol are **CPU,
+  synthetic-data, structural indications**, not cluster measurements. Peak
+  memory is `null` on CPU because the backend exposes no `memory_stats`.
+* `gp_fixed_m0` is a **reduced/constitutive ablation**, not the fast-dendrite
+  circuit limit, which sends gamma and M to zero together.
+* The Rawat port is **paper-based**; the reference implementation could not be
+  inspected.
+* Only the identical-cell `T = 5I` model is implemented. No full-matrix
+  coupled-`T` mechanism, and no arbitrary fixed off-diagonal elements were
+  added to manufacture a coupled candidate.
+* The scalar-`rho` stability construction is **not** extended to learned mass
+  matrices.
+* **The derivation gap is open and is recorded before training:** the passive
+  plant supplies the tied coefficients but does not prescribe the prospective
+  closed-loop source. Substituting a learned S5 residual is a computational
+  extension; a nonsymmetric S5 residual is not automatically the gradient of
+  the original NLA mismatch energy. Stability here rests on the declared
+  constraints (`T` SPD, `sym(J) > 0` via native clipping, scalar `gamma > 0`,
+  scalar `rho` in (0,1]), not on a global biological derivation. Per the
+  contract this gap is **reported, not patched with a trainable correction**.
+* The September-14 cue/recall protocol remains **predeclared and unexecuted**.
+  This batch does not run it.
+* Three confirmation seeds are preliminary and differ from the paper's
+  five-seed aggregate.
+
+## 12.9 Evidence classes at this commit
+
+| class | scope | where | status |
+|---|---|---|---|
+| Historical local positives (learned response) | width-64 and depth-2 archived runs | earlier reports | historical, not reproduced here |
+| Unsuccessful fixed-coefficient confirmation | pole-preserving study, 30.24% worse, 0/3 paired wins | earlier reports | preserved, unfavourable |
+| CPU numerical verification | this revision | `tests/test_cluster_gp.py` (33), float32 probe | PASSED locally |
+| GPU correctness | 124 tests | `be225d4` | PASSED, earlier commit |
+| Integration smokes | 3 runs | `91f4988` | PASSED, earlier commit |
+| GPU integration for the new arms | — | — | **not run** |
+| Validation screening | — | — | **not run** |
+| Final benchmark comparison | — | — | **not run** |

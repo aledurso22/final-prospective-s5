@@ -218,6 +218,37 @@ def spectral_stats(params):
     return out
 
 
+def executed_state_counts():
+    """Carry sizes in REAL coordinates, DERIVED from the executed model.
+
+    The previous expression doubled the count. With conjugate symmetry a layer
+    stores P = SSM_SIZE_BASE//2 complex modes, which is 2P = SSM_SIZE_BASE real
+    coordinates per layer, NOT twice that. The two-layer width-32 model has 64
+    recurrent real coordinates, not 128. Auxiliary and buffer state are
+    reported separately and never folded into the physical count.
+    """
+    from s5.gp_fixed import state_counts
+    per_layer = state_counts(SSM_SIZE_BASE // 2, True, "other")
+    total = per_layer["physical_real"] * N_LAYERS
+    return dict(physical_real=total, auxiliary_real=0,
+                previous_input_buffer=0, total_real=total,
+                per_layer=per_layer, n_layers=N_LAYERS)
+
+
+class _CkptState:
+    """Duck-typed state so save_checkpoint can store this runner's plain
+    (params, opt_state) pair. A summary scalar is NOT a checkpoint: the
+    selected parameters must be retrievable for a later held-out evaluation."""
+
+    def __init__(self, params, opt_state, step):
+        self.params, self.opt_state, self.step = params, opt_state, step
+
+    def replace(self, **kw):
+        return _CkptState(kw.get("params", self.params),
+                          kw.get("opt_state", self.opt_state),
+                          kw.get("step", self.step))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mechanism", default="gp_diagonal")
@@ -253,7 +284,7 @@ def main():
         n_params=n_params, d_model=D_MODEL, ssm_size_base=SSM_SIZE_BASE,
         n_layers=N_LAYERS, blocks=BLOCKS, seq_len=cfg.seq_len,
         matmul_precision=args.matmul_precision,
-        n_state_coords=2 * SSM_SIZE_BASE * N_LAYERS,
+        n_state_coords=executed_state_counts(),
         response_initial=response_stats(params),
         spectral_initial=spectral_stats(params)))
     print(f"[*] {args.mechanism}  params={n_params}  run_dir={run_dir}")
@@ -285,8 +316,16 @@ def main():
                   f"  current {m['current_acc']:.4f}")
             if m["joint_bce"] < best["joint_bce"]:
                 best = dict(rec)
+                save_checkpoint(
+                    run_dir, "best", _CkptState(params, opt_state, step),
+                    epoch=0, step=step, config=args,
+                    loop_state=dict(next_step=step + 1,
+                                    best_joint_bce=m["joint_bce"],
+                                    data_seed=args.seed),
+                    notes=f"lowest dev joint BCE {m['joint_bce']:.6f} at step "
+                          f"{step}; selected on DEV only")
     summary = dict(mechanism=args.mechanism, n_params=n_params, best=best,
-                   n_state_coords=2 * SSM_SIZE_BASE * N_LAYERS,
+                   n_state_coords=executed_state_counts(),
                    response_initial=initial_response,
                    final_response=response_stats(params),
                    spectral_initial=initial_spectral,

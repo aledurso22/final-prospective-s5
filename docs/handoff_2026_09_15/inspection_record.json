@@ -1,0 +1,59 @@
+{
+  "prepared_at": "2026-09-15T11:42:40.679888+00:00",
+  "source_checkout": "/Users/alessandrodurso/Documents/final-prospective-s5",
+  "source_branch": "generalized-prospective-s5",
+  "source_commit": "a4c5b12599c247923ee0425c25a09d92e8556ce3",
+  "coordinator_execution": "Read-only source inspection and handoff-file preparation. No training, tests, cluster job or production edit.",
+  "coefficient_policy": "Fixed added coefficients; ordinary S5 parameters learned. User: just do as in nla and/or tss; remain faithful to physical/biological derivation.",
+  "references": {
+    "references/CIRCUIT_DERIVED_NLA_ACTION.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/prospective_theory_extension_2026_09_14/CIRCUIT_DERIVED_NLA_ACTION.md",
+      "sha256": "49d17367b40486f11b07417905c4ea5995c9b5dc3d822f5c7191d1a931355172"
+    },
+    "references/CIRCUIT_PARAMETER_IDENTIFICATION.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/gp_followup_2026_09_15/CIRCUIT_PARAMETER_IDENTIFICATION.md",
+      "sha256": "4ea3e21ad4301e4a4c9d0cd69e2cb2be193a86300ad8f75f017d07e29a3174a5"
+    },
+    "references/FIXED_MODEL.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/gp_followup_2026_09_15/fixed_circuit/FIXED_MODEL.md",
+      "sha256": "8216e0fcc2178715ee8d9a09aee9172fa92f94590b7fdc60d17d07692b0038e9"
+    },
+    "references/EARLIER_LEARNED_RESPONSE_RESULTS.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/coupled_gp_scaling_2026_09_14/REPORT.md",
+      "sha256": "56c0bc90f2e51e7dfe4cc0efeb447f815618f182dd91430278002b4006b4bbbb"
+    },
+    "references/FIXED_RESPONSE_RESULTS.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/gp_followup_2026_09_15/REPORT.md",
+      "sha256": "ad196b15e2182e86c615363d4a9d40124589afaefc4952bb1de672dcb33ac64b"
+    },
+    "references/LATEST_CONFIRMATION_RESULTS.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/gp_fixed_advantage_2026_09_15/REPORT.md",
+      "sha256": "982ee9474e5dcb3ff3d76878775098cb95b97ba17ab41f5296e9b84dcab48a3d"
+    },
+    "references/WHAT_CHANGED.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/gp_fixed_advantage_2026_09_15/WHAT_CHANGED.md",
+      "sha256": "cb104f36ffd8a12434db920d93001371fbd6f4911fecec1c9cc16a602219c298"
+    },
+    "references/SPATIAL_ONLY_THEORY.md": {
+      "source": "/Users/alessandrodurso/Documents/Codex/2026-09-11/hel/outputs/gp_fixed_advantage_2026_09_15/SPATIAL_ONLY_THEORY.md",
+      "sha256": "7b667acc415182c1352bff5b2b515c38aa56a640145d1cec5f677facaa8b089a"
+    }
+  },
+  "inspected_repo_files": {
+    "s5/gp_coefficients.py": "00160226f411c39c719e3c628204aea8b00b4fe8056aeddb32ca90eed7bcdeb7",
+    "s5/gp_ssm.py": "e6d20e0e983a430933a9ac8fe4fb461f8e1ee872bde5ed2864db0c08f1f8ae1d",
+    "s5/gp_second_order.py": "61b52812061dd2eb35dc171708e95bd7bba0d6edf0a84621bffc50878b5a2cd1",
+    "s5/modal_ssm.py": "465009ef2cec22d5fda9f2d9ce8acf9ce71ffc57bc7bb53e968b08e14a338a63",
+    "s5/checkpointing.py": "7009289fc6fe5cf309c5e59d745117a6af5bca48369a395357d05858737f5592",
+    "experiments/gp/cue_recall_runner.py": "c84251ed25064acf5666242785023dbf29e59509d7dde73f7c4f6d4558d5ffbb",
+    "docs/GP_EXPERIMENT_PROTOCOL.md": "fc26f32c816b81587c76b04d560de48faf3b15e8e5a5737e17b56da955172ce3",
+    "docs/GP_IMPLEMENTATION_REPORT.md": "2f8a115b68c28d2aa2722c7e09b6bfb1476a931661b339a971c86d7db312128c",
+    "docs/CLUSTER.md": "581bf729fa3441ade0676cad6172abf7d9a846542761da5b2117fa1d1752cd63"
+  },
+  "packet_files": {
+    "DERIVATION_CONTRACT.md": "cdbc5effbae147d05e0fcc954093f45332ced38eb1ccb3787c1692b62f944a37",
+    "CLUSTER_CODING_BRIEF.md": "513cf3e3711f5edc814a5a247fa7d84e51798c3e580dfc0962a526e14fa7a1a3",
+    "README.md": "3dbf23fddbdfe880cb9a0079dc6973c063abdb587a54053c8fe3d16d7a690485"
+  },
+  "user_followup": "Stay true to prospective/general prospective derivation and physical/biological assumptions."
+}

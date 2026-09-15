@@ -15,19 +15,31 @@ WHAT THIS MODULE DOES, PRECISELY
 --------------------------------
 It **serializes and restores training state**: parameters, optimizer state,
 mutable batch statistics and `TrainState.step`.
-It does **not** resume a training loop.
+
+Since the 2026-09-15 cluster brief it ALSO supports loop resume, through the
+optional `loop_state` argument to `save_checkpoint`:
+
+  * epoch/step counters, the dropout RNG key, and the selection and
+    early-stopping counters are stored;
+  * data order does not need an RNG snapshot because it is a pure function of
+    `(data_seed, epoch)` - see `dataloaders.speech_commands10.epoch_batches` -
+    so restarting an interrupted epoch reproduces its permutation exactly. A
+    RESUMED EPOCH RESTARTS AT ITS FIRST BATCH; mid-epoch batch position is not
+    restored, and the meta records this;
+  * checkpoint writes are ATOMIC (temp file plus `os.replace`), so a killed
+    job cannot leave a truncated file that later loads as garbage.
+
+`meta["resumable"]` distinguishes the two cases. A checkpoint written WITHOUT
+`loop_state` is still serialization-only, and its `scope` field says so.
 
 What is checked: given externally supplied inputs and randomness, a restored
 state reproduces a fixed-batch evaluation and the next optimizer update
 exactly, in-process, on the same host and backend.
 
-DEFERRED, and explicitly NOT part of Milestone A:
-  * a wired epoch-resume entrypoint (`--resume_from`) does not exist; this
-    module loads and stores state, it does not restart the training loop;
-  * the training RNG and the dataloader's RNG state are not captured - only
-    the seed is recorded, and a seed is not a current state;
-  * training-loop scheduling/selection counters (best_acc, early-stop count,
-    lr step) are not captured.
+STILL NOT CAPTURED, stated rather than implied:
+  * mid-epoch batch position (a resume replays the interrupted epoch);
+  * any RNG consumed outside the recorded dropout key;
+  * cross-host or cross-backend bitwise equality.
 
 NOT claimed, and not checked:
   * mid-epoch resume (the dataloader's within-epoch position is not captured);
@@ -112,6 +124,13 @@ def make_run_dir(base, tag="run"):
 
 
 def _to_jsonable(obj):
+    """Convert to JSON-safe types, RECURSING into containers.
+
+    The non-recursive version stringified nested dicts, so a resumable
+    checkpoint's `loop_state["best"]` came back as the text "{'accuracy': ...}"
+    and the resume path crashed with `TypeError: string indices must be
+    integers`. Anything that survives a save/restore round trip has to recurse.
+    """
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating,)):
@@ -120,6 +139,10 @@ def _to_jsonable(obj):
         return obj.tolist()
     if isinstance(obj, (bool, int, float, str)) or obj is None:
         return obj
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
     return str(obj)
 
 
@@ -144,43 +167,93 @@ def append_metrics(run_dir, record):
 
 
 def save_checkpoint(run_dir, name, state, epoch, step, config=None,
-                    batch_stats=None, data_seed=None, notes=None):
+                    batch_stats=None, data_seed=None, notes=None,
+                    loop_state=None):
     """Serialize params, optimizer state, batch stats, position and config.
 
-    Uses flax msgpack for the pytrees. Does NOT touch any PRNG.
+    Uses flax msgpack for the pytrees. Writes ATOMICALLY: a temporary file in
+    the same directory followed by `os.replace`, so a job killed mid-write
+    cannot leave a half-written checkpoint that later loads as garbage.
+
+    `loop_state` carries everything a training loop needs to continue rather
+    than merely to re-evaluate: epoch/step counters, the dropout RNG, the data
+    order identity, the early-stopping and selection counters. Pass it and the
+    recorded scope changes from "serialization only" to "resumable".
     """
     os.makedirs(run_dir, exist_ok=True)
     payload = dict(params=state.params, opt_state=state.opt_state,
                    step=np.asarray(state.step))
     if batch_stats is not None:
         payload["batch_stats"] = batch_stats
+    if loop_state is not None and "rng" in loop_state:
+        payload["rng"] = np.asarray(loop_state["rng"])
     blob = serialization.to_bytes(payload)
     ckpt = os.path.join(run_dir, f"{name}.msgpack")
-    with open(ckpt, "wb") as fh:
-        fh.write(blob)
+    _atomic_write(ckpt, blob)
+    resumable = loop_state is not None
     meta = dict(name=name, epoch=int(epoch), step=int(step),
                 data_seed=None if data_seed is None else int(data_seed),
                 has_batch_stats=batch_stats is not None,
-                scope=("state serialization only; NOT a training-loop resume. "
-                       "Reproduces a fixed-batch eval and the next update given "
-                       "externally supplied inputs and randomness, in-process, "
-                       "same host and backend."),
+                resumable=resumable,
+                loop_state=(None if loop_state is None else
+                            {k: _to_jsonable(v) for k, v in loop_state.items()
+                             if k != "rng"}),
+                scope=(("resumable training state: params, optimizer state, "
+                        "batch stats, step/epoch counters, dropout RNG, data "
+                        "order identity and selection/early-stopping counters. "
+                        "Data order is a pure function of (data_seed, epoch), "
+                        "so no dataloader RNG has to be reconstructed.")
+                       if resumable else
+                       ("state serialization only; NOT a training-loop resume. "
+                        "Reproduces a fixed-batch eval and the next update given "
+                        "externally supplied inputs and randomness, in-process, "
+                        "same host and backend.")),
                 notes=notes, provenance=provenance())
     if config is not None:
         meta["config"] = {k: _to_jsonable(v) for k, v in vars(config).items()}
-    with open(os.path.join(run_dir, f"{name}.meta.json"), "w") as fh:
-        json.dump(meta, fh, indent=2, default=_to_jsonable)
+    _atomic_write(os.path.join(run_dir, f"{name}.meta.json"),
+                  json.dumps(meta, indent=2, default=_to_jsonable).encode())
     return ckpt
 
 
-def restore_checkpoint(run_dir, name, state, batch_stats=None):
-    """Restore into an existing state object of the right structure."""
+def _atomic_write(path, blob):
+    """Write via a same-directory temp file and rename. Never a partial file."""
+    import tempfile
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".partial")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return path
+
+
+def checkpoint_exists(run_dir, name):
+    return os.path.exists(os.path.join(run_dir, f"{name}.msgpack"))
+
+
+def restore_checkpoint(run_dir, name, state, batch_stats=None, rng=None):
+    """Restore into an existing state object of the right structure.
+
+    Returns `(state, batch_stats, meta)`. When the checkpoint was written with
+    a `loop_state`, `meta["loop_state"]` carries the counters and
+    `meta["rng"]` the restored dropout key, so a caller can continue the loop
+    rather than only re-evaluate.
+    """
     with open(os.path.join(run_dir, f"{name}.msgpack"), "rb") as fh:
         blob = fh.read()
     target = dict(params=state.params, opt_state=state.opt_state,
                   step=np.asarray(state.step))
     if batch_stats is not None:
         target["batch_stats"] = batch_stats
+    if rng is not None:
+        target["rng"] = np.asarray(rng)
     restored = serialization.from_bytes(target, blob)
     # `step` must be restored too: schedules and any step-dependent logic read
     # it, and leaving it at 0 silently rewinds the training loop's notion of
@@ -192,4 +265,6 @@ def restore_checkpoint(run_dir, name, state, batch_stats=None):
                               step=int(np.asarray(restored["step"])))
     with open(os.path.join(run_dir, f"{name}.meta.json")) as fh:
         meta = json.load(fh)
+    if "rng" in restored:
+        meta = dict(meta, rng=restored["rng"])
     return new_state, restored.get("batch_stats"), meta

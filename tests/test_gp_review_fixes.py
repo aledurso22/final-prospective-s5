@@ -219,12 +219,56 @@ def test_R4_step_and_optimizer_moments_restore_into_a_fresh_template():
                                        flatten_dict(n2.params)[k])
 
 
-def test_R4_deferred_scope_is_documented():
+def test_R4_scope_is_documented_and_the_deferral_is_now_CLOSED():
+    """R4 deferred loop resume; the 2026-09-15 cluster brief required it.
+
+    This test used to assert the docstring said resume was DEFERRED. It is
+    updated rather than deleted, because the honest record is that the scope
+    CHANGED: resume is implemented, and what remains unsupported is now
+    narrower and must still be stated.
+    """
     import s5.checkpointing as ck
     doc = ck.__doc__
-    for phrase in ("DEFERRED", "epoch-resume entrypoint", "training RNG",
-                   "does **not** resume a training loop"):
+    for phrase in ("loop resume", "loop_state", "ATOMIC",
+                   "STILL NOT CAPTURED", "mid-epoch batch position"):
         assert phrase in doc, phrase
+    assert "does **not** resume a training loop" not in doc
+    assert hasattr(ck, "checkpoint_exists")
+
+
+def test_R4_resumable_checkpoints_round_trip_their_loop_state():
+    """Behavioural, not a docstring search: save with loop_state, restore it."""
+    import tempfile
+
+    import optax
+    import s5.checkpointing as ck
+
+    class S:
+        def __init__(self, params, opt_state, step):
+            self.params, self.opt_state, self.step = params, opt_state, step
+
+        def replace(self, **kw):
+            return S(kw.get("params", self.params),
+                     kw.get("opt_state", self.opt_state),
+                     kw.get("step", self.step))
+
+    params = {"w": np.ones((3,))}
+    tx = optax.adam(1e-3)
+    st = S(params, tx.init(params), 7)
+    loop = dict(next_epoch=5, best={"accuracy": 0.25, "epoch": 3},
+                since_improved=2, rng=jax.random.PRNGKey(11))
+    with tempfile.TemporaryDirectory() as d:
+        ck.save_checkpoint(d, "last", st, epoch=4, step=7, loop_state=loop)
+        assert ck.checkpoint_exists(d, "last")
+        back, _, meta = ck.restore_checkpoint(d, "last", st,
+                                              rng=jax.random.PRNGKey(0))
+        assert meta["resumable"] is True
+        assert meta["loop_state"]["next_epoch"] == 5
+        # the nested dict must survive as a DICT, not as its repr string:
+        # a non-recursive JSON coercion stringified it and broke resume.
+        assert meta["loop_state"]["best"]["epoch"] == 3
+        assert int(back.step) == 7
+        assert np.array_equal(meta["rng"], jax.random.PRNGKey(11))
 
 
 # =====================================================================
