@@ -109,6 +109,23 @@ at its published schedule.
 `rho` is initialized at **0.9998** — a declared initialization choice, not a
 physiological measurement.
 
+**A property of that choice, recorded before execution.** In log space
+`log(0.9998) = -2.000e-4` sits only **1.0e-4** below the declared upper bound
+`log(1 - 1e-4)`. So `rho` starts essentially **at its ceiling** and the
+learnable direction is effectively one-sided: it can decrease, adding mass and
+moving away from the ordinary-SSM limit, while any increase is absorbed by the
+forward clip almost immediately. That is consistent with the physics — `rho` is
+`M/(gamma T)` and `rho <= 1` is the admissible region, so the ceiling is a
+physical limit rather than an arbitrary one — but it means "`rho` moved" can
+only mean "`rho` fell", and the learned distribution must be read that way.
+
+It also makes a finite-difference gradient check at the initialization point
+invalid: a usable float32 step of 1e-2 is 100x the available headroom, so the
+`+h` evaluation saturates and a central difference returns about half the true
+directional derivative. The float32 gradient check is therefore evaluated at an
+**interior** `rho = 0.75`, and saturation at the ceiling is checked separately
+as its own property.
+
 ## 7. Initialization-response gate, before any comparative score
 
 Near-one `rho` does not guarantee functional closeness for high-Q modes, so it

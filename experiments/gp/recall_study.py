@@ -257,7 +257,7 @@ def core_response_change(arm_a, params_a, arm_b, params_b, layer,
     """
     from s5 import substrate_diagnostics as SD
 
-    def read(m):
+    def read(m, xx, tt):
         seq = m.encoder.layers[layer].seq
         Lam, B_c, Delta = seq._native()
         B_tilde = seq.B[..., 0] + 1j * seq.B[..., 1]
