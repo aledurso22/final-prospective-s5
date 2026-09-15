@@ -4,9 +4,11 @@ Protocol committed before execution:
 `docs/LEARNED_RESPONSE_TIMESCALE_PROTOCOL.md`.
 
 **Outcome: the per-mode response timescale was genuinely learned — `T` moved
-away from its reference and fanned out across modes — and it changed the
-endpoint by `-0.035` pp. Both generalized arms finished behind the matched
-ordinary substrate and behind Rawat's prospective-input S5.**
+away from its reference and fanned out across modes — and performance was
+essentially unchanged: `-0.035` pp of endpoint accuracy, with a slightly lower
+endpoint cross entropy (0.29946 against 0.29982). Both generalized arms
+finished behind the matched ordinary substrate and behind Rawat's
+prospective-input S5.**
 
 This is a **one-seed development screen**. It cannot establish a robust effect
 in either direction, and nothing here escalates to a larger batch.
@@ -64,6 +66,12 @@ Paired differences in percentage points:
 | `gp_rho_T_fixed` − `gain_clip_s5` | −0.311 |
 | `gp_rho_T_fixed` − `alpha_p_s5` | −0.709 |
 
+**The isolating comparison is essentially unchanged performance**, not a loss:
+`-0.035` pp of endpoint accuracy, and an endpoint cross entropy that is very
+slightly *lower* for the learned arm (0.29946 against 0.29982). Both figures
+are far inside what a single seed resolves. The supported reading is that
+learning the per-mode timescale neither helped nor hurt measurably.
+
 The three control arms reproduce the earlier batch's numbers exactly —
 `native_s5` 94.17 %, `gain_clip_s5` 94.60 %, `alpha_p_s5` 95.00 % — which is a
 provenance check on the shared substrate, not a new measurement.
@@ -84,8 +92,10 @@ layer (min / median / max over 16 stored modes):
 | 2 | 4.009 / **4.945** / 5.777 | 0.720 / 0.861 / 1.000 | 3.368 / 4.207 / 5.054 | 0.180 |
 | 3 | 4.109 / **5.096** / 6.513 | 0.664 / 0.819 / 0.990 | 2.729 / 4.114 / 4.632 | 0.194 |
 
-Layer 0's median `T` rises monotonically from the declared `5.000` and its
-**per-mode spread grows from 0 to 2.65**:
+Layer 0's median `T` rises from the declared `5.000` and its **per-mode spread
+grows from 0 to 2.65**. The path is **not monotone** — the median dips at epoch
+5 (5.549 → 5.535) and the spread dips at epochs 6 and 7 — so it is a drift with
+reversals, not a one-way march:
 
 ```
 epoch   -1     0      1      2      3      4      5      6      7      8      9
@@ -127,12 +137,17 @@ medians of 0.76–0.86 with per-mode ranges spanning 0.65–1.00, so the shared
 coordinate was active too and the comparison is not between a learning arm and
 a static one.
 
-**One mechanistic observation, offered as such and not as an explanation.** The
-dimensionless per-mode product `|T j|` sits at 0.15–0.19 at the endpoint. With
-`T` near 5 that puts `|j|` around 0.03, i.e. the stored modes are slow relative
-to the response horizon, and the prospective zero at `-1/T` is far from the
-band where it would dominate the response. Whether the timescale freedom would
-matter in a regime where `|T j|` is of order one is **not** tested here.
+**A modal diagnostic, and only that.** The dimensionless per-mode product
+`|T j|` sits at 0.15–0.19 at the endpoint. With `T` near 5 that puts `|j|`
+around 0.03, i.e. the stored modes are slow relative to the response horizon,
+and the prospective zero at `-1/T` sits away from the band where it would
+dominate the response.
+
+That describes where the executed modes ended up. It is **not** an established
+explanation of the task result: no causal link between this quantity and the
+accuracy ordering was measured, and nothing here tests whether a regime with
+`|T j|` of order one behaves differently. Reading it as the reason the freedom
+did not help would be an inference this batch does not support.
 
 ## 4. Initialization
 
@@ -172,12 +187,19 @@ ladder for `d/d(log T)`, and a real production update that moves `log T` in the
 learned arm and leaves it exactly fixed in the frozen one.
 
 **Not demonstrated.** Any benefit from learning the response timescale. The
-isolating comparison is `-0.035` pp; both generalized arms are behind the
-matched ordinary substrate by about 0.3 pp and behind Rawat by about 0.7 pp,
-and ahead only of `native_s5`, by 0.09 pp. Nothing here supports a
-capacity-efficiency claim either: the generalized arms carry twice the state
-(256 against 128 real coordinates) and 128 more parameters than the ordinary
-controls.
+isolating comparison is essentially unchanged performance; both generalized
+arms are behind the matched ordinary substrate by about 0.3 pp and behind Rawat
+by about 0.7 pp, and ahead only of `native_s5`, by 0.09 pp.
+
+Nothing here supports a capacity-efficiency claim either, and the carried-state
+comparison needs stating precisely. The generalized recurrence **doubles the
+ordinary S5 carry** — 256 real coordinates against the one-tap arms' 128 —
+because it adds one auxiliary coordinate per mode. **Rawat also totals 256**,
+but composed differently: 128 physical coordinates plus a 128-real
+previous-input buffer for its second tap. So against `native_s5` and
+`gain_clip_s5` the generalized arms carry twice the state; against
+`alpha_p_s5` they carry the same total. They hold 128 more parameters than
+every control.
 
 ## 6. Limitations
 
@@ -190,9 +212,9 @@ controls.
   on starting at the symmetric reference.
 * **State is matched, parameters are not.** 256 against 128 carried real
   coordinates, 35,178 against 35,050 parameters. No efficiency claim follows.
-* **`|T j| ≈ 0.15–0.19` at the endpoint**, so the response operated far from
-  the regime where the prospective zero dominates. A different clock or task
-  could place it elsewhere; that was not tested.
+* **`|T j| ≈ 0.15–0.19` at the endpoint**, recorded as a modal diagnostic of
+  where the executed modes sit — not as an explanation of the accuracy
+  ordering, which was never measured against it.
 * The summary's boundary-occupancy listing labels all eight leaves `seq`, so
   `rho` and `T` leaves are not distinguished by name in that printout. The
   counts themselves are unambiguous — none at a bound, none outside, in all
@@ -223,8 +245,8 @@ kept `1e-10`, and the corners' finiteness requirement was not relaxed.
 
 ## 8. Disposition
 
-The bounded screen is complete and its outcome is reported as it came out. No
-sweep, no additional seeds and no enlargement follows from this batch. A later
-proposal should name a specific regime — a task or clock where `|T j|` is of
-order one would be the obvious candidate, given s3 — and a discriminating
-prediction, before another training budget is spent on this coordinate.
+The bounded screen is complete and its outcome is reported as it came out.
+**No sweep, no additional seeds and no enlargement follows from this batch.** A
+later proposal would need a specific mechanism and a discriminating prediction
+before another training budget is spent on this coordinate. The `|T j|`
+diagnostic above is a place to look, not a hypothesis this batch tested.
