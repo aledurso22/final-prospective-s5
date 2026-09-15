@@ -22,7 +22,22 @@ import tasks.recall as T                                          # noqa: E402
 from experiments.gp import recall_study as RS                     # noqa: E402
 from s5.rawat_s5 import RHO_ONLY_PARAM_NAME                       # noqa: E402
 
-TOL, STEP = 5e-3, 1e-2
+#: Tolerance UNCHANGED at 5e-3. The STEP is set from the float32 rounding
+#: floor of a central difference, eps*|L| / (h*|dL|), which for this operating
+#: point (|L| ~ 2.25, |dL| ~ 3.2e-3, eps = 1.19e-7) predicts
+#:
+#:   h      1e-2      3e-2      1e-1      3e-1
+#:   floor  8.4e-3    2.8e-3    8.4e-4    2.8e-4
+#:
+#: The first cluster run measured 1.1e-2 at h = 1e-2, matching the predicted
+#: 8.4e-3 in order of magnitude: the directional derivative here is SMALL
+#: relative to the loss, so the finite difference is rounding-limited rather
+#: than wrong. The gate therefore uses h = 1e-1, where the floor is far below
+#: the tolerance, and the whole ladder is reported so a future failure is
+#: diagnosable. Gradient CORRECTNESS is established separately in float64 by
+#: tests/test_recall_study.py, which is the right precision for that question.
+TOL, STEP = 5e-3, 1e-1
+REPORT_STEPS = (1e-1, 3e-2, 1e-2)
 rng = onp.random.RandomState(0)
 x, y = T.generate_fixed_delay(rng, 32, delay=32)
 x, y = jnp.asarray(x), jnp.asarray(y)
@@ -49,7 +64,11 @@ for arm in RS.ARMS:
 # That is what the first cluster run measured (analytic 0.0549 vs fd 0.0281).
 # Saturation is a separate property and is checked separately below; this check
 # is about the gradient.
-FD_RHO = 0.75
+#: rho = 0.5 keeps the WHOLE perturbed range interior: an RMS-1 direction over
+#: 16 components reaches |d| ~ 2.5, so h = 1e-1 moves a component by up to 0.25
+#: and log(0.5) + 0.25 = -0.443 stays clear of the ceiling at -1.0e-4. At
+#: rho = 0.75 the same step would reach -0.038 and clip.
+FD_RHO = 0.5
 m, p = RS.init_params("gp_rho", 0)
 from flax.traverse_util import flatten_dict, unflatten_dict                # noqa
 flat = dict(flatten_dict(p))
@@ -88,11 +107,17 @@ assert onp.isfinite(g).all() and onp.max(onp.abs(g)) > 0.0, "rho gradient"
 d = onp.random.RandomState(1).randn(*g.shape)
 d = jnp.asarray(d / d.std(), dtype=flat[key].dtype)
 ana = float(jnp.sum(jnp.asarray(g) * d))
-fd = (loss_of(flat[key] + STEP * d) - loss_of(flat[key] - STEP * d)) / (2 * STEP)
-rel = abs(ana - fd) / max(abs(fd), 1e-8)
-print(f"  rho gradient: analytic {ana:.6f}  fd {fd:.6f}  rel {rel:.3e} "
-      f"(tol {TOL:.0e})")
-assert rel < TOL, f"GATE FAILED: {rel}"
+rels = {}
+for h in REPORT_STEPS:
+    fd_h = (loss_of(flat[key] + h * d) - loss_of(flat[key] - h * d)) / (2 * h)
+    rels[h] = (fd_h, abs(ana - fd_h) / max(abs(fd_h), 1e-8))
+    zmax = float(jnp.max(jnp.abs(flat[key] + h * d)))
+    assert zmax < abs(_math.log(1 - 1e-4)) + 10, "sanity"
+print(f"  rho gradient: analytic {ana:.6f}  "
+      + "  ".join(f"h={h:.0e} fd={v[0]:.6f} rel={v[1]:.2e}"
+                  for h, v in rels.items()))
+rel = rels[STEP][1]
+assert rel < TOL, f"GATE FAILED at step {STEP:.0e}: {rel}"
 # saturation IS the intended behaviour at the ceiling, checked on its own
 _, p2 = RS.init_params("gp_rho", 0)
 f2 = dict(flatten_dict(p2))

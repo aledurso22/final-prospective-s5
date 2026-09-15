@@ -363,3 +363,48 @@ def test_memoryless_arm_has_no_response_beyond_lag_zero_in_the_adapter():
     assert float(onp.max(onp.abs(K[1:]))) == 0.0
     assert float(onp.max(onp.abs(K[0]))) > 0.0
     assert SD.spectral_radius(core) == 0.0
+
+
+def test_rho_gradient_is_correct_in_float64_against_a_step_ladder():
+    """Gradient CORRECTNESS, at the precision that can answer it.
+
+    The float32 probe is rounding-limited for a derivative this small, so it
+    checks dtypes and magnitude. This is the correctness check: in float64 the
+    relative error must FALL as the step falls, which is the signature of an
+    O(h^2) difference converging on a correct gradient rather than of a dropped
+    term.
+    """
+    import math as _m
+    from flax.traverse_util import flatten_dict, unflatten_dict
+    m, p = RS.init_params("gp_rho", 0)
+    flat = dict(flatten_dict(p))
+    key = [k for k in flat if k[-1] == RHO_ONLY_PARAM_NAME][0]
+    for k in list(flat):
+        if k[-1] == RHO_ONLY_PARAM_NAME:
+            flat[k] = np.full_like(flat[k], _m.log(0.5))   # interior
+    p = unflatten_dict(flat)
+    flat = dict(flatten_dict(p))
+    rng = onp.random.RandomState(41)
+    x, y = T.generate_fixed_delay(rng, 32, delay=32)
+    x, y = np.asarray(x), np.asarray(y)
+
+    def loss_of(v):
+        f = dict(flat); f[key] = v
+        return float(RS.loss_fn(unflatten_dict(f), m, x, y)[0])
+
+    def L(params):
+        return RS.loss_fn(params, m, x, y)[0]
+
+    g = flatten_dict(jax.grad(L)(p))[key]
+    assert float(np.max(np.abs(g))) > 0.0
+    d = onp.random.RandomState(42).randn(*onp.asarray(g).shape)
+    d = np.asarray(d / d.std(), dtype=flat[key].dtype)
+    ana = float(np.sum(g * d))
+    rels = []
+    for h in (1e-1, 1e-2, 1e-3, 1e-4):
+        fd = (loss_of(flat[key] + h * d) - loss_of(flat[key] - h * d)) / (2 * h)
+        rels.append(abs(ana - fd) / max(abs(fd), 1e-12))
+    # converging: the best of the ladder must be tight, and refining from the
+    # coarsest step must improve it
+    assert min(rels) < 1e-6, list(zip((1e-1, 1e-2, 1e-3, 1e-4), rels))
+    assert rels[1] < rels[0], list(zip((1e-1, 1e-2, 1e-3, 1e-4), rels))
