@@ -1778,12 +1778,15 @@ Seed 100, ten epochs, five arms, `d07380c`, `TIMESCALE_STATUS=PASS`, 657 s of
 94.60 %, `gp_rho_T_fixed` 94.29 %, `gp_rho_T` 94.26 %, `native_s5` 94.17 %. The
 three controls reproduce the earlier batch exactly.
 
-**Learning a per-mode response timescale changed the endpoint by -0.035 pp**,
-and the freedom was genuinely exercised rather than left idle: `T` rose from
-the declared 5.000 to layer medians of 4.95-5.57 with a per-mode spread up to
-2.65, never touching its `[0.05, 500]` guardrails, while the frozen arm held
-`T` at exactly 5.0000 with a zero update norm. Both generalized arms finished
-behind the matched ordinary substrate (-0.3 pp) and Rawat (-0.7 pp), carrying
-twice the state. One seed: a development screen, not a robust effect.
+**Learning a per-mode response timescale left performance essentially
+unchanged** - `-0.035` pp of endpoint accuracy, with a slightly lower endpoint
+cross entropy - and the freedom was genuinely exercised rather than left idle:
+`T` drifted from the declared 5.000 to layer medians of 4.95-5.57, with
+reversals, and a per-mode spread up to 2.65, never touching its `[0.05, 500]`
+guardrails, while the frozen arm held `T` at exactly 5.0000 with a zero update
+norm. Both generalized arms finished behind the matched ordinary substrate
+(-0.3 pp) and Rawat (-0.7 pp). They double the ordinary S5 carry (256 against
+128 real coordinates); Rawat also totals 256, as 128 physical plus a 128-real
+input buffer. One seed: a development screen, not a robust effect.
 
 See [`docs/LEARNED_RESPONSE_TIMESCALE_REPORT.md`](LEARNED_RESPONSE_TIMESCALE_REPORT.md).
