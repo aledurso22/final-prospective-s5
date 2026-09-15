@@ -68,9 +68,33 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
 
 #: the two constrained learned response leaves, and nothing else
 RESPONSE_PARAM_NAMES = ("log_response_gamma", "log_response_rho")
-#: declared numerical admissibility bounds, fixed BEFORE any score
+#: Declared numerical admissibility bounds.
+#:
+#: AMENDED 2026-09-15 from a MEASUREMENT, before any training and before any
+#: validation score. The first declaration allowed rho down to 1e-4, which with
+#: gamma_n = 1e-2 gives a derived mass mu = T gamma_n rho = 5e-6. At that corner
+#: the block matrix exponential is NOT finite. Measured frontier, identical in
+#: float32 and float64, so it is stiffness and not precision
+#: (experiments/gp/constrained_numerics_probe.py):
+#:
+#:     mu      499.9  50   5    0.5   0.05   5e-3   5e-4*  5e-5   5e-6
+#:     finite  yes    yes  yes  yes   yes    yes    yes    yes    NO
+#:
+#: The smallest mu that worked was 5e-5; the largest that failed was 5e-6. The
+#: rho lower bound is therefore raised to 1e-2, which makes the WORST corner of
+#: the box mu = 5 * 1e-2 * 1e-2 = 5e-4, ten times the smallest measured-good mu
+#: and a hundred times the measured failure. gamma_n is unchanged: its extreme
+#: corner mu = 499.9 was measured finite.
+#:
+#: This is a numerical bound set from measurement, on the same principle as the
+#: second-order prototype's MU_RATIO_MIN. It is NOT a physiological claim and
+#: it was NOT chosen to improve a score. It still leaves mu free over more than
+#: three decades below its initial value of 3.75.
 GAMMA_N_BOUNDS = (1e-2, 1e2)
-RHO_BOUNDS = (1e-4, 1.0 - 1e-4)
+RHO_BOUNDS = (1e-2, 1.0 - 1e-4)
+#: measured, for the record and for the tests
+MEASURED_SMALLEST_FINITE_MU = 5e-5
+MEASURED_LARGEST_NONFINITE_MU = 5e-6
 LOG_GAMMA_BOUNDS = (math.log(GAMMA_N_BOUNDS[0]), math.log(GAMMA_N_BOUNDS[1]))
 LOG_RHO_BOUNDS = (math.log(RHO_BOUNDS[0]), math.log(RHO_BOUNDS[1]))
 

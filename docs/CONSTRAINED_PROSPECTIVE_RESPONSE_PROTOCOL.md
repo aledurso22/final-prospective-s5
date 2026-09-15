@@ -77,10 +77,42 @@ test, not assumed).
 gamma_n = exp(eta),  eta  init 0          rho = exp(zeta), zeta init log(0.75)
 ```
 
-**Declared numerical admissibility bounds, fixed before any score and not
-swept:** `1e-2 <= gamma_n <= 1e2`, `1e-4 <= rho <= 1 - 1e-4`. These are
-numerical design choices, **not** physiological measurements and **not**
-numbers from NLA.
+**Declared numerical admissibility bounds, not swept:**
+`1e-2 <= gamma_n <= 1e2`, `1e-2 <= rho <= 1 - 1e-4`. These are numerical design
+choices, **not** physiological measurements and **not** numbers from NLA.
+
+**AMENDMENT, 15 September 2026, from a measurement, before any training and
+before any validation score.** The first declaration allowed `rho` down to
+`1e-4`. With `gamma_n = 1e-2` that gives a derived mass `mu = 5e-6`, and at
+that corner the block matrix exponential is **not finite** — caught by the
+boundary test in the first cluster check run, which correctly stopped the batch
+before training. The measured frontier
+(`experiments/gp/constrained_numerics_probe.py`), **identical in float32 and
+float64**, so this is stiffness rather than precision:
+
+| mu | 499.9 | 50 | 5 | 0.5 | 0.05 | 5e-3 | 5e-4 | 5e-5 | 5e-6 |
+|---|---|---|---|---|---|---|---|---|---|
+| value and gradient finite | yes | yes | yes | yes | yes | yes | yes | **yes** | **NO** |
+
+Smallest `mu` measured finite: `5e-5`. Largest measured non-finite: `5e-6`. The
+`rho` lower bound is therefore raised to `1e-2`, putting the **worst corner** of
+the box at `mu = 5 * 1e-2 * 1e-2 = 5e-4` — ten times the smallest measured-good
+value and a hundred times the measured failure. `gamma_n` is unchanged; its
+extreme corner `mu = 499.9` was measured finite. The box still leaves the mass
+free over three decades below its initial `3.75`.
+
+This bound was set **from measurement**, on the same principle as the
+second-order prototype's `MU_RATIO_MIN`. It was not chosen to improve a score,
+and the excluded corner is kept as a regression test asserting it really is
+non-finite, so the bound stays a measured limit rather than unnecessary
+caution.
+
+**Gradient correctness was checked, not assumed.** The same probe compared the
+analytic directional derivative against central differences at six step sizes
+in float64: the relative error falls `8.9e-3 -> 8.0e-4 -> 9.4e-5 -> 1.9e-5` as
+the step shrinks and rises again at `1e-4` where rounding dominates, for both
+leaves. That is the signature of a CORRECT gradient with an O(h^2) finite
+difference, not of a dropped term.
 
 * forward safety guard: raw logs are **clipped before exponentiation**;
 * projection policy: after every optimizer update the raw leaves are clipped

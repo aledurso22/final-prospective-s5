@@ -262,9 +262,9 @@ def test_projection_pulls_raw_leaves_back_into_the_interval():
     assert float(out["B"][0]) == 123.0          # other leaves untouched
 
 
-@pytest.mark.parametrize("g_n,rho", [(1.0, 0.75), (1e-2, 1e-4),
+@pytest.mark.parametrize("g_n,rho", [(1.0, 0.75), (1e-2, 1e-2),
                                      (1e2, 1 - 1e-4), (1e-2, 1 - 1e-4),
-                                     (1e2, 1e-4)])
+                                     (1e2, 1e-2)])
 def test_matrix_exponential_and_derivative_finite_at_interior_and_boundary(
         g_n, rho):
     P, H = 4, 3
@@ -327,6 +327,39 @@ def test_response_is_one_scalar_pair_per_STORED_mode():
     p = mod.init(jax.random.PRNGKey(0), x)["params"]
     for name in RESPONSE_PARAM_NAMES:
         assert p[name].shape == (kw["P"],), (name, p[name].shape)
+
+
+def test_the_declared_box_keeps_the_derived_mass_above_the_measured_floor():
+    """The bound exists because of a MEASURED breakdown, not a guess.
+
+    Worst corner of the declared box must sit an order of magnitude above the
+    smallest mu measured finite, and two above the largest measured
+    non-finite.
+    """
+    from s5.rawat_s5 import (MEASURED_LARGEST_NONFINITE_MU,
+                             MEASURED_SMALLEST_FINITE_MU)
+    worst_mu = CR.T_HORIZON * GAMMA_N_BOUNDS[0] * RHO_BOUNDS[0]
+    assert worst_mu == pytest.approx(5e-4, rel=1e-9)
+    assert worst_mu >= 10 * MEASURED_SMALLEST_FINITE_MU
+    assert worst_mu >= 100 * MEASURED_LARGEST_NONFINITE_MU
+    # and the box still leaves the mass free over three decades below init
+    assert worst_mu < 3.75 / 1000
+
+
+def test_the_excluded_corner_really_is_non_finite():
+    """Guards the guard: if mu = 5e-6 were fine, the bound would be
+    unnecessary caution rather than a measured limit. Recorded as a known
+    numerical limitation of the block exponential at extreme stiffness."""
+    P, H = 4, 3
+    rs = onp.random.RandomState(8)
+    a = np.asarray(-onp.exp(rs.uniform(-3, -1, P)) + 1j * rs.uniform(-2, 2, P))
+    b = np.asarray(rs.randn(P, H) + 1j * rs.randn(P, H))
+    x = np.asarray(rs.randn(10, H))
+    z = mass_block_zoh(a, b, 5.0, 1e-2 * np.ones(P), 1e-4 * np.ones(P))
+    val = float(np.sum(np.abs(mass_scan(z["A_bar"], z["B_bar"], x)) ** 2))
+    assert not onp.isfinite(val), (
+        "mu = 5e-6 is finite after all; the measured bound would need "
+        "re-deriving rather than keeping")
 
 
 def test_parameter_count_is_the_declared_128_added_at_production_shape():
