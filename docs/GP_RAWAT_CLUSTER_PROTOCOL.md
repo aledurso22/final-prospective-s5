@@ -150,7 +150,34 @@ alone is not asserted to establish equal representation or compute.
 * If the full physical candidate loses while `M = 0` wins, only the
   reduced-model outcome is claimed.
 
-## 9. Cluster commands
+## 9. Verified cluster environment
+
+Recorded from `cluster_status.sh` on 15 September 2026, before any run:
+
+| item | value |
+|---|---|
+| host | `pgi15-gpu3.iff.kfa-juelich.de` |
+| SLURM job | 65870 |
+| visible GPUs | `0` (single-device allocation) |
+| JAX backend | **gpu**, `CudaDevice(id=0)` |
+| jax / flax / optax / scipy | 0.11.0 / 0.12.8 / 0.2.8 / 1.18.1 |
+| torch / torchaudio | 2.14.0+cpu / 2.11.0+cpu (MFCC extraction only) |
+| interpreter | `/Local/durso/prospective_ssm_project/.venv/bin/python` |
+
+**Version drift from the development machine is recorded, not corrected:**
+local jax 0.11.1 and flax 0.12.9 versus cluster jax 0.11.0 and flax 0.12.8.
+The shared environment is used as-is. Every run's `provenance()` stores the
+versions it actually ran under.
+
+**Single GPU is the declared configuration.** At 35,050 parameters, width 32,
+sequence 161 and batch 32, full-BPTT activations are on the order of megabytes;
+the run is launch-overhead bound, not memory or FLOP bound. Sharding batch 32
+across devices would also change per-device batch-normalization statistics,
+which are part of the published recipe. If several GPUs are free, the supported
+use is **one whole run per GPU** (different arm or seed), which changes no
+recipe — noting that the GPU-hour caps in s4 and s5 are summed across devices.
+
+## 10. Cluster commands
 
 Short, one line each. Run in order. Nothing below has been executed.
 
@@ -161,7 +188,10 @@ git -C /Local/durso/final-prospective-s5 fetch origin && git -C /Local/durso/fin
 bash /Local/durso/final-prospective-s5/bin/run_experiments/cluster_status.sh
 ```
 ```bash
-DATA_ROOT=/path/to/speech_commands_v0.02 bash /Local/durso/final-prospective-s5/bin/run_experiments/cluster_prepare_data.sh
+bash /Local/durso/final-prospective-s5/bin/run_experiments/cluster_fetch_data.sh
+```
+```bash
+DATA_ROOT=/Local/durso/speech_commands_v0.02 bash /Local/durso/final-prospective-s5/bin/run_experiments/cluster_prepare_data.sh
 ```
 ```bash
 bash /Local/durso/final-prospective-s5/bin/run_experiments/cluster_gpu_checks.sh
