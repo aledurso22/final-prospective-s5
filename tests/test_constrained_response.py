@@ -401,6 +401,30 @@ def test_prospective_recurrence_carries_no_response_leaves():
     assert not (set(p) & set(RESPONSE_PARAM_NAMES))
 
 
+def test_arm_state_counts_works_for_EVERY_arm_in_the_batch():
+    """Regression: the professor arm's state_counts carries a descriptive
+    note, and arm_state_counts int()-ed every value, so the preflight crashed
+    on the SECOND arm after the first had already passed. Exercise the actual
+    entry-point helper for every arm this batch runs."""
+    from experiments.gp.rawat_benchmark import arm_state_counts
+
+    class A:
+        pass
+    for arm in ("gp_learned_response", "prospective_recurrence",
+                "gp_fixed_mass", "alpha_p_s5", "gain_clip_s5", "native_s5"):
+        a = A()
+        a.arm, a.d_model, a.ssm_size, a.n_layers = arm, 16, 16, 2
+        c = arm_state_counts(a)
+        assert c["n_layers"] == 2
+        assert isinstance(c["physical_real"], int), (arm, c)
+        assert isinstance(c["total_real"], int), (arm, c)
+        if arm == "prospective_recurrence":
+            assert c["total_real"] == 0
+            assert isinstance(c.get("note"), str)
+        else:
+            assert c["physical_real"] > 0, arm
+
+
 # ------------------------------------------------------- 8. policy and dtypes
 def test_response_policy_allows_only_the_new_arm_to_learn():
     from experiments.gp.rawat_benchmark import assert_response_policy

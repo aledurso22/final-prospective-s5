@@ -284,10 +284,17 @@ def arm_state_counts(args):
     def read(mm):
         return mm.encoder.layers[0].seq.state_counts()
     per_layer = m.apply(v, method=read)
-    return {k: (int(x) * args.n_layers if k != "previous_input_buffer"
-                else int(x) * args.n_layers)
-            for k, x in per_layer.items()} | {"per_layer": per_layer,
-                                              "n_layers": args.n_layers}
+    # Only NUMERIC entries scale with depth. A layer's state_counts may also
+    # carry descriptive entries - the prospective-recurrence arm reports why it
+    # is memoryless - and int()-ing those crashed the preflight on the second
+    # arm. Non-numeric entries are passed through unscaled.
+    scaled = {}
+    for k, x in per_layer.items():
+        if isinstance(x, (bool, str)) or x is None:
+            scaled[k] = x
+        else:
+            scaled[k] = int(x) * args.n_layers
+    return scaled | {"per_layer": per_layer, "n_layers": args.n_layers}
 
 
 def main():
