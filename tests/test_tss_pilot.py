@@ -503,17 +503,14 @@ def test_forward_sensitivities_and_finite_differences_confirm_the_reference():
                                      - onp.asarray(fwd[b])))) < FWDREV, b
     rs = onp.random.RandomState(13)
     for b in ("W1", "W2", "z0_1", "z0_2"):
-        v = rs.randn(*onp.asarray(params[b]).shape)
-        v /= onp.linalg.norm(v)
-        h = 1e-6
-        pp = dict(params); pp[b] = params[b] + h * v
-        pm = dict(params); pm[b] = params[b] - h * v
-        num = (float(PB.batch_loss(pp, xs, ys, d1, d2, coef))
-               - float(PB.batch_loss(pm, xs, ys, d1, d2, coef))) / (2 * h)
-        ana = float(onp.sum(onp.asarray(rev[b]) * v))
-        rel = abs(num - ana) / max(abs(ana), 1e-12)
-        print(f"  finite difference {b}: rel {rel:.3e}")
-        assert rel < FD, (b, rel, num, ana)
+        # the SAME helper the runner gates on: a declared step ladder, best
+        # agreement, with an absolute fallback for near-zero directions
+        r = PB.fd_check(params, xs, ys, coef, rev, b, rs)
+        print(f"  finite difference {b}: |dL|={r['directional_derivative']:.3e}"
+              f"  best h={r['best_step']:.0e}  rel={r['relative']:.3e}"
+              f"  abs={r['absolute']:.3e}  floor="
+              f"{min(x['rounding_floor'] for x in r['ladder']):.3e}")
+        assert r["passed"], r
 
 
 def test_loss_change_uses_the_SAME_objective_the_gradient_came_from():

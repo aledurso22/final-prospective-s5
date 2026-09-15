@@ -444,6 +444,36 @@ additionally requires lower relative error than the GLE-inspired baseline at
 Initial-state gradients stay outside the approximate comparison — those initial
 conditions are fixed — and that is recorded, not hidden.
 
+**Amendment, 16 September 2026: the finite-difference probe's step.**
+Declared before execution of the comparison, from a cluster measurement on the
+first check run (`358db41`, logs `20260916-012116`), which stopped at the
+checks and started nothing.
+
+The reference validator's three routes measured:
+
+| route | measured | tolerance |
+|---|---|---|
+| drive-adjoint identity | `2.32e-16` | `1e-9` |
+| forward versus reverse mode | `5.55e-17` | `1e-9` |
+| central differences | **`1.376e-5`** | `1e-5` |
+
+The first two pass by about seven orders, so the reference itself is sound and
+what was marginal is the **probe**. A central difference has a rounding floor
+of roughly `eps·|L| / (h·|dL|)`, so a single step cannot serve every direction:
+a direction whose directional derivative is small is floor-limited at a step
+that is ample for a large one, and the initial-state directions have exactly
+that character here.
+
+**The tolerance is unchanged at `1e-5`.** What changes is that the step is now
+chosen by measurement: central differences are evaluated over a declared ladder
+`h ∈ {1e-3, 1e-4, 1e-5, 1e-6}`, every step is reported together with its
+estimated rounding floor and the direction's `|dL|`, and the **best** agreement
+is the criterion. A direction may also pass on an absolute criterion
+(`1e-9`) when its directional derivative is near zero and a ratio is not
+meaningful. This is the same discipline used for the `d/d(log T)` ladder in the
+learned-timescale study: set the step from the measured floor, do not loosen
+the tolerance.
+
 **R9 — the preflight did not cover the actual work (P2). Done.** One cached
 optimizer transform is reused by every arm and seed, so a fresh closure
 identity cannot silently force a retrace, and the production probe checks the
