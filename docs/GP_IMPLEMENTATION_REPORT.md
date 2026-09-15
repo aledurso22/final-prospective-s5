@@ -1670,3 +1670,32 @@ Two distinct diagnoses, not one:
   while costing ~2.5x the epoch time and double the recurrent carry.
 
 No gradient pathology, normalization effect or implementation defect was found.
+
+## 12.14 Constrained learned response — executed, report linked
+
+The literature-analogous coefficient policy: keep the derived law and the fixed
+horizon `T = 5`, learn two constrained physical parameters per stored mode
+(`gamma_n`, `rho`) by full BPTT, derive the mass `mu = T gamma_n rho`. Executed
+on the cluster at commit `4848ee4`, `CONSTRAINED_STATUS=PASS`, artifacts
+`/Users/durso/s5-runs/constrained/20260915-193049/`.
+
+**Full findings: [`docs/CONSTRAINED_PROSPECTIVE_RESPONSE_REPORT.md`](CONSTRAINED_PROSPECTIVE_RESPONSE_REPORT.md).**
+
+**The predeclared screen FAILED and learning the response did not help.**
+`gp_learned_response` reached **94.21 %** against **94.26 %** for the same model
+with the response frozen (**-0.052 pp**, with 128 added parameters), -0.398 pp
+against the matched ordinary control and -0.795 pp against the Rawat reference.
+
+The response did move: median `gamma_n` 1.00 -> 0.853, median `rho`
+0.75 -> 0.840, `mu` spread 2.35-5.34 against a fixed 3.75, with **no mode at any
+declared bound** and the component identities holding on the trained values to
+`1.8e-15`. The two quantities moved in partly compensating directions, leaving
+the derived mass near its initial value.
+
+The professor control `prospective_recurrence` (`r + T r' = 0`, zero recurrent
+state, verified zero driven history) reached **84.85 %**, which bounds how much
+of this pooled task needs recurrent memory at all.
+
+30 focused GPU checks passed. Two earlier check failures were resolved by
+measurement before training — a bound declared too wide, and a probe that ran
+at TF32 default instead of production precision — with no tolerance loosened.
