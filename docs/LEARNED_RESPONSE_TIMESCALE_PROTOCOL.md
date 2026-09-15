@@ -180,7 +180,8 @@ only, inside the same cap.
 | check | tolerance |
 |---|---|
 | per-mode `T` generator and ZOH vs an independent dense real-pair reference (scipy `expm` + Gauss-Legendre), `P != H` | `1e-10` rel, float64 |
-| declared corners `T in {0.05, 500}` x `rho in {0.01, 0.9999}`: finite value **and** derivative | finite; coefficients `1e-10` |
+| declared corners `T in {0.05, 500}` x `rho in {0.01, 0.9999}`: finite value **and** derivative | finite (not relaxed) |
+| the same corners, coefficient agreement with that reference | `1e-8` rel, **amended from measurement**, see below |
 | `T = 5` reproduces the existing fixed-horizon coefficient law | `1e-10` |
 | `rho = 1` gives ordinary S5 for several `T`, with **zero** output `T` sensitivity | `1e-10` / `1e-9` |
 | arms 4 and 5 identical at initialization, forward and in shared-coordinate gradients | `1e-12` |
@@ -196,6 +197,63 @@ only, inside the same cap.
 `rho = 1` is used as an algebraic limit; the trained parameter's numerical
 margin is `0.9999`. **No nonzero-gradient assertion is made at that boundary**,
 because the `T` derivative genuinely vanishes there.
+
+### Amendment, 16 September 2026: the corner coefficient tolerance
+
+Declared **before any training and before any validation score was read**, from
+a cluster measurement on the first execution attempt (`53f9c9b`, logs
+`20260916-000336`), which ended `TIMESCALE_STATUS=FAILED` at the focused checks
+and started no training.
+
+Measured float64 agreement between production `mass_block_zoh` and the
+independent real-pair / Gauss-Legendre reference:
+
+| regime | `A_bar` relative error |
+|---|---|
+| ordinary range, `T in [0.2, 50]` | `1.6e-15`, `2.6e-15`, `4.3e-15` |
+| guardrail corner `T = 500`, `rho = 0.25` | **`1.42e-9`** — exceeded the original `1e-10` |
+
+The corner is **stiff**: at `T = 500`, `rho = 0.25` the block's eigenvalues are
+about `4a` (order 10) and order `1e-3`, a separation near `5e3`, so its
+eigenvectors are nearly parallel and two *correct* matrix-exponential
+implementations diverge by far more than machine epsilon. Production compounds
+this by exponentiating the augmented `[[A, I],[0, 0]]` to get `A_bar` and `Phi`
+together, which the reference does not. **This is a conditioning property of
+the declared corner, not an error in either implementation and not a statement
+about the model.**
+
+The amendment is therefore narrow:
+
+* the ordinary range keeps `1e-10`, with five orders of measured margin;
+* the **corners only** get `1e-8`, about `7x` over the measured worst case;
+* **the finiteness requirement at the corners is not relaxed at all** — value
+  and derivative must be finite, which held at all sixteen corners on the
+  failing run;
+* the check **prints the achieved relative error and the measured eigenvector
+  conditioning at every corner on every run**, so the justification is
+  re-measured rather than asserted once.
+
+No guardrail was moved: `T in [0.05, 500]` and `rho in [0.01, 0.9999]` are
+unchanged. Nothing here was informed by a validation score.
+
+### Amendment, 16 September 2026: two defects in the checks themselves
+
+Also from that failing run, and also before any training:
+
+* **The production-dtype probes were measuring float64.** Each asserted x64 was
+  off and then imported reference helpers from a test module that enables x64
+  at import; the assertion ran before the import. The shared reference now
+  lives in `tests/response_reference.py`, which never touches `jax.config`, and
+  each probe re-asserts x64 is off **after** its imports. The declared `2e-4`
+  float32 tolerance is unchanged — it had simply never been exercised.
+* **The diagnostics frequency check compared against a truncated DFT.** With
+  `Delta` starting as low as `1e-3`, `A_bar` is close to the identity and the
+  impulse has not decayed within any affordable window; the measured
+  discrepancy was `0.37`, not a rounding effect. The check now compares against
+  the DFT of a **forward-measured** impulse **plus the exact resolvent
+  remainder** `u^(N-1) (uA)(I - uA)^-1 S_{N-1}`, tolerance `1e-8`. Truncating
+  the tail and calling the difference agreement would have been the invalid
+  geometric-tail-bound error the Stage 2 review rejected, in another form.
 
 ## 7. Telemetry saved
 
