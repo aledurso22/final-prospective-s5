@@ -159,6 +159,29 @@ def test_the_ideal_control_has_NO_memory_and_the_others_do():
             assert later > 1e-6, (arm, later)
 
 
+def test_the_vectorized_fixed_point_equals_the_per_step_solve():
+    """R9 speed fix: identical mathematics, one matmul per iteration.
+
+    The per-timestep nesting made the memory arm 54x slower than the ODE arms
+    and the preflight correctly refused the batch. Solving every timestep
+    together is the same fixed point because it is independent at each step -
+    checked here rather than argued.
+    """
+    from s5.tss_cells import ideal_fixed_point
+    rs = onp.random.RandomState(31)
+    n, d, L = 12, 7, 9
+    cell = dict(W=project_contraction(jnp.asarray(rs.randn(n, n) / n ** 0.5)),
+                U=jnp.asarray(rs.randn(n, d) / d ** 0.5),
+                b=jnp.asarray(0.1 * rs.randn(n)))
+    es = jnp.asarray(rs.randn(L, d))
+    base = es @ cell["U"].T + cell["b"]
+    S, res = TM.fixed_point_over_time(cell["W"], base)
+    for t in range(L):
+        s_t, r_t = ideal_fixed_point(cell, es[t])
+        assert float(jnp.max(jnp.abs(S[t] - s_t))) < EXACT, t
+    assert float(res) < 1e-4
+
+
 def test_the_fixed_point_solve_converges_under_the_declared_cap():
     """The contraction cap is what makes the ideal arm's solution unique."""
     p = _cell(n=16, d_in=16, seed=4)
@@ -214,22 +237,28 @@ def test_the_memory_comparator_cannot_bypass_its_temporal_layer():
     holding the memory state fixed, the processing output must not depend on
     the current encoded input at all.
     """
+    import inspect
+    from s5.tss_cells import complex_memory_rollout
     arm = "tss_memory_then_prospective"
     p = TM.init_params(arm, 100)
-    sm = jnp.asarray(onp.random.RandomState(1).randn(2 * TM.UNITS[arm]))
-
-    def pros_out(e_t):
-        def it(st, _):
-            return (p["pros"]["W"] @ jnp.tanh(st)
-                    + p["pros"]["Vm"] @ sm + p["pros"]["b"]), None
-        st, _ = jax.lax.scan(it, jnp.zeros((TM.PROCESSING_UNITS,)), None,
-                             length=8)
-        return jnp.sum(st ** 2)
-
-    g = jax.grad(pros_out)(
-        jnp.asarray(onp.random.RandomState(2).randn(TM.D_ENC)))
-    assert float(jnp.max(jnp.abs(g))) == 0.0
+    # STRUCTURAL: the production processing stage has no encoded-input argument
+    names = list(inspect.signature(TM.processing_fixed_point).parameters)
+    assert names == ["p_pros", "sm", "iters"], names
     assert "Vx" not in p["pros"]
+    # and the executed arm really routes through it
+    cfg = TM.coefficients()
+    es = jnp.asarray(onp.random.RandomState(1).randn(20, TM.D_ENC))
+    prod, _ = TM.temporal(arm, p, es, cfg)
+    sm = complex_memory_rollout(p["mem"], es)
+    helper, _ = TM.processing_fixed_point(p["pros"], sm)
+    assert float(jnp.max(jnp.abs(prod - helper))) == 0.0
+    # BEHAVIOURAL: at frozen memory the processing output cannot move with the
+    # encoded input, so a perturbed input that leaves sm alone changes nothing
+    def out_from(sm_arg):
+        S, _ = TM.processing_fixed_point(p["pros"], sm_arg)
+        return jnp.sum(S ** 2)
+    g_sm = jax.grad(out_from)(sm)
+    assert float(jnp.max(jnp.abs(g_sm))) > 0.0, "memory must matter"
 
 
 def test_the_memory_comparator_is_independent_complex_linear_units():

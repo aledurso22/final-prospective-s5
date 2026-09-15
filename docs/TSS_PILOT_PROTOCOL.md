@@ -444,6 +444,31 @@ additionally requires lower relative error than the GLE-inspired baseline at
 Initial-state gradients stay outside the approximate comparison — those initial
 conditions are fixed — and that is recorded, not hidden.
 
+**Amendment, 16 September 2026: the fixed-point solves are vectorized over
+time.** Measured, not guessed: the first complete preflight (`e2432a9`, logs
+`20260916-012533`) reported
+
+```
+ideal_prospective            step    94.06 ms
+tss_finite_adaptation        step    27.00 ms
+tss_memory_then_prospective  step  1459.25 ms      <- 54x the ODE arms
+retained_compartment         step    26.98 ms
+PREFLIGHT_A_PROJECTED_TOTAL_S=1523.8
+```
+
+and refused to start Part A against 261 s remaining, without reducing any arm,
+seed or update count. The cause is structural rather than physical: both
+fixed-point arms solved their fixed point **per timestep**, nesting a
+40-iteration loop inside a 64-step scan inside the batch `vmap`, which is
+`64 x 40` sequential steps where 40 suffice.
+
+Both fixed points are **independent at each timestep** — the ideal control has
+no carry by construction, and the processing stage reads only the memory state
+at that step — so the whole time axis is now iterated together, one matmul per
+iteration. The mathematics is identical and a test checks it against the
+per-step solve at `1e-10`. **Nothing about the study was reduced**: same arms,
+seeds, updates, iteration count and tolerances.
+
 **Amendment, 16 September 2026: the finite-difference probe's step.**
 Declared before execution of the comparison, from a cluster measurement on the
 first check run (`358db41`, logs `20260916-012116`), which stopped at the

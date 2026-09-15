@@ -230,6 +230,38 @@ def parameter_count(p):
 
 
 # --------------------------------------------------------------- forward ---
+def fixed_point_over_time(W, base, iters=IDEAL_ITERS):
+    """Solve S = tanh(S) W^T + base for EVERY timestep at once.
+
+    Both fixed-point arms solve a fixed point that is INDEPENDENT at each
+    timestep - the ideal control has no carry by construction, and the memory
+    comparator's processing stage reads only the memory state at that step. So
+    the whole time axis can be iterated together with one matmul per iteration
+    instead of scanning the timesteps and nesting the iteration inside.
+
+    The mathematics is identical; the cost is not. The preflight measured
+    1459 ms per update for the memory arm and 94 ms for the ideal one under the
+    per-timestep nesting, against 27 ms for the two ODE arms, which projected
+    the batch to 1524 s and correctly refused to start. The nesting replaced
+    40 iterations with 64 x 40 sequential steps inside an outer vmap.
+    """
+    def it(S, _):
+        return jnp.tanh(S) @ W.T + base, None
+
+    S, _ = jax.lax.scan(it, jnp.zeros_like(base), None, length=iters)
+    residual = jnp.max(jnp.abs(jnp.tanh(S) @ W.T + base - S))
+    return S, residual
+
+
+def processing_fixed_point(p_pros, sm, iters=IDEAL_ITERS):
+    """The memory comparator's processing stage. Takes the MEMORY ONLY.
+
+    R2 is structural here: this function has no encoded-input argument, so
+    there is no path by which the current input could reach the readout
+    without passing through the memory.
+    """
+    return fixed_point_over_time(p_pros["W"],
+                                 sm @ p_pros["Vm"].T + p_pros["b"], iters)
 def encode(p, xs):
     return jnp.tanh(xs @ p["enc_W"].T + p["enc_b"])
 
@@ -246,11 +278,9 @@ def temporal(arm, p, es, cfg, n_sub=N_SUB, iters=IDEAL_ITERS):
     Returns (s_out (L, n_out), diagnostics).
     """
     if arm == "ideal_prospective":
-        def step(_, e):
-            s, r = ideal_fixed_point(p["cell"], e, iters)
-            return _, (s, r)
-        _, (ss, res) = jax.lax.scan(step, 0.0, es)
-        return ss, dict(fixed_point_residual=jnp.max(res))
+        base = es @ p["cell"]["U"].T + p["cell"]["b"]
+        ss, res = fixed_point_over_time(p["cell"]["W"], base, iters)
+        return ss, dict(fixed_point_residual=res)
 
     if arm == "tss_finite_adaptation":
         c = cfg["tss"]
@@ -274,18 +304,8 @@ def temporal(arm, p, es, cfg, n_sub=N_SUB, iters=IDEAL_ITERS):
         # added `Vx @ e_t`, a direct path from the current encoded input to the
         # readout, which let this arm alone reconstruct the fast signal with
         # its temporal layer ignored - exactly the bypass the protocol forbids.
-        def pros(sm_t):
-            def it(s, _):
-                return (p["pros"]["W"] @ jnp.tanh(s)
-                        + p["pros"]["Vm"] @ sm_t + p["pros"]["b"]), None
-            s = jnp.zeros((PROCESSING_UNITS,))
-            s, _ = jax.lax.scan(it, s, None, length=iters)
-            r = jnp.max(jnp.abs(p["pros"]["W"] @ jnp.tanh(s)
-                                + p["pros"]["Vm"] @ sm_t
-                                + p["pros"]["b"] - s))
-            return s, r
-        sp, res = jax.vmap(pros)(sm)
-        return sp, dict(fixed_point_residual=jnp.max(res))
+        sp, res = processing_fixed_point(p["pros"], sm, iters)
+        return sp, dict(fixed_point_residual=res)
 
     raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
 
