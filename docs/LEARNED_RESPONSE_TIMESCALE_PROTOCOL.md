@@ -236,6 +236,45 @@ The amendment is therefore narrow:
 No guardrail was moved: `T in [0.05, 500]` and `rho in [0.01, 0.9999]` are
 unchanged. Nothing here was informed by a validation score.
 
+### Amendment, 16 September 2026: the preflight's evaluation projection
+
+The second execution attempt (`cce550b`, logs `20260916-002141`) passed all 58
+focused checks and then **refused to start training**:
+
+```
+[preflight] native_s5    compile 13.4s  step 1.99ms  epoch 1.7s  val 43.7s  arm 467.3s
+[preflight] gp_rho_T     compile 16.5s  step 7.17ms  epoch 6.0s  val 60.9s  arm 686.4s
+PREFLIGHT_PROJECTED_TOTAL_S=2790.1
+[!] projected 2790s > remaining 856s; comparative training NOT started.
+```
+
+The refusal behaved exactly as designed — no epoch, arm or control was reduced
+and the cap was not widened — but **the projection was wrong**, and the fault
+was in the preflight, not in the experiment.
+
+The evaluation cost was measured with a single 512-sample call and scaled by
+`n_val / 512`. That call includes the one-off **evaluation compile**, so the
+scaling multiplied a roughly 4 s compile by about 11 and reported `val 43.7s`
+*per epoch*. The measured per-epoch training cost tells the real story: 1.7 s
+for the ordinary arms and 6.0 s for the block arms, against a claimed 43-61 s
+of validation on about 5,700 sequences through the same model. Validation is
+cheaper than an epoch here, not twenty-five times more expensive.
+
+Two fixes, both in `experiments/gp/timescale_study.py`:
+
+* evaluation compile and steady-state cost are now timed **separately**, the
+  compile counted once per arm and only the steady cost scaled by split size;
+* `evaluate_split` pads the ragged final batch to a fixed shape behind a mask,
+  so exactly one evaluation program compiles per arm.
+
+The unbatched read-only module view is also cached; it was reconstructed for
+every layer of every per-epoch response snapshot.
+
+With the corrected accounting the same measured numbers project to roughly
+300 s of training against the 856 s that were available. **No timing was
+assumed** — the corrected preflight re-measures on the next run and refuses
+again if it does not fit.
+
 ### Amendment, 16 September 2026: two defects in the checks themselves
 
 Also from that failing run, and also before any training:
@@ -282,7 +321,9 @@ combined batch has not started and its launcher refuses to run unless
 explicitly re-authorized.
 
 The preflight measures compile and step cost for **all five arms** and projects
-the whole batch including per-epoch validation and the host-side gate. If the
+the whole batch including per-epoch validation and the host-side gate.
+Training compilation, **evaluation compilation** and the steady-state
+evaluation pass are measured separately: see the amendment below. If the
 batch does not fit, the projection is reported and **comparative training does
 not start**: no epoch, arm or control is reduced and the cap is not widened.
 Execution status (`PASS` / `INCOMPLETE` / `FAILED`) is reported separately from

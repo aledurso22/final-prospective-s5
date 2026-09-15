@@ -94,8 +94,22 @@ def build(arm, training):
     return _MODEL_CACHE[key]
 
 
+_SINGLE_CACHE = {}
+
+
 def build_single(arm):
-    """UNBATCHED view for `method=` reads; `nn.vmap` cannot map non-arrays."""
+    """UNBATCHED view for `method=` reads; `nn.vmap` cannot map non-arrays.
+
+    Cached: the per-epoch response snapshots read four layers for two arms
+    every epoch, and reconstructing the module each time re-runs `setup` on
+    every call for no benefit.
+    """
+    if arm not in _SINGLE_CACHE:
+        _SINGLE_CACHE[arm] = _make_single(arm)
+    return _SINGLE_CACHE[arm]
+
+
+def _make_single(arm):
     return RawatClassifier(
         ssm=init_substrate_ssm(arm, physical=SYMMETRIC_REFERENCE,
                                **RB.ssm_kwargs(D_MODEL, SSM_SIZE)),
@@ -216,25 +230,41 @@ def train_step(model, tx, params, opt_state, batch_stats, x, y, rng):
 
 
 @partial(jax.jit, static_argnums=(0,))
-def eval_batch(model, params, batch_stats, x, y):
+def eval_batch(model, params, batch_stats, x, y, mask):
+    """`mask` zeroes the padded rows of a ragged final batch.
+
+    It is a traced argument, so every evaluation batch has the SAME shape and
+    the evaluation program compiles exactly once per arm. A ragged final batch
+    would otherwise compile a second program on the first epoch and again
+    whenever the split size changed.
+    """
     variables = {"params": params}
     if batch_stats is not None:
         variables["batch_stats"] = batch_stats
     logits = model.apply(variables, x, jnp.ones(x.shape[:2]), None)
-    correct = jnp.sum(jnp.argmax(logits, -1) == y)
+    correct = jnp.sum((jnp.argmax(logits, -1) == y) * mask)
     ce = jnp.sum(optax.softmax_cross_entropy(
-        logits, jax.nn.one_hot(y, RB.D_OUTPUT)))
-    return correct, ce, y.shape[0]
+        logits, jax.nn.one_hot(y, RB.D_OUTPUT)) * mask)
+    return correct, ce, jnp.sum(mask)
 
 
 def evaluate_split(model, params, batch_stats, X, Y, batch=256):
-    correct, ce, seen = 0, 0.0, 0
-    for i in range(0, X.shape[0], batch):
-        xb = jnp.asarray(onp.asarray(X[i:i + batch]))
-        yb = jnp.asarray(Y[i:i + batch])
-        c, l, m = eval_batch(model, params, batch_stats, xb, yb)
-        correct += int(c); ce += float(l); seen += int(m)
-    return dict(accuracy=correct / seen, cross_entropy=ce / seen, n=seen)
+    """Score a split at a FIXED batch shape, padding the final batch."""
+    correct, ce, seen = 0.0, 0.0, 0.0
+    n = X.shape[0]
+    for i in range(0, n, batch):
+        xb = onp.asarray(X[i:i + batch]); yb = onp.asarray(Y[i:i + batch])
+        m = xb.shape[0]
+        mask = onp.zeros((batch,), dtype=onp.float32)
+        mask[:m] = 1.0
+        if m < batch:
+            pad = batch - m
+            xb = onp.concatenate([xb, onp.repeat(xb[-1:], pad, 0)], 0)
+            yb = onp.concatenate([yb, onp.repeat(yb[-1:], pad, 0)], 0)
+        c, l, k = eval_batch(model, params, batch_stats, jnp.asarray(xb),
+                             jnp.asarray(yb), jnp.asarray(mask))
+        correct += float(c); ce += float(l); seen += float(k)
+    return dict(accuracy=correct / seen, cross_entropy=ce / seen, n=int(seen))
 
 
 # ------------------------------------------------------- response reading --
@@ -529,26 +559,44 @@ def preflight(data, steps_per_epoch, epochs, seed, status):
             q, o2, b2, loss, _, _, _ = train_step(m, tx, q, o2, b2, xb, yb, rng)
         loss.block_until_ready()
         step_s = (time.time() - t1) / 3
+        # Evaluation: the COMPILE is a one-off and the per-sample cost is not.
+        # Timing one 512-sample call and scaling it by n_val/512 multiplies the
+        # evaluation compile by that same factor. On the first attempt that
+        # turned a ~4 s compile into a claimed 43.7 s per epoch, projected
+        # 2,790 s and refused a batch that in fact fits. The two are now
+        # measured separately.
+        eval_model = build(arm, False)
         t2 = time.time()
-        evaluate_split(build(arm, False), p, bs, Xva[:512], Yva[:512])
-        val_s = (time.time() - t2) * (Xva.shape[0] / 512.0)
-        arm_s = compile_s + epochs * (step_s * steps_per_epoch + val_s)
+        evaluate_split(eval_model, p, bs, Xva[:512], Yva[:512])
+        eval_compile_s = time.time() - t2
+        t3 = time.time()
+        evaluate_split(eval_model, p, bs, Xva[:512], Yva[:512])
+        val_steady_s = (time.time() - t3) * (Xva.shape[0] / 512.0)
+        arm_s = (compile_s + eval_compile_s
+                 + epochs * (step_s * steps_per_epoch + val_steady_s))
         total += arm_s
-        rows.append(dict(arm=arm, compile_s=compile_s, step_s=step_s,
-                         epoch_s=step_s * steps_per_epoch, val_pass_s=val_s,
-                         arm_total_s=arm_s))
-        print(f"[preflight] {arm:16s} compile {compile_s:6.1f}s  "
-              f"step {step_s * 1e3:6.2f}ms  epoch {step_s * steps_per_epoch:6.1f}s"
-              f"  val {val_s:5.1f}s  arm {arm_s:6.1f}s")
+        rows.append(dict(arm=arm, compile_s=compile_s,
+                         eval_compile_s=eval_compile_s, step_s=step_s,
+                         epoch_s=step_s * steps_per_epoch,
+                         val_pass_s=val_steady_s, arm_total_s=arm_s))
+        print(f"[preflight] {arm:16s} compile {compile_s:6.1f}s"
+              f" (+eval {eval_compile_s:5.1f}s)  step {step_s * 1e3:6.2f}ms  "
+              f"epoch {step_s * steps_per_epoch:6.1f}s  val {val_steady_s:5.2f}s"
+              f"  arm {arm_s:6.1f}s")
         del q, o2, b2, opt
-    host_s = 40.0        # initialization gate + per-epoch response snapshots
+    # initialization gate, the per-epoch response snapshots and checkpoint
+    # writes. Host-side and measured only as an allowance, not extrapolated.
+    host_s = 60.0
     total += host_s
     status["preflight"] = dict(
         rows=rows, epochs=epochs, arms=list(ARMS),
         host_allowance_s=host_s, projected_total_s=total,
-        scope=("compilation once per arm, plus every arm x epoch, the "
-               "per-epoch validation pass, the initialization gate and the "
-               "per-epoch response snapshots"))
+        scope=("training AND evaluation compilation once per arm, plus every "
+               "arm x epoch, the steady-state validation pass, the "
+               "initialization gate and the per-epoch response snapshots. "
+               "Evaluation compile and steady cost are measured SEPARATELY; "
+               "scaling a compile-dominated timing per sample is what made "
+               "the first attempt project 2790 s."))
     print(f"PREFLIGHT_PROJECTED_TOTAL_S={total:.1f}")
     return total
 
