@@ -405,3 +405,48 @@ wording.
 * **Literature gates.** Gated and Momentum DeltaNet coefficient reports now
   save gate distributions on validation inputs, using the completed study's
   gate reporter.
+
+
+## 13. Guard corrections — review of `f13295c` (pre-execution)
+
+Source: `META_DELTA_REVIEW_f13295c_2026_09_16.md`. No equation,
+initialization, tolerance, arm, data, schedule or cap change.
+
+### F1 — finite before resolution, in the float32 probe
+
+* **Trajectory errors.** Before any trajectory error is aggregated, the probe
+  rejects non-finite executed coefficients, `G`, `F`, `a0`, `W` and `Z`, and a
+  non-finite float64 reference `W` or `Z`. Both carries, `W` and `Z`, are
+  compared with the reference at the unchanged `TRAJ32 = 2e-5`.
+  `update_worst` turns a NaN error into `+inf` instead of letting `max()`
+  discard it.
+* **Tangent decisions.** Every tangent decision (actual start and wider
+  interior) first requires a finite loss, JVP, perturbed losses, FD values and
+  errors. Only a **finite** derivative below the resolvability threshold
+  receives the reported limitation; non-finite arithmetic is a failure.
+* **Model outputs.** The wider-interior model probe checks logits and final
+  carries for finiteness as well as dtype.
+* **Guard regressions.** Lightweight regressions inject a NaN trajectory
+  error, a NaN JVP and a non-finite perturbed loss, and require each to be
+  rejected.
+
+### F2 — rounded zero idle decay is legitimate
+
+The executed idle factor `a0 = exp(−h/τ)` must now be finite, of the executed
+dtype, and satisfy `0 ≤ a0 ≤ 1`. The previous condition was `0 < a0`. Strict
+positivity of `η`, `τ`, `ρ`, `γ`, `M` and `T` is kept, as are the
+production-generator and certificate checks. A regression covers
+`η = 1`, `ρ = 1`, `τ = 1e-3`, where `exp(−1000)` rounds to 0 and the point is
+accepted. The exponential is neither altered nor clamped.
+
+### Scope clarification (reporting)
+
+* **Actual-start float32 block.** In the float32 probe, the actual initialized
+  tree (gate zero, `ρ = 1`, `τ = 1`) is checked for **tangents only**: the
+  `raw_r` directional derivative and the vanishing `raw_tau` derivative.
+* **float32 nesting.** The float32 **value and shared-gradient nesting** check
+  still uses the nonzero-gate **stress fixture**.
+* **Actual-start float64 check.** It covers **both** nesting (value and shared
+  gradients) and the tangents.
+* **Correction to `f13295c`.** That commit's message overstated the float32
+  actual-start coverage; this section records the precise scope.

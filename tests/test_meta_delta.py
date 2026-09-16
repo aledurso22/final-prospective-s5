@@ -360,6 +360,20 @@ def test_zero_or_nonfinite_executed_scalars_fail_without_raising():
         assert rep["passed"] is False and "failed" in rep, rep
 
 
+def test_rounded_zero_idle_decay_is_accepted():
+    """Review F2: eta = 1, rho = 1, tau = 1e-3 in float32. The coefficients
+    are finite and positive and the generator is finite, while
+    exp(-1/tau) = exp(-1000) rounds to ZERO. That is rapid relaxation, not an
+    invalid coefficient, and must be accepted."""
+    p = dict(raw_eta=jnp.asarray([0.0], onp.float32),
+             raw_tau=jnp.asarray([math.log(1e-3)], onp.float32),
+             raw_r=jnp.asarray([0.0], onp.float32))
+    rep = MD.domain_report(p)
+    assert rep["idle_coefficient_a0"] == 0.0, rep
+    assert rep["idle_coefficient_finite"] is True, rep
+    assert rep["generator_finite"] is True and rep["passed"] is True, rep
+
+
 def test_report_keeps_executed_and_certificate_values_separate():
     p = dict(raw_eta=jnp.asarray([-0.1], onp.float32),
              raw_tau=jnp.asarray([0.0], onp.float32),

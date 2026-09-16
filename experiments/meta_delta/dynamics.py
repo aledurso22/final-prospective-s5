@@ -164,7 +164,8 @@ def domain_report(p):
         any division, instead of raising while diagnosing it;
       * the PRODUCTION `two_sided_generator` is formed in the executed dtype at
         the permitted gate endpoints w = 0 and w = L, and its entries must be
-        finite, as must the executed idle coefficient a0 = exp(-h/tau);
+        finite; the executed idle coefficient a0 = exp(-h/tau) must be finite
+        and in [0, 1] (zero is legitimate rounded rapid relaxation, F2);
       * the side of M = gamma T and the sufficient switching certificate are
         then evaluated in float64. Arithmetic checks and certificate are
         reported separately. Nothing is clamped.
@@ -193,7 +194,11 @@ def domain_report(p):
         if G.dtype != onp.dtype(dtype) or not onp.all(onp.isfinite(G)):
             gen_ok = False
     a0 = onp.asarray(jnp.exp(-H / tau))
-    a0_ok = bool(onp.isfinite(a0) and 0.0 < float(a0) <= 1.0
+    # review F2 (f13295c): exp(-h/tau) may correctly round to ZERO for a
+    # finite positive tau (rapid relaxation, e.g. tau = 1e-3). That is not an
+    # invalid coefficient, so the executed idle factor needs only to be finite,
+    # of the executed dtype, and in [0, 1]. Nothing is clamped.
+    a0_ok = bool(onp.isfinite(a0) and 0.0 <= float(a0) <= 1.0
                  and a0.dtype == onp.dtype(dtype))
     rep.update(generator_finite=bool(gen_ok), idle_coefficient_a0=float(a0),
                idle_coefficient_finite=a0_ok)

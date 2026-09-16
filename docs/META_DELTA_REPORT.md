@@ -1,7 +1,12 @@
 # Generalized prospective memory around the delta boundary — report
 
-**Status: prepared and amended per review of `535fb02` (protocol §12); not
-executed.** No local numerical run, no cluster launch.
+**Status: prepared, amended per reviews of `535fb02` (protocol §12) and
+`f13295c` (§13); authorized for one cluster launch; not yet executed.**
+
+Check scope, stated precisely: the actual initialized tree is checked for
+value/shared-gradient nesting AND tangents in float64; in the float32 probe it
+is checked for tangents only, while float32 value/shared-gradient nesting uses
+the nonzero-gate stress fixture. No local numerical run, no cluster launch.
 Every result section will be filled only from cluster output.
 
 Proof audit: `docs/META_DELTA_PROOF_AUDIT.md` (no algebraic discrepancy found;

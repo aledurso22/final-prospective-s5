@@ -131,6 +131,59 @@ for dx in (1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 3e-7, 1.5e-7):
 print(f"  projection edge x -> 1+: {n_edge} points checked")
 
 
+# ---- finite-before-resolution guards (review F1, f13295c) ----------------
+def all_finite(*arrs):
+    return all(bool(onp.all(onp.isfinite(onp.asarray(a, onp.float64))))
+               for a in arrs)
+
+
+def update_worst(worst, err):
+    """Aggregate an error WITHOUT letting a NaN be discarded by max():
+    a non-finite error makes the aggregate +inf, which fails any tolerance."""
+    if not onp.isfinite(err):
+        return float("inf")
+    return max(worst, err)
+
+
+def tangent_decision(label, jvp, fval, perturbed, rel_tol=None):
+    """Decide a directional-derivative check in the declared order:
+    (1) every loss, perturbed loss, JVP, FD and error must be FINITE, else a
+        failure - non-finite arithmetic is never "not resolvable";
+    (2) only a FINITE derivative below the resolvability threshold receives
+        the reported limitation;
+    (3) otherwise each declared step must meet the relative tolerance.
+    `perturbed` maps h -> (f(x + h), f(x - h)). Returns (failures, limited)."""
+    rel_tol = REL32 if rel_tol is None else rel_tol
+    out = []
+    fds = {h: (fp - fm) / (2 * h) for h, (fp, fm) in perturbed.items()}
+    errs = {h: abs(jvp - fd) / max(abs(fd), 1e-30) for h, fd in fds.items()}
+    if not all_finite(jvp, fval, [v for pair in perturbed.values()
+                                  for v in pair], list(fds.values()),
+                      list(errs.values())):
+        return [f"{label}: non-finite loss, JVP, perturbed loss, FD or error "
+                f"(jvp={jvp}, f={fval}, perturbed={perturbed})"], False
+    thr = 100 * eps32 * max(abs(fval), 1.0) / min(perturbed)
+    if abs(jvp) < thr:
+        return [], True
+    for h, e in errs.items():
+        print(f"  {label} fd(h={h}) {fds[h]:.5e} rel {e:.2e}")
+        if not e < rel_tol:
+            out.append(f"{label} h={h}: rel {e:.2e}")
+    return out, False
+
+
+# lightweight rejection regressions for the guards themselves
+if update_worst(1e-9, float("nan")) < TRAJ32:
+    fails.append("guard regression: a NaN trajectory error was not rejected")
+_f, _lim = tangent_decision("guard regression", float("nan"), 1.0,
+                            {1e-2: (1.0, 1.0), 3e-3: (1.0, 1.0)})
+if not _f or _lim:
+    fails.append("guard regression: a NaN JVP was labelled a limitation")
+_f, _lim = tangent_decision("guard regression", 1e-12, 1.0,
+                            {1e-2: (1.0, float("inf")), 3e-3: (1.0, 1.0)})
+if not _f or _lim:
+    fails.append("guard regression: a non-finite perturbed loss passed")
+
 # ---- ACTUAL START (review R1): unchanged initialized tree ----------------
 slots = CAL.configurations()["slots"]
 pc0 = MM.init_params("gp_two_sided", 300, init_coeffs=slots["gp_two_sided/A"])
@@ -143,22 +196,19 @@ fv0 = float(fr0(jnp.float32(0.0)))
 thr0 = 100 * eps32 * max(abs(fv0), 1.0) / min(FD32)
 g0 = jax.grad(f0)(pc0)
 print(f"  ACTUAL START raw_r jvp {jvp0:.5e} (float32 resolvability {thr0:.2e}"
-      f": {abs(jvp0) >= thr0})  raw_tau grad {float(g0['raw_tau'][0]):.3e}")
-if not onp.isfinite(jvp0):
-    fails.append("actual start raw_r jvp non-finite")
-if abs(jvp0) >= thr0:
-    for h in FD32:
-        fd = (float(fr0(jnp.float32(h))) - float(fr0(jnp.float32(-h)))) / (2 * h)
-        e = abs(jvp0 - fd) / max(abs(fd), 1e-30)
-        print(f"  ACTUAL START fd(h={h}) {fd:.5e} rel {e:.2e}")
-        if not e < REL32:
-            fails.append(f"actual start raw_r tangent h={h}: rel {e:.2e}")
-else:
-    print("  LIMITATION: actual-start raw_r derivative is below the float32 "
-          "finite-difference resolvability threshold; the float64 check is "
-          "the evidence for this tangent. Not a dead parameter.")
-if not abs(float(g0["raw_tau"][0])) <= 1e-3 * max(abs(jvp0), abs(
-        float(g0["raw_r"][0])), 1e-30) + 1e3 * eps32:
+      f")  raw_tau grad {float(g0['raw_tau'][0]):.3e}")
+pert0 = {h: (float(fr0(jnp.float32(h))), float(fr0(jnp.float32(-h))))
+         for h in FD32}
+f_, lim_ = tangent_decision("ACTUAL START raw_r", jvp0, fv0, pert0)
+fails.extend(f_)
+if lim_:
+    print("  LIMITATION: actual-start raw_r derivative is FINITE and below the "
+          "float32 finite-difference resolvability threshold; the float64 "
+          "check is the evidence for this tangent. Not a dead parameter.")
+g_tau0, g_r0 = float(g0["raw_tau"][0]), float(g0["raw_r"][0])
+if not all_finite(g_tau0, g_r0):
+    fails.append(f"actual start gradients non-finite: tau {g_tau0} r {g_r0}")
+elif not abs(g_tau0) <= 1e-3 * max(abs(jvp0), abs(g_r0), 1e-30) + 1e3 * eps32:
     fails.append("actual start raw_tau tangent not ~0")
 
 # ---- WIDER REGION, executed float32 vs float64 dense reference ----------
@@ -210,6 +260,9 @@ for name, r in points.items():
         if onp.asarray(v_).dtype != onp.float32:
             fails.append(f"coefficient {k_} dtype {onp.asarray(v_).dtype}")
     eta_e, tau_e, rho_e = c["eta"][0], c["tau"][0], c["rho"][0]
+    if not all_finite(*[onp.asarray(v_) for v_ in c.values()]):
+        fails.append(f"{name}: non-finite executed coefficients")
+        continue
     if not float(rho_e) > 1.0:
         fails.append(f"{name}: rho {float(rho_e)} not above 1")
     W32 = jnp.zeros((3, 4), jnp.float32); Z32 = jnp.zeros((3, 4), jnp.float32)
@@ -229,9 +282,20 @@ for name, r in points.items():
         W64, Z64 = dense_ref(W64, Z64, kk.astype(onp.float64),
                              vv.astype(onp.float64), float(w),
                              float(eta_e), float(tau_e), float(rho_e))
-        worst = max(worst, float(onp.max(onp.abs(onp.asarray(W32, onp.float64)
-                                                  - W64)))
-                    / max(1.0, float(onp.max(onp.abs(W64)))))
+        if not all_finite(G, F, a0, W32, Z32):
+            fails.append(f"{name}: non-finite executed G/F/a0/W/Z")
+            worst = float("inf")
+            break
+        if not all_finite(W64, Z64):
+            fails.append(f"{name}: non-finite float64 reference W/Z")
+            worst = float("inf")
+            break
+        scale = max(1.0, float(onp.max(onp.abs(W64))),
+                    float(onp.max(onp.abs(Z64))))
+        for got, ref in ((W32, W64), (Z32, Z64)):
+            err = float(onp.max(onp.abs(onp.asarray(got, onp.float64) - ref))) \
+                / scale
+            worst = update_worst(worst, err)
     print(f"  WIDER REGION {name}: rho {float(rho_e):.6f} float32 vs float64 "
           f"dense worst rel {worst:.2e} (tol {TRAJ32:.0e})")
     if not worst < TRAJ32:
@@ -250,25 +314,25 @@ out_i = MM.rollout("gp_two_sided", dict(pci, raw_r=jnp.asarray([r_int],
                                                                jnp.float32)), ep)
 if out_i["logits"].dtype != onp.float32:
     fails.append(f"output dtype {out_i['logits'].dtype}")
+if not all_finite(out_i["logits"]):
+    fails.append("wider interior: non-finite logits")
 for carry in out_i["final_carry"]:
     if carry.dtype != onp.float32:
         fails.append(f"final carry dtype {carry.dtype}")
+    if not all_finite(carry):
+        fails.append("wider interior: non-finite final carry")
 jvp_i = float(jax.jvp(fri, (jnp.float32(r_int),), (jnp.float32(1.0),))[1])
 fv_i = float(fri(jnp.float32(r_int)))
 thr_i = 100 * eps32 * max(abs(fv_i), 1.0) / min(FD32)
-print(f"  WIDER INTERIOR raw_r={r_int:.4f} jvp {jvp_i:.5e} resolvable "
-      f"{abs(jvp_i) >= thr_i}")
-if abs(jvp_i) >= thr_i:
-    for h in FD32:
-        fd = (float(fri(jnp.float32(r_int + h)))
-              - float(fri(jnp.float32(r_int - h)))) / (2 * h)
-        e = abs(jvp_i - fd) / max(abs(fd), 1e-30)
-        print(f"  WIDER INTERIOR fd(h={h}) {fd:.5e} rel {e:.2e}")
-        if not e < REL32:
-            fails.append(f"wider interior raw_r tangent h={h}: rel {e:.2e}")
-else:
-    print("  LIMITATION: wider-interior raw_r derivative below float32 "
-          "resolvability; reported, not a failure")
+print(f"  WIDER INTERIOR raw_r={r_int:.4f} jvp {jvp_i:.5e} threshold "
+      f"{thr_i:.2e}")
+pert_i = {h: (float(fri(jnp.float32(r_int + h))),
+              float(fri(jnp.float32(r_int - h)))) for h in FD32}
+f_, lim_ = tangent_decision("WIDER INTERIOR raw_r", jvp_i, fv_i, pert_i)
+fails.extend(f_)
+if lim_:
+    print("  LIMITATION: wider-interior raw_r derivative is FINITE and below "
+          "float32 resolvability; reported, not a failure")
 
 if fails:
     print("FAILURES:")
