@@ -88,7 +88,7 @@ timeout --kill-after="${RESERVE_S}s" --signal=TERM "${LEFT}s" \
     --deadline "$DEADLINE" --reserve_s "$RESERVE_S" \
     > "$LOG_DIR/study.log" 2>&1 || rc=$?
 echo "--- study tail ---"; tail -48 "$LOG_DIR/study.log"
-grep -E "META_DELTA_STATUS|PREFLIGHT_|\[preflight\]|\[selection\]|\[!\]|SCREEN" \
+grep -E "META_DELTA_STATUS|PREFLIGHT_|\[preflight\]|\[screen\]|\[!\]" \
   "$LOG_DIR/study.log" || true
 echo "study raw exit: $rc"
 echo "output=$OUT_ROOT/$STAMP"
