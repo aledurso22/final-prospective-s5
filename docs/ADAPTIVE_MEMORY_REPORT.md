@@ -134,7 +134,7 @@ finite-difference steps.
 | host | `pgi15-gpu3`, RTX 3090, SLURM 66010, jax 0.11.0, backend `gpu` |
 | commit | `580913df691464c236353889a877f25ba026599b` |
 | status | `ADAPTIVE_STATUS=FAILED`, `ADAPTIVE_EXIT=4` — focused checks did not pass |
-| result | **1 failed, 189 passed in 200.6 s**; 204 s of 600 elapsed. No calibration, no preflight, **no training**. |
+| result | **1 failed, 189 passed in 200.6 s**; 204 s of 600 elapsed. No study-stage calibration, no preflight, **no training**. (Calibration routines did run *inside* the focused checks, which call them.) |
 | logs | `/Users/durso/s5-runs/adaptive-memory/logs/20260916-150404/` (preserved) |
 | artifacts | `/Users/durso/s5-runs/adaptive-memory/20260916-150404/` |
 
@@ -158,10 +158,12 @@ revised `expm2` folds the trace inside the hyperbolic functions and forms the
 eigenvalues as `s ± a` with `s = −4052.209` and `a = 4051.209`. The near-zero
 eigenvalue is therefore a **catastrophic cancellation**: two quantities of
 magnitude ~4052 producing ~1, which discards `log₂(4052) ≈ 12` of float32's 24
-bits and leaves a relative error of ~`2⁻¹²  = 2.4e−4` in `e^{s+a}`.
+bits and permits a relative error of order `2⁻¹² = 2.4e−4` in `e^{s+a}`.
 
-On the `O(0.368)` entry that predicts an absolute error of **8.9e−5**. The
-cluster measured **1.049e−4**. The diagnosis is arithmetic, and the R4 fix
+On the `O(0.368)` entry that gives an order-of-magnitude estimate of
+**~9e−5**; the cluster measured **1.049e−4**. This is a sensitivity estimate,
+not a deterministic prediction: lost bits bound how large rounding error *can*
+be, not how large it *must* be. The diagnosis is arithmetic, and the R4 fix
 removed the *overflow* hazard without removing this *cancellation* hazard.
 
 ### Correction
@@ -169,27 +171,46 @@ removed the *overflow* hazard without removing this *cancellation* hazard.
 The standard stable-quadratic-root remedy, applied to the real-eigenvalue
 branch only: form the **large-magnitude** eigenvalue by adding same-sign terms
 (`λ_far = s + sign(s)·a`, never a cancellation), then recover the near-zero one
-from the exact product relation `λ₊λ₋ = det(hG)`, which never subtracts.
-`|λ_far| = |s| + a ≥ a > 0` in that branch, so the division is safe, and it
-remains safe in the inactive branch where the guarded `s` is 0 and `a` is 1.
+from the exact product relation `λ₊λ₋ = det(hG)`, which avoids the cancellation
+in `s + a`. (A generic determinant still subtracts two products; for this
+fixture that subtraction is well conditioned.) `|λ_far| = |s| + a ≥ a > 0` in
+that branch, so the division is safe.
 
-Predicted post-fix error for this case: ~1e−6, comfortably inside the
+**Follow-up correction (`IMPLEMENTATION_REVIEW_ea80581.md`).** As first
+committed at `ea80581`, the determinant was **not** masked in the inactive
+real branch. For the existing oscillatory shifted fixture
+`[[−1, 1], [−10⁶, −1]]` that branch computed `λ_near = 10⁶+1` and an
+overflowing exponential; selecting the oscillatory result afterwards does not
+protect reverse mode, where an infinite derivative times a zero cotangent
+gives NaN. `det(hG)` is now masked to zero where the real branch is inactive,
+**before** `λ_near` is formed, giving finite dummy roots 1 and 0 and a zero
+derivative. The active branch and the model are unchanged, and the existing
+shifted oscillatory gradient checks cover this regression. This would have
+failed the next dispatch at the checks.
+
+Order-of-magnitude estimate after the fix for the failing case: ~1e−6, inside the
 unchanged `TRAJ32 = 2e−5`. **No tolerance was relaxed, no case removed, no
 coefficient clamped and no equation, arm, seed, schedule or cap changed.** The
 formulation is identical in exact arithmetic.
 
-### An open point I could not settle from the log
+### `grid_top_prospective` passing is not a contradiction
 
-`grid_top_prospective` (`ν = e¹²`, *more* extreme, with the same eigenvalue
-structure and ~16 bits lost) **passed**. My error model says it should have
-failed by a wider margin than the case that did fail, so the model is
-incomplete somewhere. I have not invented an explanation for it.
+I previously called this case's pass inconsistent with the diagnosis. That was
+a misreading of my own estimate. `grid_top_prospective` (`ν = e¹²`) has a worse
+conditioned `s + a`, which **permits** larger rounding error but does not
+**require** it; a more ill-conditioned subtraction can round closer to its true
+result. For this family (`τ = ρ = 3/4`, unit source) the characteristic
+polynomial is `λ² + (ν + 4/3)λ + ν = 0`, so the slow root is
+`λ = −1 + 1/(3ν) + O(ν⁻²)`, approaching the exactly representable −1 as `ν`
+grows — favourable rounding toward it is one analytical possibility. That is
+not a verified account of the old GPU intermediates, and none is needed: the
+old formula has been replaced, and no additional dispatch is warranted to
+reconstruct its historical rounding.
 
-Because pytest shows captured stdout only for failing tests, the passing
-cases' measured errors were invisible in this dispatch — which is precisely
-why the question is open. The checks now append **every** measured error, pass
-or fail, to `measured_errors.tsv` in the log directory, and the launcher
-prints it. The next dispatch settles this from data rather than from argument.
+Every measured numerical error is still appended, pass or fail, to
+`measured_errors.tsv` in the log directory and printed by the launcher. That
+records the **new** formula's margins; it cannot and is not meant to explain
+the old formula's intermediates.
 
 ## Results
 

@@ -366,26 +366,35 @@ tolerances and the 600-second cap are unchanged by every item above.
 The first dispatch reached the focused checks and **failed** one of them:
 `expm2` lost 1.049e−4 relative accuracy in float32 on the stiff prospective
 generator at `ν = e⁹`, against the unchanged `TRAJ32 = 2e−5`. Execution status
-`FAILED`, exit 4, no calibration, no preflight, no training; logs preserved at
+`FAILED`, exit 4, no study-stage calibration (calibration routines ran inside
+the checks), no preflight, no training; logs preserved at
 `/Users/durso/s5-runs/adaptive-memory/logs/20260916-150404/`.
 
 Cause: the near-zero eigenvalue was formed as `s + a`, a cancellation of two
-quantities of magnitude ~4052, discarding ~12 of float32's 24 bits. Predicted
-error 8.9e−5 against the measured 1.049e−4.
+quantities of magnitude ~4052, which permits loss of ~12 of float32's 24 bits.
+The resulting order-of-magnitude estimate, ~9e−5, is consistent with the
+measured 1.049e−4; it is a sensitivity estimate, not a deterministic
+prediction.
 
 Correction: in the real-eigenvalue branch, the large-magnitude eigenvalue is
 formed by adding same-sign terms and the near-zero one is recovered from
-`λ₊λ₋ = det(hG)`. Identical in exact arithmetic; no tolerance relaxed, no
-fixture removed, no clamp introduced, and no equation, arm, coefficient,
-criterion, seed, schedule or cap changed.
+`λ₊λ₋ = det(hG)`, which avoids the cancellation in `s + a`. **`det(hG)` is
+masked to zero where that branch is inactive, before the near root is formed**
+(`IMPLEMENTATION_REVIEW_ea80581.md`): without the mask, the existing
+oscillatory fixture `[[−1, 1], [−10⁶, −1]]` gives an inactive `λ_near = 10⁶+1`,
+an overflowing exponential, and a NaN reverse-mode derivative through `where`.
+The existing shifted-family gradient checks cover this. Identical in exact
+arithmetic on the active branch; no tolerance relaxed, no fixture removed, no
+clamp, and no equation, arm, coefficient, criterion, seed, schedule or cap
+changed.
 
-Additionally, every measured numerical error is now appended to
-`measured_errors.tsv` in the run's log directory and printed by the launcher,
-pass or fail. pytest shows captured stdout only for failing tests, so the
-margins of passing cases were unavailable for diagnosis — including one case
-(`grid_top_prospective`) whose passing margin the failure analysis does not
-account for and which is recorded here as unexplained rather than
-rationalised.
+`grid_top_prospective` (`ν = e¹²`) passing in dispatch 1 is **not**
+contradictory: worse conditioning permits larger rounding error but does not
+require it. Its slow root tends to the representable −1
+(`λ = −1 + 1/(3ν) + O(ν⁻²)`), one analytical possibility for favourable
+rounding. No experiment is run to reconstruct the old formula's intermediates.
+Every measured error of the current formula is recorded in
+`measured_errors.tsv`, pass or fail.
 
 Scope note, stated precisely: the focused checks validate the **initialized**
 A/B slots; `validate_coefficients` validates the **learned** coefficients at

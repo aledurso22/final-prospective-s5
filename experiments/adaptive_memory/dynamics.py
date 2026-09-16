@@ -110,8 +110,8 @@ def expm2(G, h=H):
     and `exp(hG) = C I + h S N`, where `L+- = s +- a` are the eigenvalues of
     `hG`. For a stable generator `s + a <= 0`, so every exponent above is
     non-positive and nothing overflows. The near-zero eigenvalue is obtained
-    from `L+ L- = det(hG)` rather than from `s + a`, because that sum is a
-    catastrophic cancellation whenever the eigenvalues are widely separated. Every one of our
+    from `L+ L- = det(hG)` rather than from `s + a`, which avoids the
+    cancellation in that sum when the eigenvalues are widely separated. Every one of our
     generators has `t <= 0`: prospective `-nu w - 1/tau`, inertial `-1/tau`,
     TSS `-T w/M`, and the idle limits of each.
 
@@ -149,11 +149,18 @@ def expm2(G, h=H):
     #
     # Same remedy as the stable quadratic formula: form the LARGE-magnitude
     # eigenvalue by adding same-sign terms, then recover the near-zero one
-    # from the exact product relation `lam_+ lam_- = det(hG)`, which never
-    # subtracts. `|lam_far| = |s| + a >= a > 0` in this branch, so the
-    # division is safe, and it stays safe in the inactive branch where
-    # `s_pos = 0` and `a = 1`.
+    # from the exact product relation `lam_+ lam_- = det(hG)`, which avoids
+    # the cancellation in `s + a`. (The generic determinant still subtracts
+    # two products; for our generators that subtraction is well conditioned.)
+    # `|lam_far| = |s| + a >= a > 0` in this branch, so the division is safe.
     det_h = (h * h) * (g11 * g22 - g12 * g21)
+    # The determinant is guarded BEFORE forming the near root. Otherwise an
+    # inactive real branch still computes it: for the oscillatory
+    # [[-1, 1], [-1e6, -1]] it gives lam_near = 1e6+1 and exp overflows, and
+    # an infinite derivative times the zero cotangent of `where` is NaN.
+    # Masking the exponential afterwards would be too late. With the mask the
+    # inactive branch has roots 1 and 0: finite dummies, zero derivative.
+    det_h = jnp.where(big_pos, det_h, jnp.zeros_like(det_h))
     sgn = jnp.where(s_pos >= 0, one, -one)
     lam_far = s_pos + sgn * a
     lam_near = det_h / lam_far
