@@ -2,10 +2,16 @@
 
 Protocol: `docs/NESTED_MEMORY_PROTOCOL.md`. Branch `nested-prospective-memory`.
 
-> **One dispatch has been made and it FAILED at the focused checks. No
-> training has run.** 49 checks passed, 12 failed, 79 s of 600. The failures
-> are recorded below with their causes and corrections; none was bypassed and
-> no tolerance was loosened.
+> **The study is COMPLETE. The predeclared screening rule FAILS.**
+>
+> Momentum DeltaNet — the principal literature comparator, at the same 128-value
+> carry — beats the generalized prospective memory on every headline metric.
+> The prospective term does beat its own controls by a consistent few points.
+>
+> A derived "advantage on rewritten associations" does **not** survive the two
+> controls already in the data: it is shared by every fixed-coefficient arm, it
+> reverses on the delayed rewritten query, and our arm shows **no revision
+> sensitivity at all**. Section 4 sets this out.
 
 ## Execution status
 
@@ -13,11 +19,13 @@ Protocol: `docs/NESTED_MEMORY_PROTOCOL.md`. Branch `nested-prospective-memory`.
 |---|---|
 | parent | `62c076739a9afa1624faec68961e7e500d6f1ed8` (`tss-pilot`) |
 | branch | `nested-prospective-memory`, separate worktree |
-| dispatch 1 | `aa51abbedc0d5610ff3555706d1c3a74b529f8e5` — **`NESTED_STATUS=FAILED`**, 12 failed / 49 passed, 79 s of 600 |
-| logs, dispatch 1 | `/Users/durso/s5-runs/nested-memory/logs/20260916-132523/` — **preserved** |
-| training executed | **none**, on any dispatch |
-| held-out evaluation | never opened |
-| artifacts | no training artifacts created |
+| dispatch 1 | `aa51abb` — `NESTED_STATUS=FAILED` at the checks, 12 failed / 49 passed, 79 s. **No training.** Logs preserved at `/Users/durso/s5-runs/nested-memory/logs/20260916-132523/` |
+| dispatch 2 | **`3a76e58b7eab167c52ca55578dbe43b0f3a9dff7`** — **`NESTED_STATUS=PASS`**, **81 checks passed**, 15/15 configurations, 196 s of 600 |
+| artifacts | `/Users/durso/s5-runs/nested-memory/20260916-133517/` |
+| logs | `/Users/durso/s5-runs/nested-memory/logs/20260916-133517/` |
+| host | `pgi15-gpu3`, RTX 3090, SLURM 66010, jax 0.11.0, backend `gpu` |
+| preflight | incurred compilation 27.2 s, projected remaining 62.3 s, no retrace |
+| study wall | 67 s; per-arm training 2.1-2.5 s |
 
 ## Dispatch 1: the twelve failures and their causes
 
@@ -119,3 +127,149 @@ screening rule in `docs/NESTED_MEMORY_PROTOCOL.md` s8 as written, including its
 inconclusive branch if every arm sits near the 12.5 % chance level. Keep the
 four evidence classes distinct: unit correctness, mechanism identity, short
 task performance, and untested S5 or large-model implications.
+
+
+## 3. Results
+
+Held-out, 512 sequences per family, evaluated only after all fifteen
+configurations finished. Chance is 0.125.
+
+| arm | primary | retention | recall | revision CE | trainable | carry |
+|---|---|---|---|---|---|---|
+| Generalized prospective memory | 0.4662 | 0.3049 | 0.4690 | 1.6294 | 392 | 128 |
+| Inertial, same-state ablation | 0.4174 | 0.2317 | 0.4193 | 1.7509 | 392 | 128 |
+| Delta, matched first write | 0.4456 | 0.2736 | 0.4471 | 1.6642 | 392 | 64 |
+| Gated DeltaNet rule | 0.4293 | 0.2549 | 0.4310 | 1.6666 | 480 | 64 |
+| **Momentum DeltaNet rule** | **0.5329** | **0.6099** | **0.7281** | **1.3520** | 569 | 128 |
+
+Per-seed primary: ours `0.4641 / 0.4722 / 0.4623`; momentum
+`0.5165 / 0.5433 / 0.5389`. Every seed agrees on the ordering.
+
+### The predeclared screening rule, applied mechanically
+
+| comparison | per seed | mean | verdict |
+|---|---|---|---|
+| vs Gated DeltaNet | +2.47, +2.42, +6.19 | **+3.69 pp** | passes all three clauses |
+| vs Momentum DeltaNet | −5.24, −7.12, −7.67 | **−6.67 pp** | fails: below +1 pp, not all seeds positive, retention −30.51 and recall −25.91 far exceed the 1-point regression allowance |
+
+**PROMISING DEVELOPMENT SIGNAL: FALSE.** The rule requires beating *each*
+literature arm. It is applied as written and not renegotiated.
+
+### Attribution
+
+Against its own controls the prospective term is consistently positive:
+
+| comparison | per seed | mean |
+|---|---|---|
+| prospective − inertial ablation | +4.76, +5.20, +4.66 | **+4.87 pp** |
+| prospective − matched-first-write delta | +2.09, +2.10, +2.00 | **+2.06 pp** |
+
+So the residual-derivative term is **not inert**: it buys a few points over the
+equal-state heavy-ball ablation and over a delta write with the same immediate
+strength, in all three seeds. That is the narrow claim the data supports.
+
+### How much of this is learning
+
+| arm | primary at update 0 | at 200 | gain |
+|---|---|---|---|
+| Generalized prospective memory | 0.4543 | 0.4666 | +1.22 pp |
+| Inertial ablation | 0.4088 | 0.4164 | +0.76 pp |
+| Delta, matched first write | 0.4351 | 0.4457 | +1.07 pp |
+| Gated DeltaNet rule | 0.3756 | 0.4308 | +5.53 pp |
+| Momentum DeltaNet rule | 0.4672 | 0.5376 | +7.04 pp |
+
+The fixed-coefficient arms barely move; only the two arms with learnable gates
+improve materially. **Most of every arm's endpoint ability is present before
+training**, and the comparison is therefore substantially between architectures
+plus initializations, not between learned solutions.
+
+## 4. The "advantage on rewritten associations" does not survive its controls
+
+The coordinator derived, correctly, that
+`A_rewritten = 2 A_primary − A_untouched`, giving 62.75 % for ours against
+45.59 % for Momentum DeltaNet, and asked whether that reflects faster
+correction, better delayed retrieval, or both. The per-category numbers answer
+it, and the answer does not support the proposed claim.
+
+Held-out accuracy by category, mean over seeds:
+
+| arm | family | immediate selected | middle untouched | late selected | late untouched |
+|---|---|---|---|---|---|
+| Generalized prospective | revision | **1.0000** | 0.4362 | 0.2550 | 0.1735 |
+| Generalized prospective | recall | **1.0000** | 0.4321 | 0.2673 | 0.1766 |
+| Inertial ablation | revision | 1.0000 | 0.3159 | 0.2064 | 0.1475 |
+| Delta matched write | revision | 1.0000 | 0.3862 | 0.2350 | 0.1610 |
+| Gated DeltaNet | revision | 1.0000 | 0.3644 | 0.2074 | 0.1453 |
+| Momentum DeltaNet | revision | **0.5342** | 0.7620 | 0.3776 | 0.4578 |
+| Momentum DeltaNet | recall | **0.9819** | 0.6904 | 0.8003 | 0.4398 |
+
+**First: the effect is not ours.** The rewritten score over Momentum DeltaNet is
++17.2 pp for the prospective arm, +16.2 for the matched delta, +14.8 for gated
+delta and +14.7 for the inertial ablation. **Every fixed-coefficient arm shows
+it**, so it is not a property of the prospective residual derivative. It is a
+property of not being Momentum DeltaNet.
+
+**Second: it is one saturated category, and it reverses on the other.**
+Decomposing our +17.2 pp: **+46.6 pp on the immediate query** (age 1), where
+all four non-momentum arms score exactly `1.0000`, and **−12.3 pp on the
+delayed rewritten query**, where Momentum DeltaNet is better. So it is faster
+correction only, on a category that is saturated for four of five arms, and our
+arm is *worse* at delayed retrieval of rewritten associations.
+
+**Third, and decisive: our arm has no revision sensitivity at all.** Comparing
+the revision and recall families — identical age structure, differing only in
+whether the value changed — per category:
+
+| arm | immediate selected | late selected |
+|---|---|---|
+| Generalized prospective | +0.00 pp | −1.23 pp |
+| Inertial ablation | +0.00 | +0.41 |
+| Delta matched write | +0.00 | +0.00 |
+| Gated DeltaNet | +0.00 | +0.70 |
+| **Momentum DeltaNet** | **−44.77** | **−42.27** |
+
+Our arm behaves identically whether or not the association was revised. It is
+**not handling revision well; it is indifferent to revision**, because it
+reports whatever was written most recently. Momentum DeltaNet is the
+revision-sensitive arm, and that sensitivity is its weakness here.
+
+**The accurate statement is therefore not** "generalized prospective memory
+improves rewritten-association retrieval over Momentum DeltaNet". It is:
+
+> Our law is a strongly recency-weighted memory. It is perfect at age 1 and
+> decays quickly — late untouched retrieval is 0.1735 against a chance level of
+> 0.125 — while Momentum DeltaNet learned a near-integrator that retains far
+> longer and correspondingly blurs revisions.
+
+The learned gates support that reading directly: Momentum DeltaNet converged to
+`alpha in [0.021, 0.037]` with `mu in [0.998, 0.999]`, i.e. it nearly erases
+`W` each token and keeps the memory in the momentum matrix `Q`, which
+accumulates almost undamped. An accumulator retains a long history and carries
+a stale value through a rewrite — exactly the pattern observed. The `mu` clamp
+at `-2` was never active (occupancy 0.000), so that frozen choice did not bind.
+
+## 5. What this study supports, and what it does not
+
+**Supported.** The implementation is correct on every declared check (81
+passed, including the independent dense-ODE reference, both gradient routes,
+literature parity and the reductions). The prospective residual derivative
+gives a small, consistent gain over its equal-state ablation (+4.87 pp) and
+over a matched-strength delta write (+2.06 pp), in all three seeds.
+
+**Not supported.** Any advantage over the published momentum rule: it loses by
+6.67 pp on the primary metric, 30.5 pp on retention and 25.9 pp on recall, in
+every seed. The screening rule fails. The derived rewritten-association
+advantage is not attributable to the prospective term and does not survive the
+recency control.
+
+**Not tested here.** Anything about S5 or Rawat — neither is trained in this
+study. Anything about the published models: this is a rule inside a small
+common shell without short convolutions, output corrections, gating or multiple
+heads. Whether a longer schedule, a different clock, or a learnable decay
+alongside the prospective term would change the ordering.
+
+**Limitations.** Three seeds; 200 updates; one task, one shell, one coefficient
+point with no sweep permitted; category ages are reported and *not* matched;
+parameter budgets differ (392 against 480 and 569); most endpoint ability
+precedes training. Seed-level uncertainty is what is reported — the thousands
+of correlated queries are not independent replicates.
