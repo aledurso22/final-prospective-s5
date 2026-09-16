@@ -324,7 +324,8 @@ class SubstrateSSM(S5SSM):
         return np.exp(self.log_rho_rec)
 
     def recurrent_T(self):
-        """T = 5 exp(t). No forward clip and no guardrail interval."""
+        """T = 10 exp(t) (recurrent reference 10, review R0). No forward clip
+        and no guardrail interval."""
         from .stable_gp import RECURRENT_T_REFERENCE
         return RECURRENT_T_REFERENCE * np.exp(self.log_T_rec)
 
