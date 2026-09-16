@@ -598,8 +598,18 @@ def test_executed_gain_underflow_is_rejected_and_ordinary_gain_accepted():
     assert PD.transition_failure(rep) is not None
     ok = dict(pg, log_g=jnp.asarray([-0.3], dtype=jnp.float32))
     rep_ok = PD.transition_report(ok, "gain_momentum")
-    assert rep_ok["executed_g"] == float(onp.exp(onp.float32(-0.3)))
+    # exact equality only with the SAME executed value being reported (F3)
+    g_exec = PD.executed_gain(ok)
+    assert onp.asarray(g_exec).dtype == onp.float32
+    assert rep_ok["executed_g"] == float(onp.asarray(g_exec))
+    assert onp.isfinite(rep_ok["executed_g"]) and rep_ok["executed_g"] > 0
     assert PD.transition_failure(rep_ok) is None
+    # independent exponential: the declared production float32 tolerance
+    ref = math.exp(float(onp.float32(-0.3)))
+    rel_err = abs(rep_ok["executed_g"] - ref) / ref
+    print(f"  executed_g {rep_ok['executed_g']!r} vs float64 exp {ref!r}: "
+          f"relative {rel_err:.2e} (TRAJ32 2e-5)")
+    assert rel_err <= 2e-5
 
 
 def _metrics_fixture():
@@ -745,71 +755,234 @@ def test_post_restore_runtime_exception_is_finalized():
 
 def test_terminal_verdict_rules():
     from experiments.prospective_momentum.terminal import terminal_verdict as V
-    assert V("study", 0, 0, "complete", True)["label"] == "PASS"
-    assert V("study", 0, 1, "complete", True)["label"] == "FAILED"
-    assert V("study", 0, 2, "complete", True)["label"] == "INCOMPLETE"
-    assert V("study", 0, 3, "complete", True)["label"] == "INCOMPLETE"
-    assert V("study", 0, 0, "omitted:no-time", True)["label"] == "INCOMPLETE"
-    assert V("study", 0, 0, "failed:exit-1", True)["label"] == "INCOMPLETE"
-    assert V("checks", 4, 0, "omitted:no-status-json", False)["code"] == 4
-    assert V("study", 124, 0, "complete", True)["label"] == "INCOMPLETE"
-    assert V("study", 1, 0, "complete", True)["label"] == "FAILED"
-    v = V("study", 4, 1, "failed:timeout", True)
-    assert v["label"] == "FAILED" and v["reasons"][0].startswith("study")
-    assert len(v["reasons"]) == 3
+    ok = dict(study_status="PASS", study_exit=0)
+    assert V("study", "completed", 0, 0, "complete", True, ok)["label"] == \
+        "PASS"
+    assert V("study", "completed", 0, 1, "complete", True, ok)["label"] == \
+        "FAILED"
+    assert V("study", "completed", 0, 2, "complete", True, ok)["label"] == \
+        "INCOMPLETE"
+    assert V("study", "completed", 0, 3, "complete", True, ok)["label"] == \
+        "INCOMPLETE"
+    assert V("study", "completed", 0, 4, "complete", True, ok)["label"] == \
+        "FAILED"
+    assert V("study", "completed", 0, 0, "omitted:no-time", True,
+             ok)["label"] == "INCOMPLETE"
+    assert V("checks", "completed", 1, 0, "omitted:no-status-json",
+             False)["code"] == 4
+    assert V("study", "completed", 125, 0, "complete", True, ok)["label"] == \
+        "FAILED"                  # a command's own 125 is not "not started"
+    v = V("study", "completed", 4, 1, "failed:timeout", True,
+          dict(study_status="FAILED", study_exit=4, failed="x"))
+    assert v["label"] == "FAILED" and len(v["reasons"]) == 4
+
+
+def test_not_started_and_supervisor_failure_are_distinct():
+    from experiments.prospective_momentum.terminal import terminal_verdict as V
+    ns = V("study", "not_started", -1, 0, "omitted:no-status-json", False)
+    sf = V("study", "supervisor_failure", -1, 0, "omitted:no-status-json",
+           False)
+    assert (ns["label"], sf["label"]) == ("INCOMPLETE", "FAILED")
+    assert V("checks", "watchdog_kill", -1, 0, "omitted:no-status-json",
+             False)["label"] == "INCOMPLETE"
+    assert V("study", "completed", 0, 4, "complete", True,
+             dict(study_status="PASS", study_exit=0))["label"] == "FAILED"
+
+
+@pytest.mark.parametrize("saved,outcome,rc,expected", [
+    (dict(study_status="FAILED", study_exit=4, failed="numerical failure X"),
+     "watchdog_term", -1, "FAILED"),
+    (dict(study_status="FAILED", study_exit=4, failed="numerical failure X"),
+     "completed", 0, "FAILED"),
+    (dict(study_status="PASS", study_exit=0), "watchdog_kill", -1,
+     "INCOMPLETE"),
+    (dict(study_status="INCOMPLETE", study_exit=3, incomplete=["over budget"]),
+     "completed", 0, "INCOMPLETE"),
+    (dict(development=[]), "completed", 0, "INCOMPLETE"),     # not finalized
+    (dict(study_status="PASS", study_exit=4), "completed", 0, "FAILED"),
+    ("{not json", "completed", 0, "FAILED"),
+])
+def test_terminal_merges_the_saved_study_verdict(tmp_path, saved, outcome, rc,
+                                                 expected):
+    from experiments.prospective_momentum import terminal as TM
+    run, logs = tmp_path / "run", tmp_path / "logs"
+    run.mkdir(); logs.mkdir()
+    (run / "status.json").write_text(saved if isinstance(saved, str)
+                                     else json.dumps(saved))
+    TM.main(["--run_dir", str(run), "--log_dir", str(logs), "--stage",
+             "study", "--stage_outcome", outcome, "--stage_rc", str(rc),
+             "--integrity_rc", "0", "--digest", "complete"])
+    v = json.load(open(logs / "terminal.json"))
+    assert v["label"] == expected, v
+    if isinstance(saved, dict) and saved.get("failed"):
+        assert any("numerical failure X" in r for r in v["reasons"])
+        assert v["saved_study"]["failed"] == "numerical failure X"
+    if not isinstance(saved, str):
+        merged = json.load(open(run / "status.json"))
+        assert merged["terminal"]["label"] == expected
+        for k, val in saved.items():                      # nothing erased
+            assert merged[k] == val
+
+
+# ---- supervisor (review F1): stdlib, dummy children only -------------------
+SUPERVISOR = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "experiments", "prospective_momentum",
+    "supervise.py")
+
+
+def _executing(pid):
+    """True if pid exists and is not a zombie (a surviving executable)."""
+    r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                       capture_output=True, text=True)
+    st = r.stdout.strip()
+    return bool(st) and not st.startswith("Z")
+
+
+def _gone_within(pid, seconds=1.5):
+    import time
+    end = time.time() + seconds
+    while time.time() < end:
+        if not _executing(pid):
+            return True
+        time.sleep(0.05)
+    return not _executing(pid)
+
+
+def _kill_quietly(pid_files):
+    import signal as _sig
+    for f in pid_files:
+        try:
+            os.kill(int(open(f).read().split()[0]), _sig.SIGKILL)
+        except (OSError, ValueError, IndexError):
+            pass
+
+
+def _supervise(tmp_path, script, term_in, grace):
+    import time
+    out = tmp_path / "outcome"
+    t0 = time.time()
+    r = subprocess.run([sys.executable, SUPERVISOR, "--term_at",
+                        str(t0 + term_in), "--grace", str(grace), "--outcome",
+                        str(out), "--", "bash", "-c", script,
+                        str(tmp_path)], capture_output=True, text=True,
+                       timeout=60)
+    elapsed = time.time() - t0
+    line = open(out).read().split()
+    rec = json.load(open(str(out) + ".json"))
+    print(rec, elapsed, r.stderr[-500:])
+    assert line == [rec["outcome"], str(rec["rc"])]
+    return rec, elapsed
+
+
+def test_supervisor_kills_when_leader_and_descendant_ignore_term(tmp_path):
+    pidf = tmp_path / "gc.pid"
+    try:
+        rec, el = _supervise(tmp_path, 'trap "" TERM; (exec sleep 60) & '
+                             'echo $! > "$0/gc.pid"; wait', 1.0, 1.0)
+        assert rec["outcome"] == "watchdog_kill" and rec["rc"] == 137
+        assert el <= 5.0
+        assert _gone_within(int(pidf.read_text()))
+    finally:
+        _kill_quietly([pidf])
+
+
+def test_supervisor_kills_descendant_after_leader_exits_on_term(tmp_path):
+    """The GNU-timeout gap: the leader exits on TERM, a descendant ignores
+    TERM. The group must still be KILLed at term + grace."""
+    pidf = tmp_path / "gc.pid"
+    try:
+        rec, el = _supervise(tmp_path, '(trap "" TERM; exec sleep 60) & '
+                             'echo $! > "$0/gc.pid"; wait', 1.0, 1.0)
+        assert rec["term_sent"] and rec["kill_sent"]
+        assert rec["outcome"] == "watchdog_kill"
+        assert rec["leader_rc"] == 128 + 15
+        assert el <= 5.0
+        assert _gone_within(int(pidf.read_text()))
+    finally:
+        _kill_quietly([pidf])
+
+
+def test_supervisor_cleans_members_left_by_a_completed_leader(tmp_path):
+    pidf = tmp_path / "gc.pid"
+    try:
+        rec, el = _supervise(tmp_path, '(trap "" TERM; exec sleep 60) & '
+                             'echo $! > "$0/gc.pid"; exit 0', 30.0, 1.0)
+        assert rec["outcome"] == "completed" and rec["rc"] == 0
+        assert rec["orphans_cleaned"] and rec["kill_sent"]
+        assert el <= 5.0
+        assert _gone_within(int(pidf.read_text()))
+    finally:
+        _kill_quietly([pidf])
+
+
+def test_supervisor_ordinary_completion_and_start_failure(tmp_path):
+    rec, el = _supervise(tmp_path, "exit 3", 30.0, 1.0)
+    assert rec["outcome"] == "completed" and rec["rc"] == 3
+    assert not rec["term_sent"] and el < 5.0
+    out = tmp_path / "bad"
+    subprocess.run([sys.executable, SUPERVISOR, "--term_at", "1e12",
+                    "--grace", "1", "--outcome", str(out), "--",
+                    str(tmp_path / "no-such-executable")], timeout=30)
+    assert open(out).read().split() == ["supervisor_failure", "70"]
 
 
 def test_launcher_terminal_paths_with_dummy_children(tmp_path):
-    """Bounded stages with TERM-ignoring children and grandchildren, source
-    verification (unchanged, changed, no time), digest omission and the
-    persisted terminal verdict. Dummy commands only; no model."""
+    """Launcher library with the supervisor: explicit not-started state,
+    supervisor failure distinct from it, source verification (unchanged,
+    changed, no time, verifier failure), digest omission, and the terminal
+    verdict merging a saved FAILED study with a watchdog outcome. Dummy
+    commands only; no model."""
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     lib = os.path.join(repo, "bin", "run_experiments",
                        "prospective_momentum_terminal.sh")
+    stub = tmp_path / "broken_supervisor.py"
+    stub.write_text("import sys\nsys.exit(1)\n")
     script = r"""
 set -u
 source "$LIB"
+REAL_SUP="$PM_SUPERVISOR"
 START=$(date +%s); TOTAL_S=40; DEADLINE=$(( START + 40 ))
-t0=$(date +%s)
-pm_bounded 2 1 bash -c 'trap "" TERM; sleep 60 & echo $! > "$0/gc.pid"; wait' "$LOG_DIR"
-rc=$?
-echo "BOUNDED_RC=$rc ELAPSED=$(( $(date +%s) - t0 ))"
-sleep 1
-if kill -0 "$(cat "$LOG_DIR/gc.pid")" 2>/dev/null; then echo GRANDCHILD=alive; else echo GRANDCHILD=gone; fi
-pm_bounded 0 1 true; echo NOTIME_RC=$?
+pm_bounded $(( $(date +%s) - 1 )) 1 true; echo NOTSTARTED=$PM_OUTCOME
+pm_bounded $(( $(date +%s) + 20 )) 1 bash -c 'exit 4'; echo COMPLETED=$PM_OUTCOME/$PM_RC
+PM_SUPERVISOR="$STUB"
+pm_bounded $(( $(date +%s) + 20 )) 1 true; echo SUPFAIL=$PM_OUTCOME
 mkdir -p "$SOURCE_DIR"; echo a > "$SOURCE_DIR/f"
 (cd "$SOURCE_DIR" && sha256sum f) > "$LOG_DIR/source_sha256_before.txt"
+pm_verify_source > /dev/null; echo VERIFY_SUPFAIL=$PM_INTEGRITY_RC
+PM_SUPERVISOR="$REAL_SUP"
 pm_verify_source > /dev/null; echo VERIFY_OK=$PM_INTEGRITY_RC
 echo b > "$SOURCE_DIR/f"
 pm_verify_source > /dev/null; echo VERIFY_CHANGED=$PM_INTEGRITY_RC
 DEADLINE=$(( $(date +%s) + 10 ))
 pm_verify_source > /dev/null; echo VERIFY_NOTIME=$PM_INTEGRITY_RC
-mkdir -p "$LOG_DIR/run"; echo '{"study_status": "PASS"}' > "$LOG_DIR/run/status.json"
+mkdir -p "$LOG_DIR/run"
+echo '{"study_status": "FAILED", "study_exit": 4, "failed": "saved failure Y"}' > "$LOG_DIR/run/status.json"
 DEADLINE=$(( $(date +%s) + 5 ))
 pm_digest "$LOG_DIR/run" > /dev/null; echo DIGEST=$PM_DIGEST
-DEADLINE=$(( $(date +%s) + 30 )); PM_INTEGRITY_RC=1; PM_DIGEST=complete
-pm_terminal "$LOG_DIR/run" study 0 > /dev/null; echo TERMINAL=$PM_LABEL/$PM_CODE
+DEADLINE=$(( $(date +%s) + 30 )); PM_INTEGRITY_RC=0; PM_DIGEST=complete
+pm_terminal "$LOG_DIR/run" study watchdog_term "" > /dev/null; echo TERMINAL=$PM_LABEL/$PM_CODE
 """
     env = dict(os.environ, LIB=lib, LOG_DIR=str(tmp_path),
-               SOURCE_DIR=str(tmp_path / "src"), PY=sys.executable)
+               SOURCE_DIR=str(tmp_path / "src"), PY=sys.executable,
+               STUB=str(stub))
+    env.pop("PM_SUPERVISOR", None)
     r = subprocess.run(["bash", "-c", script], cwd=repo, env=env,
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=90)
     print(r.stdout); print(r.stderr[-2000:])
-    out = dict(line.split("=", 1) for line in r.stdout.split()
-               if "=" in line and line.split("=", 1)[0].isupper())
-    rc = int(out["BOUNDED_RC"])
-    elapsed = int(r.stdout.split("ELAPSED=")[1].split()[0])
-    assert rc in (124, 137) and elapsed <= 5, (rc, elapsed)
-    assert out["GRANDCHILD"] == "gone"
-    assert out["NOTIME_RC"] == "125"
+    out = dict(tok.split("=", 1) for tok in r.stdout.split()
+               if "=" in tok and tok.split("=", 1)[0].isupper())
+    assert out["NOTSTARTED"] == "not_started"
+    assert out["COMPLETED"] == "completed/4"
+    assert out["SUPFAIL"] == "supervisor_failure"
+    assert out["VERIFY_SUPFAIL"] == "4"
     assert out["VERIFY_OK"] == "0" and out["VERIFY_CHANGED"] == "1"
     assert out["VERIFY_NOTIME"] == "2"
     assert out["DIGEST"] == "omitted:no-time"
     assert out["TERMINAL"] == "FAILED/4"
     st = json.load(open(tmp_path / "run" / "status.json"))
     assert st["terminal"]["label"] == "FAILED"
-    assert st["terminal"]["integrity_verified"] is False
-    assert json.load(open(tmp_path / "terminal.json"))["code"] == 4
+    assert st["failed"] == "saved failure Y"
+    assert any("saved failure Y" in x for x in st["terminal"]["reasons"])
 
 
 def test_production_float32_probe_in_its_own_process():

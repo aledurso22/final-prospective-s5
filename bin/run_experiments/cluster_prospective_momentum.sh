@@ -60,46 +60,46 @@ if [ "$rc" -ne 0 ]; then
 fi
 mv "$LOG_DIR/source_sha256_before.txt.partial" "$LOG_DIR/source_sha256_before.txt"
 
-# stage TERM time: DEADLINE - RESERVE; KILL after PM_GRACE_S
-stage_limit() { echo $(( $(pm_left) - RESERVE_S )); }
+# every stage: TERM to its process group at DEADLINE - RESERVE, KILL to any
+# remaining member PM_GRACE_S later (supervise.py; review F1)
+STAGE_TERM_AT=$(( DEADLINE - RESERVE_S ))
+
+# stage_end <stage> : finish unless the stage completed with exit 0
+stage_end() {
+  if [ "$PM_OUTCOME" != completed ] || [ "$PM_RC" != "0" ]; then
+    pm_finish "$RUN_DIR" "$1" "$PM_OUTCOME" "$PM_RC"
+  fi
+}
 
 # ---- 1. GPU first
-rc=0
-pm_bounded "$(stage_limit)" "$PM_GRACE_S" \
+pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
   "$PY" -u -c "import jax,sys; print('backend',jax.default_backend()); \
 print('devices',jax.devices()); print('jax',jax.__version__); \
 sys.exit(0 if jax.default_backend()=='gpu' else 4)" \
-  > "$LOG_DIR/backend.txt" 2>&1 || rc=$?
+  > "$LOG_DIR/backend.txt" 2>&1
 cat "$LOG_DIR/backend.txt"
-[ "$rc" -eq 0 ] || pm_finish "$RUN_DIR" backend "$rc"
+echo "backend: outcome=$PM_OUTCOME rc=$PM_RC"
+stage_end backend
 
 # ---- 2. focused checks, inside the same cap
-rc=0
-pm_bounded "$(stage_limit)" "$PM_GRACE_S" \
+pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
   "$PY" -u -m pytest tests/test_prospective_momentum.py -q -rP --durations=10 \
-  > "$LOG_DIR/checks.log" 2>&1 || rc=$?
+  > "$LOG_DIR/checks.log" 2>&1
 echo "--- focused checks ---"; tail -30 "$LOG_DIR/checks.log"
 echo "--- measured magnitudes (passing and failing) ---"
 grep -nE "^  [a-zA-Z]" "$LOG_DIR/checks.log" | head -80 || true
-echo "checks raw exit: $rc  (elapsed $(( $(date +%s) - START ))s)"
-if [ "$rc" -ne 0 ]; then
-  # pytest failure codes are not the study's codes: map to FAILED unless
-  # the watchdog or lack of time ended it
-  case "$rc" in 124|125|137) ;; *) rc=4 ;; esac
-  pm_finish "$RUN_DIR" checks "$rc"
-fi
+echo "checks: outcome=$PM_OUTCOME rc=$PM_RC (elapsed $(( $(date +%s) - START ))s)"
+stage_end checks
 
 # ---- 3. the study: restore/reproduce, preflight, batch only if it fits
-echo "remaining for the study: $(stage_limit)s"
-rc=0
-pm_bounded "$(stage_limit)" "$PM_GRACE_S" \
+echo "remaining until the study's TERM: $(( STAGE_TERM_AT - $(date +%s) ))s"
+pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
   "$PY" -u -m experiments.prospective_momentum.study \
     --out_root "$OUT_ROOT" --source_dir "$SOURCE_DIR" --run_id "$STAMP" \
     --deadline "$DEADLINE" --reserve_s "$RESERVE_S" \
-    > "$LOG_DIR/study.log" 2>&1 || rc=$?
+    > "$LOG_DIR/study.log" 2>&1
 echo "--- study tail ---"; tail -40 "$LOG_DIR/study.log"
 grep -E "PROSPECTIVE_MOMENTUM_STATUS|SOURCE_UNCHANGED|PREFLIGHT_|\[source\]|\[preflight\]|\[screen\]|\[!\]" \
   "$LOG_DIR/study.log" || true
-echo "study raw exit: $rc"
-case "$rc" in 0|3|4|124|125|137) ;; *) rc=4 ;; esac
-pm_finish "$RUN_DIR" study "$rc"
+echo "study: outcome=$PM_OUTCOME rc=$PM_RC"
+pm_finish "$RUN_DIR" study "$PM_OUTCOME" "$PM_RC"

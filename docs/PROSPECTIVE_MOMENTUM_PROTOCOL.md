@@ -268,12 +268,32 @@ Nothing is clamped by validation. FAILED stops the batch.
     - the study finalizer: a changed checksum, a re-hash exception, a missing
       baseline and a persistence failure; a post-restore runtime exception
       and termination through `guarded`, with the original reason kept;
-    - terminal verdict rules;
-    - the launcher library, run with dummy children: a TERM-ignoring child
-      and grandchild are killed within TERM + grace; a not-started step
-      gives 125; source verification reports unchanged, changed and no time;
-      the digest is omitted when there is no time; a changed source on a PASS
-      stage gives FAILED, merged into `status.json`.
+    - terminal verdict rules, including the explicit not-started state
+      versus supervisor failure;
+    - merging the saved study verdict (amendment F2, JSON fixtures):
+      - saved FAILED + watchdog stays FAILED, with the original reason kept;
+      - saved FAILED + stage exit 0 stays FAILED;
+      - saved PASS + watchdog is INCOMPLETE;
+      - saved INCOMPLETE is kept;
+      - an unfinalized status is INCOMPLETE;
+      - an inconsistent or unreadable status is FAILED;
+      - no saved field is erased;
+    - the supervisor (amendment F1), with dummy children:
+      - leader and descendant both ignore TERM → KILL;
+      - the leader exits on TERM while a descendant ignores it → the
+        descendant is still KILLed at TERM + grace;
+      - a completed leader leaves a TERM-ignoring member → cleaned up and
+        recorded;
+      - ordinary completion keeps its exit code;
+      - an unstartable command gives supervisor_failure.
+
+      Survival is checked as a non-zombie process (`ps` state). Fixture pid
+      files are KILLed in `finally`;
+    - the launcher library with the supervisor: not_started versus a stub
+      supervisor failure; source verification unchanged, changed, no time
+      and verifier failure; digest omitted with no time; a saved FAILED study
+      with a watchdog stage outcome stays FAILED in the merged
+      `status.json`.
 
     Also checked: metrics acceptance with state norms and observed gates;
     the observed-rollout gate report; extension summary units; NaN
@@ -308,15 +328,33 @@ Nothing is clamped by validation. FAILED stops the batch.
   grace, source verification, the digest and the terminal verdict. The
   30-second reserve is allocated explicitly
   (`bin/run_experiments/prospective_momentum_terminal.sh`, amendment R2):
-  - every stage receives TERM at DEADLINE−30 and KILL 5 s later;
+  - every stage's process group receives TERM at DEADLINE−30, and KILL to
+    any remaining member 5 s later;
   - source verification (`sha256sum -c`) is bounded to finish by
     DEADLINE−20;
   - the digest is bounded to DEADLINE−8, at most 12 s;
   - the terminal verdict is bounded to DEADLINE−3, at most 5 s.
 
-  A step with no time left is not started and is recorded as such.
-  Descendant processes are covered because GNU `timeout` signals its whole
-  process group. Partial logs are kept.
+  A step with no time left is not started and is recorded as the explicit
+  outcome `not_started`, not an exit-code sentinel. Partial logs are kept.
+- **Supervisor (amendment F1, 8a09586).** GNU `timeout` stops supervising
+  once its direct child is reaped, so a TERM-ignoring descendant of a leader
+  that exits on TERM could outlive the KILL. It is replaced by the
+  stdlib-only `experiments/prospective_momentum/supervise.py`:
+  - it runs each step as the leader of a new session and process group, and
+    keeps responsibility for the whole group until it is empty;
+  - at TERM time it sends TERM to the group; after the grace it sends KILL
+    to any remaining member, even if the leader has already exited;
+  - members left behind by a leader that completed are sent TERM, then KILL
+    after the grace (never later than TERM time + grace);
+  - on Linux it registers as a child subreaper, so orphaned descendants are
+    reaped rather than left as zombies;
+  - it cleans up the same way if it is itself sent TERM.
+
+  Outcomes are `completed` (with the exit code), `watchdog_term`,
+  `watchdog_kill` and `supervisor_failure` (unstartable command, members
+  surviving KILL, or no outcome file). A descendant that deliberately leaves
+  the process group is outside this guarantee.
 - **Preflight.** It measures the actual continuation path from each restored
   source, for all six arms:
   - one shared host-step function (batch generation, compiled step with
@@ -348,9 +386,17 @@ Nothing is clamped by validation. FAILED stops the batch.
 - **Terminal verdict (amendments R1–R2).** It is computed by
   `experiments.prospective_momentum.terminal` and merged into `status.json`
   under `terminal`, and it is always written to `logs/<stamp>/terminal.json`.
-  Worst wins:
-  - the stage outcome: 0 PASS; 3, the watchdog or not started INCOMPLETE;
-    4 or any other exit FAILED;
+  The saved `status.json` is read and validated BEFORE the verdict is
+  computed (amendment F2). Worst wins:
+  - the saved study verdict: `study_status` with a consistent `study_exit`
+    enters with its own severity, and its `failed`/`incomplete` reason is
+    kept in `terminal.saved_study` and in the reasons. An unfinalized status
+    is INCOMPLETE; an unreadable or inconsistent one is FAILED. Neither a
+    watchdog outcome nor an outer exit 0 can erase a saved failure;
+  - the stage outcome: completed with exit 0 is PASS; completed with 3,
+    `watchdog_term`, `watchdog_kill` or `not_started` is INCOMPLETE;
+    completed with 4 or any other exit, or `supervisor_failure`, is FAILED;
+  - a verifier or supervisor failure during source verification is FAILED;
   - a changed or missing source checksum gives FAILED;
   - an uncompleted verification or no baseline is never PASS;
   - when a `status.json` exists, a digest that is not `complete` is never
@@ -431,6 +477,22 @@ tolerances, data, schedule, criteria and cap are unchanged.
   margin in its parameterization's units. The manual inward move is labelled
   as projection behaviour. The reproduction-discrepancy wording no longer
   attributes a cause.
+
+### Amendments after static review of 8a09586 (before execution)
+
+The model, equations, gates, arms, checkpoints, numerical tolerances,
+training protocol and cap are unchanged.
+
+- **F1.** GNU `timeout` is replaced by the process-group supervisor, which
+  KILLs descendants even after the leader exits. Dummy-child regressions
+  cover it.
+- **F2.** The terminal verdict now merges the saved study verdict and keeps
+  its reason. "Not started" is an explicit outcome, distinct from a
+  supervisor failure. JSON fixtures cover this.
+- **F3.** The float32 gain fixture now requires exact equality only with the
+  same executed value being reported. The independent float64 exponential
+  is compared at the declared production float32 tolerance, 2e-5 relative,
+  and the discrepancy is printed.
 
 ## 13. Open items for the reviewer (as at a1f0439)
 
