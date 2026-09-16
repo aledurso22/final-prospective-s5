@@ -288,21 +288,76 @@ def test_expm2_derivatives_are_finite_and_correct_across_the_switch(dt):
         assert rel < tol, (dt, m, g, fd, rel)
 
 
-def test_expm2_has_no_nan_from_an_inactive_branch():
+def _shifted_fixture(m):
+    """F1. A STABLE, representable family spanning the same discriminants.
+
+        G_m = [[-c, 1], [m, -c]] ,   c = 1 + sqrt(max(m, 0))
+
+    For `m > 0` the eigenvalues are `-1` and `-1 - 2 sqrt(m)`; for `m < 0` they
+    are `-1 +- i sqrt(|m|)`; at `m = 0` the root is confluent. So it still
+    exercises the positive, negative, confluent and inactive branches at
+    extreme discriminants, but its exponential is always representable.
+
+    The previous fixture `[[0, 1], [m, 0]]` at `m = 1e6` has eigenvalues
+    +-1000, so `exp(G)` and its derivatives genuinely EXCEED float64 range.
+    That is honest overflow in the ACTIVE branch of an unstable matrix, not
+    poisoning by an unused one, and no correct implementation can return a
+    finite answer there. The assertion, not the implementation, was wrong.
+
+    `c` is computed ONCE from the base `m` and held FIXED while differentiating
+    any entry, so the family stays a fixed base matrix rather than a moving
+    target that would silently re-stabilize itself under perturbation.
+    """
+    c = 1.0 + onp.sqrt(max(m, 0.0))
+    return c, onp.array([[-c, 1.0], [m, -c]], dtype=onp.float64)
+
+
+SHIFTED_M = (-1e6, -1e3, -1.0, 0.0, 1.0, 1e3, 1e6)
+
+
+@pytest.mark.parametrize("m", SHIFTED_M)
+def test_expm2_on_the_stable_shifted_family_matches_scipy(m):
+    """Quantitative accuracy on the same fixed-base matrix used below."""
+    _, G = _shifted_fixture(m)
+    ref = sp_expm(G)
+    assert onp.all(onp.isfinite(ref)), (m, "the fixture must be representable")
+    got = onp.asarray(AD.expm2(jnp.asarray(G)))
+    err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
+    print(f"  shifted m={m:+.1e} rel {err:.3e}")
+    assert err < EXACT64, (m, err)
+
+
+@pytest.mark.parametrize("m", SHIFTED_M)
+def test_expm2_has_no_nan_from_an_inactive_branch(m):
     """Every branch is evaluated on where-guarded SAFE inputs, so an inactive
-    branch must not poison the backward pass through a zero cotangent."""
-    for m in (-1e6, -1.0, 0.0, 1.0, 1e6):
-        for entry in range(4):
-            def f(x):
-                g = [jnp.asarray(0.0), jnp.asarray(1.0),
-                     jnp.asarray(float(m)), jnp.asarray(0.0)]
-                g[entry] = x
-                G = jnp.stack([jnp.stack([g[0], g[1]]),
-                               jnp.stack([g[2], g[3]])])
-                return jnp.sum(AD.expm2(G))
-            base = [0.0, 1.0, float(m), 0.0][entry]
-            v = float(jax.grad(f)(jnp.asarray(base)))
-            assert onp.isfinite(v), (m, entry, v)
+    branch must not poison the backward pass through a zero cotangent.
+
+    Differentiated entry by entry about the FIXED shifted base, whose true
+    derivatives are representable — so a non-finite result here is a real
+    defect and not an unrepresentable answer.
+    """
+    c, G0 = _shifted_fixture(m)
+    base = [-c, 1.0, m, -c]
+    for entry in range(4):
+        def f(x):
+            g = [jnp.asarray(v) for v in base]
+            g[entry] = x                      # c stays FIXED, by construction
+            return jnp.sum(AD.expm2(jnp.stack([jnp.stack([g[0], g[1]]),
+                                               jnp.stack([g[2], g[3]])])))
+        v = float(jax.grad(f)(jnp.asarray(base[entry])))
+        assert onp.isfinite(v), (m, entry, v)
+        # and it is the RIGHT derivative, against the independent reference
+        E = onp.zeros((2, 2)); E[entry // 2, entry % 2] = 1.0
+        h = FD64[1] * max(1.0, abs(base[entry]))
+        fd = (sp_expm(G0 + h * E).sum() - sp_expm(G0 - h * E).sum()) / (2 * h)
+        assert onp.isfinite(fd), (m, entry)
+        if abs(fd) < 1e-6:
+            assert abs(v - fd) < NEAR64, (m, entry, v, fd)
+        else:
+            rel = abs(v - fd) / abs(fd)
+            print(f"  d/dg{entry} m={m:+.1e} auto={v:+.6e} ref={fd:+.6e} "
+                  f"rel={rel:.2e}")
+            assert rel < GRAD64, (m, entry, v, fd, rel)
 
 
 # ------------------------- reduction to the completed study ----------------
@@ -1461,6 +1516,65 @@ def test_derived_physical_coefficients_are_finite_and_positive(rule):
             assert vals["M"] > 0 and vals["T"] > 0 and vals["gamma"] == 0.0
         else:
             assert not any(k.startswith("raw_") for k in p)
+
+
+@pytest.mark.parametrize("rule", list(AD.RULES))
+def test_the_checkpoint_validator_accepts_every_declared_initialization(rule):
+    """F2. The gate must not reject a legitimate arm - including TSS, whose
+    gamma = 0 is intentional and must never be tested against the generalized
+    candidate's sector."""
+    from experiments.adaptive_memory import study as ST
+    cfg = CAL.configurations()["slots"]
+    for tag in ("A", "B"):
+        for dt in (onp.float32, onp.float64):
+            p = AM.init_params(rule, 95, init_coeffs=cfg.get(f"{rule}/{tag}"),
+                               dtype=dt)
+            assert ST.validate_coefficients(rule, p) is None, (rule, tag, dt)
+
+
+def test_the_checkpoint_validator_rejects_a_drifted_learned_coefficient():
+    """F2. The learned coefficients are what matter: a checkpoint whose raw
+    scalars have drifted to non-finite or out-of-sector values must produce a
+    RECORDED FAILED RUN, not a silent PASS with a report flag saying
+    otherwise. These fixtures edit a trained-parameter dict directly; they do
+    not train and do not change any declared configuration.
+    """
+    from experiments.adaptive_memory import study as ST
+    cfg = CAL.configurations()["slots"]
+
+    def poisoned(rule, **kw):
+        p = AM.init_params(rule, 96, init_coeffs=cfg[f"{rule}/A"],
+                           dtype=onp.float64)
+        return dict(p, **{k: jnp.asarray([v], onp.float64)
+                          for k, v in kw.items()})
+
+    # a raw logarithm that overflows its executed exponential
+    for rule, leaf in (("adaptive_prospective", "raw_nu"),
+                       ("adaptive_inertial", "raw_eta"),
+                       ("adaptive_delta", "raw_eta"),
+                       ("tss_prospective", "raw_tau_m")):
+        msg = ST.validate_coefficients(rule, poisoned(rule, **{leaf: 1e6}))
+        assert msg and "finite" in msg, (rule, leaf, msg)
+        msg = ST.validate_coefficients(rule, poisoned(rule, **{leaf: onp.nan}))
+        assert msg, (rule, leaf, "NaN must be rejected")
+
+    # rho -> 1 collapses kappa and drives M onto gamma*T: the admissibility
+    # boundary must be caught rather than accepted as "just inside"
+    msg = ST.validate_coefficients(
+        "adaptive_prospective", poisoned("adaptive_prospective", raw_rho=1e6))
+    assert msg is not None, "rho = 1 must not be accepted"
+    assert any(w in msg for w in ("kappa", "rho", "admissibility")), msg
+
+    # TSS: adaptation must stay strictly faster than the membrane
+    msg = ST.validate_coefficients(
+        "tss_prospective", poisoned("tss_prospective", raw_ratio=1e6))
+    assert msg and "faster" in msg, msg
+
+    # and a healthy checkpoint still passes, so the gate is not vacuous
+    for rule in AM.NEW_RULES:
+        p = AM.init_params(rule, 96, init_coeffs=cfg[f"{rule}/A"],
+                           dtype=onp.float64)
+        assert ST.validate_coefficients(rule, p) is None, rule
 
 
 def test_the_study_reports_the_executed_constraint_for_every_arm():

@@ -221,6 +221,16 @@ result; a needed repair is recorded in this file rather than silently applied.
 | FD steps | float64 `(1e−5, 1e−6)`; float32 `(1e−2, 3e−3)` | both enforced, each separately |
 | `expm2` switch | `(8!·eps)^{1/4}` — ≈`0.26` float32, ≈`1.7e−3` float64 | series/closed-form threshold on `m = μh²`, derived from the dtype, not tuned |
 
+**What the switch estimate does and does not establish.** It equates the first
+omitted **value** term `m⁴/8!` with the machine epsilon. It says nothing
+directly about derivative error: differentiating that omitted term gives
+`4m³/8!`, which at the switch is about `4·eps/switch` — roughly `1e−6` in
+float32 and `2.5e−13` in float64, not machine epsilon. The derivative accuracy
+near the switch is therefore **measured**, not inferred: the checks compare
+directional derivatives against central differences of an independent
+reference on both sides of the real switch in both dtypes and record the
+numbers. No tolerance is changed by this clarification.
+
 **Initial-condition convention.** Every derivative check holds the initial
 carry parameter-independent. `Z₀` and `P₀ = −γZ₀` (and `P₀ = τ_m(W₀−A₀)` for
 arm 4) define *different* initial-condition dependencies once the coefficients
@@ -341,3 +351,16 @@ static correction, verified on the cluster by the checks listed in §7.
 
 The seven arms, equations, calibration target, seeds, training length,
 tolerances and the 600-second cap are unchanged by every item above.
+
+## 11. Dispositions — follow-up review `IMPLEMENTATION_REVIEW_9ca0de6.md`
+
+| | Finding | Disposition |
+|---|---|---|
+| **F1** | The inactive-branch fixture `[[0,1],[m,0]]` at `m = 1e6` has eigenvalues `±1000`; its true exponential and derivatives exceed float64 range, so the unconditional finite-gradient assertion could not pass. That is honest overflow in the **active** branch of an unstable matrix, not poisoning by an unused one. | **Fixed — the assertion was wrong, not the implementation.** The fixture is now the review's stable shifted family `G_m = [[−c, 1], [m, −c]]` with `c = 1 + √max(m,0)`, over `m ∈ {−1e6, −1e3, −1, 0, 1, 1e3, 1e6}`. Eigenvalues are `−1, −1−2√m` for `m > 0` and `−1 ± i√|m|` for `m < 0`, so the positive, negative, confluent and inactive branches are all still exercised at extreme discriminants — but every exponential is representable. `c` is computed **once** from the base `m` and held **fixed** while differentiating each entry, so the base matrix cannot silently re-stabilize under perturbation. The same fixed-base matrix is used for the quantitative SciPy comparison and for per-entry derivative comparison. No tolerance was relaxed, no case removed and no model clamp added. |
+| **F2** | Derived-coefficient assertions inspected only the **initialized** slots; `coefficient_report` recorded a constraint boolean without enforcing it, so a drifted learned coefficient could reach a PASS with a false flag. | **Fixed.** `study.validate_coefficients(rule, p)` is a shared host-side checkpoint gate, run on the trained parameters of **every** development and final run before the checkpoint is accepted for selection or evaluation. It requires finite derived scalars and each arm's **own** declared constraint: positivity and `0 < M < γT` for the generalized candidate; positivity for the inertial and delta arms; and for TSS, positivity of `τ_m, M, T` with `0 < ε < τ_m` and `γ` **exactly** 0. **TSS is deliberately never checked against `M < γT`** — it is outside that sector by construction, and that is the point of including it. A violation is a recorded failed run (exit 4), never a silent PASS. |
+| **F2b** | The delta arm's reported `η` was reconstructed with host NumPy from a float-converted raw value | **Fixed.** `coefficient_report` and the validator both use the executed transform at the executed dtype. A finite logarithm does not establish a finite executed coefficient. |
+| Reporting | The switch estimate bounds the first omitted **value** term and does not establish machine-epsilon **derivative** error | **Corrected in §6.** The derivative error near the switch is stated as ≈`4·eps/switch` and is **measured** by the checks rather than inferred from the value bound. No tolerance change. |
+
+Scope note, stated precisely: the focused checks validate the **initialized**
+A/B slots; `validate_coefficients` validates the **learned** coefficients at
+every checkpoint. Both are required, and neither is described as the other.

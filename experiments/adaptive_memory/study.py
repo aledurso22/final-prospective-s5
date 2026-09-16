@@ -176,7 +176,10 @@ def coefficient_report(rule, p, eps_np=None):
         out.update({k: float(onp.asarray(c[k]).ravel()[0])
                     for k in ("eta", "tau")})
     elif rule == "adaptive_delta":
-        out["eta"] = float(onp.exp(float(onp.asarray(p["raw_eta"]).ravel()[0])))
+        # F2: the EXECUTED transform at the executed dtype, not a host
+        # NumPy exp of a float-converted raw value. A finite logarithm does
+        # not establish a finite executed coefficient.
+        out["eta"] = float(jnp.exp(p["raw_eta"]).ravel()[0])
     elif rule == "tss_prospective":
         c = AD.tss_response(p)
         out.update({k: float(onp.asarray(c[k]).ravel()[0]) for k in
@@ -192,6 +195,67 @@ def coefficient_report(rule, p, eps_np=None):
         from experiments.nested_memory.study import gate_report
         out["gates"] = gate_report(rule, p, eps_np)
     return out
+
+
+def validate_coefficients(rule, p):
+    """F2. Enforce the executed constraints on the LEARNED coefficients.
+
+    The initialized A/B slots are checked separately in the focused checks.
+    This is the host-side checkpoint gate: after training, the derived
+    physical coefficients must still be finite and must still satisfy the
+    sector their own arm declares, BEFORE the checkpoint is accepted for
+    selection or evaluation. A violation is a recorded failed run, never a
+    silent PASS with a report flag that says otherwise.
+
+    Each arm is checked against ITS OWN constraint. TSS has `gamma = 0` by
+    construction and is deliberately outside the generalized candidate's
+    `M < gamma T` sector; it is never checked against it.
+
+    Returns `None` when the checkpoint is acceptable, else a reason string.
+    """
+    def scalars(d):
+        return {k: float(jnp.asarray(v).ravel()[0]) for k, v in d.items()}
+
+    if rule == "adaptive_prospective":
+        c = scalars(AD.response(p))
+        if not all(onp.isfinite(v) for v in c.values()):
+            return f"non-finite derived response coefficients: {c}"
+        for k in ("nu", "tau", "M", "gamma", "T", "eta", "kappa"):
+            if not c[k] > 0.0:
+                return f"derived {k} = {c[k]!r} is not positive: {c}"
+        if not 0.0 < c["rho"] < 1.0:
+            return f"derived rho = {c['rho']!r} left (0, 1): {c}"
+        if not c["M"] < c["gamma"] * c["T"]:
+            return (f"admissibility violated: M = {c['M']!r} is not below "
+                    f"gamma*T = {c['gamma'] * c['T']!r}: {c}")
+    elif rule == "adaptive_inertial":
+        c = scalars(AD.inertial_response(p))
+        if not all(onp.isfinite(v) for v in c.values()):
+            return f"non-finite derived inertial coefficients: {c}"
+        if not (c["eta"] > 0.0 and c["tau"] > 0.0):
+            return f"derived inertial coefficients not positive: {c}"
+    elif rule == "adaptive_delta":
+        eta = float(jnp.exp(p["raw_eta"]).ravel()[0])
+        if not (onp.isfinite(eta) and eta > 0.0):
+            return f"derived eta = {eta!r} is not finite and positive"
+    elif rule == "tss_prospective":
+        c = scalars(AD.tss_response(p))
+        if not all(onp.isfinite(v) for v in c.values()):
+            return f"non-finite derived TSS coefficients: {c}"
+        if not c["tau_m"] > 0.0:
+            return f"derived tau_m = {c['tau_m']!r} is not positive: {c}"
+        if not 0.0 < c["epsilon"] < c["tau_m"]:
+            return (f"finite adaptation is not strictly faster than the "
+                    f"membrane: epsilon = {c['epsilon']!r}, "
+                    f"tau_m = {c['tau_m']!r}")
+        if not (c["M"] > 0.0 and c["T"] > 0.0):
+            return f"derived TSS M or T is not positive: {c}"
+        if c["gamma"] != 0.0:
+            return (f"TSS gamma must remain exactly 0 by construction, got "
+                    f"{c['gamma']!r}")
+        # deliberately NOT checked against M < gamma*T: this reference lies
+        # outside the generalized candidate's sector, and that is intended
+    return None
 
 
 def jsonable(o):
@@ -275,6 +339,9 @@ def run_one(slot, seed, val_np, updates, out, deadline, reserve_s, status, tag):
         bad = "non-finite final parameters"
     elif not metrics_finite(final):
         bad = "non-finite validation metric"
+    else:
+        # F2: the learned coefficients, not the initialized fixture
+        bad = validate_coefficients(rule, p)
     stem = f"{tag}_{rule}_{slot['config']}_seed{seed}"
     save_tree(os.path.join(out, "params", stem + ".msgpack"), p)
     save_tree(os.path.join(out, "params", stem + "_opt.msgpack"), opt)
@@ -292,7 +359,7 @@ def run_one(slot, seed, val_np, updates, out, deadline, reserve_s, status, tag):
         config_hash=config_hash(rule, slot, seed),
         initialization=slot,
         coefficients_final=coefficient_report(rule, p, val_np),
-        nonfinite=bad)
+        invalid=bad)
     return rec, p
 
 
@@ -666,8 +733,8 @@ def main():
             if r is None:
                 break
             rec, _ = r
-            if rec["nonfinite"]:
-                status["failed"] = (f"dev {rule}/{tag}: {rec['nonfinite']}")
+            if rec["invalid"]:
+                status["failed"] = f"dev {rule}/{tag}: {rec['invalid']}"
                 write(os.path.join(out, "status.json"), status)
                 print(f"[FAIL] {status['failed']}")
                 print(f"ADAPTIVE_STATUS=FAILED out={out}")
@@ -709,8 +776,8 @@ def main():
             if r is None:
                 break
             rec, p = r
-            if rec["nonfinite"]:
-                status["failed"] = f"final {rule}/seed{seed}: {rec['nonfinite']}"
+            if rec["invalid"]:
+                status["failed"] = f"final {rule}/seed{seed}: {rec['invalid']}"
                 write(os.path.join(out, "status.json"), status)
                 print(f"[FAIL] {status['failed']}")
                 print(f"ADAPTIVE_STATUS=FAILED out={out}")

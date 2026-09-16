@@ -18,7 +18,8 @@ cluster output, favourable or not.
 | Checks | `tests/test_adaptive_memory.py` |
 | Launcher | `bin/run_experiments/cluster_adaptive_memory.sh` |
 | Reviewed commit | `c12e20b` — static review `IMPLEMENTATION_REVIEW_c12e20b.md`, fix-before-launch |
-| Launch commit | `8999d2ef7e1c4a1b73f02909cf7b91c470fff727` (R1–R5 corrected) |
+| Reviewed commit | `9ca0de6` — follow-up review `IMPLEMENTATION_REVIEW_9ca0de6.md`, F1/F2 |
+| Launch commit | *(this commit — R1–R5 and F1/F2 corrected)* |
 | Executed commit | *(to be recorded from the launcher's `git rev-parse HEAD`)* |
 
 Coordinator sources, all dated 16 September 2026:
@@ -100,6 +101,24 @@ defects, all static. Full dispositions are in
 Two of these — R1 and R4 — would have failed the batch at the checks with no
 training, exactly as the nested study's first dispatch did. They were found by
 reading, not by running.
+
+### Follow-up review of `9ca0de6` — F1, F2
+
+* **F1** — my own inactive-branch fixture was wrong: `[[0,1],[1e6,0]]` has
+  eigenvalues `±1000`, whose exponential genuinely exceeds float64 range, and
+  I had asserted a finite derivative from it unconditionally. No correct
+  implementation could pass. Replaced with the review's stable shifted family
+  `[[−c,1],[m,−c]]`, `c = 1+√max(m,0)`, held fixed under differentiation —
+  same extreme discriminants, representable answers. This would have failed
+  the batch at the checks.
+* **F2** — the derived-coefficient assertions covered only the *initialized*
+  slots, while the report recorded a constraint boolean it did not enforce.
+  `validate_coefficients` now gates every trained checkpoint on its own arm's
+  constraint, with TSS's intentional `γ = 0` preserved and never tested
+  against the generalized sector. The delta arm's `η` is now read through the
+  executed transform rather than host NumPy.
+
+Full dispositions in `docs/ADAPTIVE_MEMORY_PROTOCOL.md` §11.
 
 ## Declared configuration
 
