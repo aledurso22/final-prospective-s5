@@ -444,6 +444,34 @@ additionally requires lower relative error than the GLE-inspired baseline at
 Initial-state gradients stay outside the approximate comparison — those initial
 conditions are fixed — and that is recorded, not hidden.
 
+**Amendment, 16 September 2026: the budget's own overheads.** With the
+weak-type fix the projection fell from 2431 s to **128.5 s** — the memory arm's
+step went 2560.91 ms to **3.00 ms** — and Part A still did not start, by 21 s
+(`6000b26`, logs `20260916-020800`). The accounting:
+
+| item | cost |
+|---|---|
+| focused checks | 177 s (50 tests; was 154 s at 42, 76 s at 30) |
+| Part A preflight | 84 s (the stage breakdown, ~7 extra compiles per arm) |
+| elapsed at the decision | 264 s against Part A's deadline of START + 400 |
+| remaining | 107 s, against 128.5 s needed |
+
+Neither overhead is the study. Two corrections, both from measurement:
+
+* **The stage breakdown is diagnostic and is no longer measured every run.**
+  It costs about a sixth of the whole cap. It is off by default and turned on
+  automatically **when the projection does not fit** — exactly when it is the
+  thing that explains the projection — or with `--profile`.
+* **Part B's reserve was a guess of 200 s.** Part B has measured 33 s on four
+  consecutive runs and carries its own preflight that refuses rather than
+  overruns, so the reserve is now 100 s, a 3x margin on the measurement. The
+  guess was costing Part A a third of a budget it never needed.
+
+The checks are also now run with `--durations=10`, because a suite that has
+grown 76 s to 177 s while the study it protects needs 129 s is worth watching
+rather than discovering again. **The study itself is unchanged**: same arms,
+seeds, updates, iterations and tolerances.
+
 **Amendment, 16 September 2026: the memory comparator was never slow; the
 MEASUREMENT was wrong.** The stage-by-stage bisect (`c7d7bf2`, logs
 `20260916-015831`) closed this:

@@ -59,9 +59,9 @@ LEFT=$(( $(remaining) - RESERVE_S ))
 [ "$LEFT" -gt 30 ] || finish INCOMPLETE 3 "no time for the focused checks"
 rc=0
 timeout --kill-after=10 --signal=TERM "${LEFT}s" \
-  "$PY" -u -m pytest tests/test_tss_pilot.py -q \
+  "$PY" -u -m pytest tests/test_tss_pilot.py -q --durations=10 \
   > "$LOG_DIR/checks.log" 2>&1 || rc=$?
-echo "--- focused checks ---"; tail -20 "$LOG_DIR/checks.log"
+echo "--- focused checks ---"; tail -24 "$LOG_DIR/checks.log"
 echo "checks raw exit: $rc  (elapsed $(( $(date +%s) - START ))s)"
 if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
   finish INCOMPLETE 3 "focused checks hit the deadline"
@@ -74,8 +74,13 @@ rc_a=0; rc_b=0
 # R9: an explicit sub-deadline per part. Part A is capped before the end of the
 # budget so that Part B cannot be squeezed into a partial comparison, and each
 # runner enforces its own deadline in its inner loop rather than relying on the
-# outer watchdog. PART_B_RESERVE_S is measured against Part B's own preflight.
-PART_B_RESERVE_S=${PART_B_RESERVE_S:-200}
+# outer watchdog.
+#
+# PART_B_RESERVE_S was a guess of 200 s. Part B has since measured 33 s on four
+# consecutive runs, and it carries its own preflight which refuses rather than
+# overruns, so the reserve is now set from that measurement with a 3x margin.
+# The 200 s guess was costing Part A a third of the budget it never needed.
+PART_B_RESERVE_S=${PART_B_RESERVE_S:-100}
 DEADLINE_A=$(( DEADLINE - PART_B_RESERVE_S ))
 
 # ---- 3. Part A: forward-model comparison under exact BPTT

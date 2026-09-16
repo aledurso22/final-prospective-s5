@@ -325,12 +325,18 @@ def component_timing(arm, p, cfg, es, args=None, tx=None, opt=None):
     return out
 
 
-def preflight(cfg, status):
+def preflight(cfg, status, profile=False):
     """Measure compile and steady step cost for EVERY arm, then project.
 
     Compile and steady cost are measured separately and only the steady part is
     scaled by the update count. Preflight state is discarded; the comparative
     runs re-initialize.
+
+    `profile` adds the stage-by-stage breakdown. It is DIAGNOSTIC and costs
+    about seven extra jit compilations per arm - roughly 84 s of a 600 s cap,
+    which is a sixth of the budget spent measuring rather than running. It is
+    therefore off by default and turned on automatically when the projection
+    does NOT fit, which is exactly when it is worth having.
     """
     rng = onp.random.RandomState(0)
     xs, y_sig, y_cls, q_idx, _ = TK.generate(rng, BATCH)
@@ -369,15 +375,16 @@ def preflight(cfg, status):
                          jit_cache=[n_before, n_after],
                          params=TM.parameter_count(p),
                          state=TM.temporal_state_count(arm)))
-        es = jnp.swapaxes(TM.encode(p, args[0]), 0, 1)   # (L, B, D_ENC)
-        comp = component_timing(arm, p, cfg, es, args=args, tx=tx, opt=opt)
-        rows[-1]["components_ms"] = comp
         print(f"[preflight] {arm:24s} compile {compile_s:6.1f}s  "
               f"step {step_s * 1e3:7.2f}ms  arm {arm_s:6.1f}s  "
               f"params {TM.parameter_count(p):5d}  "
               f"states {TM.temporal_state_count(arm)['total']:3d}")
-        print("            components " + "  ".join(
-            f"{k.replace('_ms', '')}={v:.2f}ms" for k, v in comp.items()))
+        if profile:
+            es = jnp.swapaxes(TM.encode(p, args[0]), 0, 1)   # (L, B, D_ENC)
+            comp = component_timing(arm, p, cfg, es, args=args, tx=tx, opt=opt)
+            rows[-1]["components_ms"] = comp
+            print("            components " + "  ".join(
+                f"{k.replace('_ms', '')}={v:.2f}ms" for k, v in comp.items()))
         del p2, opt2
     # evaluation, interventions, probes, checkpoints and the post-training
     # correctness checks. An allowance, measured only as such.
@@ -405,6 +412,9 @@ def main():
     ap.add_argument("--reserve_s", type=float, default=30.0)
     ap.add_argument("--matmul_precision", default="highest")
     ap.add_argument("--preflight_only", action="store_true")
+    ap.add_argument("--profile", action="store_true",
+                    help="always measure the stage-by-stage breakdown; it is "
+                         "otherwise measured only when the projection fails")
     ap.add_argument("--allow_cpu", action="store_true")
     args = ap.parse_args()
 
@@ -502,11 +512,17 @@ def main():
           f"admissible under M<=gamma*T: {tss_eq['admissible']}")
     write(os.path.join(out, "status.json"), status)
 
-    proj = preflight(cfg, status)
+    proj = preflight(cfg, status, profile=args.profile)
     write(os.path.join(out, "status.json"), status)
     if args.preflight_only:
         print(f"TSS_A_STATUS=PREFLIGHT_ONLY out={out}")
         return 0
+    if proj > left() and not args.profile:
+        # It does not fit: NOW the stage breakdown is worth its cost, because
+        # it is the thing that explains the projection.
+        print("[*] projection does not fit; measuring the stage breakdown")
+        preflight(cfg, status, profile=True)
+        write(os.path.join(out, "status.json"), status)
     if proj > left():
         status["incomplete"].append(
             f"projected {proj:.0f}s > remaining {left():.0f}s; Part A NOT "
