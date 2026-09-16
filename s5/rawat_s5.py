@@ -72,6 +72,11 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
              # learned per-mode response TIMESCALE T_i alongside rho_i; the
              # `_fixed` variant stores eta but never updates it
              "gp_rho_T", "gp_rho_T_fixed",
+             # NEXT_PROSPECTIVE_S5_CODING_BRIEF (16 Sep 2026): the paired
+             # continuation study. B = Rawat with a learned per-mode INPUT
+             # horizon; C = the SAME learned input horizon plus the stable
+             # generalized prospective recurrence with learned (rho, T).
+             "rawat_learned_input", "sgp_learned_input",
              # superseded by the constrained-response brief of 2026-09-15;
              # RETAINED and still selectable, but not part of that batch.
              "gp_adaptive_mass", "gp_frozen_adaptive", "ordinary_adaptive")
@@ -129,7 +134,17 @@ RHO_INIT_TIMESCALE = 0.75
 #: responses whose carry is the (s, v) block and therefore accept a z0 carry
 _BLOCK_CARRY_RESPONSES = ("gp_fixed_mass", "gp_learned_response", "gp_rho",
                           "gp_rho_frozen", "gp_rho_prospin",
-                          "gp_rho_T", "gp_rho_T_fixed")
+                          "gp_rho_T", "gp_rho_T_fixed", "sgp_learned_input")
+#: responses with a delayed-input tap that therefore accept a prev_x carry
+_PREV_X_RESPONSES = ("gp_rho_prospin", "rawat_learned_input",
+                     "sgp_learned_input")
+#: the paired-continuation responses and the leaves each one declares. The
+#: leaves are appended AFTER every inherited S5 parameter, so the common tree
+#: is identical to alpha_p_s5's and a saved Rawat checkpoint loads into it.
+STABLE_GP_RESPONSES = {
+    "rawat_learned_input": ("log_T_in",),
+    "sgp_learned_input": ("log_T_in", "log_rho_rec", "log_T_rec"),
+}
 #: declared initialization for the recall study; a declared choice, not a
 #: physiological measurement
 RHO_INIT_RECALL = 0.9998
@@ -252,6 +267,18 @@ class SubstrateSSM(S5SSM):
         if self.response.startswith(("gp_adaptive", "gp_frozen")):
             from .adaptive_circuit import validate_reference
             validate_reference()
+        if self.response in STABLE_GP_RESPONSES:
+            if not (self.clip_eigs and self.input_gain == "alpha"):
+                raise ValueError(
+                    "the paired-continuation arms are Rawat's substrate: "
+                    "alpha input gain and pole clipping are required, since "
+                    "the stability domain assumes Re(j) > 0")
+            # DIRECT log coordinates, zero-initialized, float32 like every
+            # other leaf. Declared in a fixed order after super().setup().
+            for leaf in STABLE_GP_RESPONSES[self.response]:
+                setattr(self, leaf, self.param(
+                    leaf, lambda rng, shape: np.zeros(shape, dtype=np.float32),
+                    (self.P,)))
         if self.response in RHO_ONLY_RESPONSES:
             # Declared LAST, after super().setup(), so the common parameter
             # draw is bit-identical to the ordinary arm under the same key.
@@ -285,6 +312,21 @@ class SubstrateSSM(S5SSM):
                 lambda rng, shape: np.full(shape, math.log(0.75),
                                            dtype=np.float32),
                 (self.P,))                           # rho = 0.75
+
+    def input_horizon(self):
+        """T_in = 5 exp(q), per stored mode. No clip: q is unconstrained."""
+        from .stable_gp import INPUT_T_REFERENCE
+        return INPUT_T_REFERENCE * np.exp(self.log_T_in)
+
+    def recurrent_rho(self):
+        """rho = exp(r). No forward clip; feasibility is a post-update
+        projection of r onto the stable interior (s5.stable_gp)."""
+        return np.exp(self.log_rho_rec)
+
+    def recurrent_T(self):
+        """T = 5 exp(t). No forward clip and no guardrail interval."""
+        from .stable_gp import RECURRENT_T_REFERENCE
+        return RECURRENT_T_REFERENCE * np.exp(self.log_T_rec)
 
     def _native(self):
         B_tilde = self.B[..., 0] + 1j * self.B[..., 1]
@@ -346,7 +388,25 @@ class SubstrateSSM(S5SSM):
         if self.response in ("one_tap", "alpha_p_two_tap"):
             return two_tap_coefficients(Lambda, B_c, Delta,
                                         self.prospective_horizon)
+        if self.response == "rawat_learned_input":
+            # Rawat's own coefficient helper with a PER-MODE horizon. At q = 0
+            # the horizon is exactly 5.0 and the arithmetic is Rawat's.
+            T_in = self.input_horizon()
+            return dict(two_tap_coefficients(Lambda, B_c, Delta, T_in),
+                        executed_T_in=T_in)
         a, b = self.clock_absorbed()
+        if self.response == "sgp_learned_input":
+            # gamma = 1 (absorbed clock); M = rho T derived. The block algebra
+            # of mass_block_zoh does not assume rho <= 1.
+            rho, T, T_in = (self.recurrent_rho(), self.recurrent_T(),
+                            self.input_horizon())
+            d = mass_block_zoh(a, b, T, np.ones_like(rho), rho)
+            # J_in = T_in * A_bar @ B with the CONTINUOUS B, per mode
+            J_in = (T_in.astype(d["A_bar"].real.dtype)[:, None, None]
+                    * np.einsum("pij,pjh->pih", d["A_bar"], d["B"]))
+            return dict(d, J_in=J_in, B_plus=d["B_bar"] + J_in,
+                        B_minus=-J_in, executed_rho=rho, executed_T=T,
+                        executed_T_in=T_in, derived_M=rho * T)
         if self.response == "gp_fixed_m0":
             return fixed_m0_coefficients(a, b, self.physical.T,
                                          self.physical.gamma)
@@ -405,7 +465,7 @@ class SubstrateSSM(S5SSM):
         """Executed carry sizes in REAL coordinates, derived from the law."""
         two_state = self.response in ("gp_fixed_mass", "gp_learned_response",
                                       "gp_rho", "gp_rho_frozen",
-                                      "gp_rho_prospin",
+                                      "gp_rho_prospin", "sgp_learned_input",
                                       "gp_rho_T", "gp_rho_T_fixed",
                                       "gp_adaptive_mass", "gp_frozen_adaptive")
         c = state_counts(self.P, self.conj_sym,
@@ -413,7 +473,8 @@ class SubstrateSSM(S5SSM):
         if self.response == "prospective_recurrence":
             c = dict(c, physical_real=0, total_real=0,
                      note="memoryless by construction: s_k = J^-1 b x_k")
-        if self.response in ("alpha_p_two_tap", "gp_rho_prospin"):
+        if self.response in ("alpha_p_two_tap", "gp_rho_prospin",
+                             "rawat_learned_input", "sgp_learned_input"):
             # the second tap carries the PREVIOUS token, which is real carried
             # state even though it costs no parameters
             c = dict(c, previous_input_buffer=self.H,
@@ -434,11 +495,12 @@ class SubstrateSSM(S5SSM):
         two-tap block response consumes `prev_x`; passing it to a response with
         no second tap is an error rather than a silent no-op.
         """
-        if prev_x is not None and self.response != "gp_rho_prospin":
+        if prev_x is not None and self.response not in _PREV_X_RESPONSES:
             raise ValueError(
                 f"response {self.response!r} has no delayed-input tap, so a "
                 f"prev_x carry would be silently discarded")
-        if z0 is not None and self.response not in _BLOCK_CARRY_RESPONSES:
+        if (z0 is not None and self.response not in _BLOCK_CARRY_RESPONSES
+                and self.response != "rawat_learned_input"):
             raise ValueError(
                 f"response {self.response!r} does not accept a block carry z0; "
                 f"refusing to discard it silently")
@@ -479,6 +541,30 @@ class SubstrateSSM(S5SSM):
             A_bar, B_bar = adaptive_zoh(A, Bx)
             zs = adaptive_scan(A_bar, B_bar, d_jump, input_sequence,
                                reset_mask=reset_mask)
+            return self._readout(zs[..., 0], Du)
+
+        if self.response == "rawat_learned_input":
+            # Diagonal two-tap law with a per-mode horizon. `prev_x` and the
+            # diagonal carry `z0` (shape (P,)) are reset TOGETHER: clearing
+            # only the state would leak the previous sequence's last token
+            # through the second tap. With no carries and no resets this is
+            # exactly Rawat's drive (delayed input starts at zero).
+            from .gp_fixed import _delayed_inputs
+            x_prev = _delayed_inputs(input_sequence, prev_x, reset_mask)
+            drive = (jax.vmap(lambda u: c["B_plus"] @ u)(input_sequence)
+                     + jax.vmap(lambda u: c["B_minus"] @ u)(x_prev))
+            if z0 is not None:
+                keep0 = (1.0 if reset_mask is None else
+                         (~np.asarray(reset_mask, dtype=bool))[0].astype(
+                             c["A_bar"].real.dtype))
+                drive = drive.at[0].add(keep0 * c["A_bar"] * z0)
+            hs = diagonal_scan_drive(c["A_bar"], drive, reset_mask)
+            return self._readout(hs, Du)
+
+        if self.response == "sgp_learned_input":
+            zs = mass_scan_two_tap(c["A_bar"],
+                                   c["B_plus"], c["B_minus"], input_sequence,
+                                   z0=z0, prev_x=prev_x, reset_mask=reset_mask)
             return self._readout(zs[..., 0], Du)
 
         if self.response == "gp_rho_prospin":
@@ -572,6 +658,12 @@ ARMS = {
     "gp_rho_T_fixed": dict(input_gain="alpha", clip_eigs=True,
                            response="gp_rho_T_fixed",
                            rho_init=RHO_INIT_TIMESCALE),
+    # --- paired continuation from a saved Rawat checkpoint (16 Sep 2026)
+    #     A = alpha_p_s5 unchanged; B and C below. Same substrate.
+    "rawat_learned_input": dict(input_gain="alpha", clip_eigs=True,
+                                response="rawat_learned_input"),
+    "sgp_learned_input": dict(input_gain="alpha", clip_eigs=True,
+                              response="sgp_learned_input"),
     # --- RETAINED but superseded: within-sequence adaptation arms. Kept
     #     selectable and tested; NOT part of the constrained-response batch.
     "gp_adaptive_mass": dict(input_gain="alpha", clip_eigs=True,

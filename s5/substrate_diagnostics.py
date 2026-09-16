@@ -61,7 +61,13 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
              # the (s, v) block driven by x + T_in x_dot: a TWO-tap block law
              "gp_rho_prospin",
              # memoryless by construction: K_0 only
-             "prospective_recurrence")
+             "prospective_recurrence",
+             # paired continuation study (16 Sep 2026): a DIAGONAL two-tap law
+             # with a per-mode input horizon, and the two-tap (s, v) block law
+             # with learned (rho, T) and the same per-mode input horizon
+             "rawat_learned_input", "sgp_learned_input")
+#: diagonal two-tap laws, extracted exactly as alpha-P-S5
+_DIAG_TWO_TAP = ("alpha_p_two_tap", "rawat_learned_input")
 
 #: the responses whose block realization is the ONE-tap (s, v) mass block
 #: The learned-timescale arms belong here because their realization IS the
@@ -71,7 +77,7 @@ RESPONSES = ("one_tap", "alpha_p_two_tap", "gp_fixed_m0", "gp_fixed_mass",
 _MASS_LIKE = ("gp_fixed_mass", "gp_rho", "gp_rho_frozen",
               "gp_rho_T", "gp_rho_T_fixed")
 #: the TWO-tap block law; extracted separately, never through _MASS_LIKE
-_MASS_TWO_TAP = ("gp_rho_prospin",)
+_MASS_TWO_TAP = ("gp_rho_prospin", "sgp_learned_input")
 
 
 def _np(x):
@@ -88,6 +94,14 @@ def _executed_response(seq):
     dataclass field, so a caller cannot read a stale constant by accident.
     """
     from .rawat_s5 import RHO_ONLY_RESPONSES, T_RESPONSES
+    if seq.response == "sgp_learned_input":
+        T, rho = seq.recurrent_T(), seq.recurrent_rho()
+        return dict(kind="stable_generalized_learned_rho_T_T_in", T=T,
+                    rho=rho, gamma_n=1.0, mu=T * rho,
+                    T_in=seq.input_horizon(), T_is_per_mode=True)
+    if seq.response == "rawat_learned_input":
+        return dict(kind="rawat_learned_T_in", T_in=seq.input_horizon(),
+                    T_is_per_mode=True)
     if seq.response in T_RESPONSES:
         T = seq.response_timescale()
         rho = seq.rho_only()
@@ -162,7 +176,7 @@ def impulse_matrices(core, n_lags):
     H = D.shape[0]
     K = onp.zeros((n_lags, H, H), dtype=onp.float64)
 
-    if resp in ("one_tap", "alpha_p_two_tap"):
+    if resp in ("one_tap",) + _DIAG_TWO_TAP:
         A = _np(c["A_bar"])
         if resp == "one_tap":
             state = _np(c["B_bar"]).astype(onp.complex128)
@@ -172,7 +186,7 @@ def impulse_matrices(core, n_lags):
         K[0] = R(state) + onp.diag(D)
         for l in range(1, n_lags):
             state = A[:, None] * state
-            if resp == "alpha_p_two_tap" and l == 1:
+            if resp in _DIAG_TWO_TAP and l == 1:
                 state = state + second
             K[l] = R(state)
     elif resp == "prospective_recurrence":
@@ -223,7 +237,7 @@ def frequency_response(core, n_freq=129):
 
     def term(u):
         """C (I - A u)^-1 B(u), for the diagonal and block cases."""
-        if resp in ("one_tap", "alpha_p_two_tap"):
+        if resp in ("one_tap",) + _DIAG_TWO_TAP:
             A = _np(c["A_bar"]).astype(onp.complex128)
             if resp == "one_tap":
                 Bu = _np(c["B_bar"]).astype(onp.complex128)
@@ -289,7 +303,7 @@ def continuous_poles(core):
     """
     resp = core["response"]
     c = core["coefficients"]
-    if resp in ("one_tap", "alpha_p_two_tap"):
+    if resp in ("one_tap",) + _DIAG_TWO_TAP:
         return _np(core["a"]).ravel()
     if resp == "gp_fixed_m0":
         return _np(c["a_eff"]).ravel()
@@ -302,7 +316,7 @@ def discrete_poles(core):
     """Discrete eigenvalues of the executed transition."""
     resp = core["response"]
     c = core["coefficients"]
-    if resp in ("one_tap", "alpha_p_two_tap"):
+    if resp in ("one_tap",) + _DIAG_TWO_TAP:
         return _np(c["A_bar"]).ravel()
     if resp == "gp_fixed_m0":
         return _np(c["a_bar"]).ravel()
@@ -412,13 +426,19 @@ def frequency_window_remainder(core, n_lags, w):
     resp = core["response"]
     if resp not in RESPONSES:
         raise ValueError(f"unknown response {resp!r}; refusing to guess")
+    if resp in _MASS_TWO_TAP:
+        # the block branch below is the ONE-tap block remainder; applying it
+        # to a two-tap block law would return a plausible but wrong tail
+        raise NotImplementedError(
+            f"no exact remainder is implemented for the two-tap block law "
+            f"{resp!r}; refusing to return the one-tap block formula")
     c = core["coefficients"]
     C = _np(core["C_tilde"]).astype(onp.complex128)
     fac = 2.0 if core["conj_sym"] else 1.0
     N = int(n_lags)
 
     def rem(u):
-        if resp in ("one_tap", "alpha_p_two_tap"):
+        if resp in ("one_tap",) + _DIAG_TWO_TAP:
             A = _np(c["A_bar"]).astype(onp.complex128)
             uA = u * A
             if resp == "one_tap":
