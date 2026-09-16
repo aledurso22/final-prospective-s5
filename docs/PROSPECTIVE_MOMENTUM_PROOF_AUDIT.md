@@ -232,52 +232,73 @@ neither a common Lyapunov function nor a switching certificate. The
 continuous certificate of the meta-delta audit does not transfer to this
 discretization. ✓ (brief)
 
-## 6. Projection margin
+## 6. Projection margin: a declared numerical safety margin
+
+Amended after review of a1f0439 (R4). The earlier text claimed a universal
+certification ("more than 20×") for trained gates. That claim relied on
+`A_log ≤ log 16` and `|x| ≤ 1`, which are not invariants of trained
+parameters, and on a relative dot-product error bound that fails under
+cancellation. For example, float32 contributions `2^24, 1, -2^24` sum to 0 or
+1 depending on addition order. That claim is **withdrawn**.
+
+What follows is the scope that is actually established. No constraint is
+added to the learned gates, and neither the equation nor the margin changes.
 
 Projection: `kappa ← min(max(kappa, 0), (1 - delta) Kmax)`, with
-`delta = PROJ_REL_MARGIN = 1e-3`. Kmax is the minimum of (12) over all write
-settings, computed in float32 inside the compiled step from the updated gates.
+`delta = PROJ_REL_MARGIN = 1e-3`. Kmax is the minimum of (12) over the write
+table, computed in float32 inside the compiled step from the updated
+parameters.
 
-**Slack at the cap.** With `kappa = (1-delta) B_i ≤ (1-delta) B_i` for the
-minimizing setting, and `kappa ≤ B_i` elsewhere, every setting satisfies
+**Exact slack on the table gates (established).** Let `B_min` be the minimum
+bound on the rounded table gates. Every table setting i satisfies
+`kappa ≤ (1-delta) B_min ≤ (1-delta) B_i`. For those gate values, in exact
+arithmetic,
 
     p(-1) = N_i - 2 alpha q kappa ≥ delta · N_i,   N_i = (1+alpha)(1+mu) - alpha q.
 
-Using the executed float32 gates, `alpha ≤ 1`, `mu ≥ exp(-2) ≈ 0.1353` and
-`q ≤ 2` (rounded η may equal 2):
+The gate transforms are range-bounded by construction, independent of the
+trained parameters: `alpha ∈ [0,1]`, `mu ≥ exp(-2)` (clamp), `beta ≤ 1` and
+rounded `eta ≤ 2`. These give `N_i ≥ 0.2706` and exact slack `≥ 2.7e-4`.
 
-    N_i ≥ min over alpha ∈ [0,1] of (1+alpha)(1.1353) - 2 alpha = 0.2706 (alpha = 1).
+**Arithmetic estimates (supporting, not a universal certificate).**
 
-So the exact slack is at least `2.7e-4`.
+1. *Kmax in float32 from given rounded gates.* `N_i` is a short expression
+   in range-bounded values with `N_i ≥ 0.27`. Its rounding is a few eps32
+   relative (≈ 7e-6), well below delta.
+2. *Rounding of the executed 2×2 entries for given rounded gates.* The
+   estimate of order `100 eps32 ≈ 1.2e-5` absolute perturbation of `p(-1)`
+   is an estimate, not a proof. Large `a21` (small q) pairs with small
+   `a12`.
+3. *Gates inside a rollout versus the table.* **Not bounded here.** The gate
+   function is the same source, but it is evaluated in another array shape
+   and compilation context. The pre-activations are sums of trained
+   projection entries, whose float32 addition order can matter under
+   cancellation, and the downstream transforms depend on trained `A_log`,
+   `Mu_log` and `log_factor`. No universal relative bound is claimed.
 
-**Error budget.** These must be covered by that slack:
+delta = 1e-3 is therefore the **declared numerical safety margin**. It is
+supported by estimates 1–2 and by the measured checks below. It is not copied
+from the earlier continuous rho margin, and it is not a certificate for
+arbitrary trained parameters, reduction orders, rollout states or switching
+trajectories.
 
-1. **Kmax in float32.** The product and sum `(1+alpha)(1+mu) - alpha q` have
-   relative error of a few eps32 because `N_i ≥ 0.27` (at most 4·4 eps/0.27 ≈
-   7e-6 relative). A further division adds eps. Total relative error on Kmax
-   is ≲ 1e-5, i.e. ≲ 1% of delta.
-2. **Rounding of the executed transition.** Each entry is a sum of at most
-   three rounded products. At the cap, `alpha q ≤ 2` and
-   `alpha q kappa ≤ N/2 ≤ 2`, so `|a11| ≤ 5`, `|a12| ≤ 1` and `|a22| ≤ 1`.
-   `a21 = alpha eta c` can be large only when q is small (kappa ~ 1/q); then
-   `a12 = -beta mu` is proportionally small, and the product `a12 a21`
-   (bounded by `alpha q kappa / mu`-type terms ≤ 15) carries only a few eps
-   of relative rounding. The absolute perturbation of `p(-1)` from the
-   rounded entries is below roughly `100 eps32 ≈ 1.2e-5`, more than 20×
-   smaller than the exact slack.
-3. **Gate recomputation inside the scan versus on the table.** The same
-   one-hot features and projection vectors are used, with possibly different
-   reduction order. The perturbation of a, b, m and e is ≤ 2 eps |x|. It
-   propagates to alpha, mu, beta and eta with relative size ≲ 32 |x| eps32
-   (A_log ≤ log 16). This is ≲ 4e-6 for |x| ≤ 1, still ≪ delta.
+**Checks: what each one certifies.**
 
-delta = 1e-3 therefore leaves a factor of more than 20 over the worst
-estimate. It is not copied from the earlier continuous rho margin.
-
-**Checks.** The rounded executed transitions are verified in exact rational
-arithmetic on the float32 entries (float32 probe and every validation), and
-the effective margin `1 - kappa/B_f64` is recorded. Zero is the exact native
-fallback: `max(·, 0)`, and `Kmax` cannot be ≤ 0 in exact arithmetic (§5).
+- *Table coverage (exact for these matrices).* The rounded executed
+  transitions of the table gates, with the exactly representable key e_0,
+  are classified in exact rational arithmetic at every validation and in the
+  float32 probe. This certifies those rounded frozen-token matrices only.
+- *Observed-rollout coverage (reported, analytic).* Gates returned by actual
+  evaluation rollouts are summarized. At write tokens, the float64 bound,
+  `kappa / min bound` and the analytic Jury expressions are evaluated on
+  those rounded observed gates (`observed_rollout_gates`). This is not an
+  executed-entry classification and not a switching statement.
+- The effective margin `1 - kappa/B_f64` is recorded.
+- Zero is the exact native fallback, and `Kmax` cannot be ≤ 0 in exact
+  arithmetic for gates in the constructed ranges (§5).
+- A neutral classification is a spectral label for a rounded frozen-token
+  matrix. It is not a theorem that the corresponding trajectories stay
+  bounded.
 
 **Gain control.** `alpha q g < (1+alpha)(1+mu)` from `A_g` with
 `tr = alpha + mu - alpha q g` and `det = alpha mu`:
@@ -286,13 +307,18 @@ fallback: `max(·, 0)`, and `Kmax` cannot be ≤ 0 in exact arithmetic (§5).
 - `p(-1) = (1+alpha)(1+mu) - alpha q g`;
 - `1 - det = 1 - alpha mu`.
 
-The projection is `log g ≤ log Gmax + log1p(-delta)`. The slack
-`delta (1+alpha)(1+mu) ≥ delta` is larger than the candidate's.
+The projection is `log g ≤ log Gmax + log1p(-delta)`. On the table gates the
+exact slack `delta (1+alpha)(1+mu) ≥ delta` is larger than the candidate's.
+The same scope limits apply. Acceptance uses the EXECUTED gain
+`jnp.exp(log_g)` in the parameter dtype (review R3). A float32 `log_g = -110`
+executes as `g = 0`, outside `g > 0`, even though its float64 reconstruction
+is positive.
 
 ## 7. Items for the reviewer
 
 - The write table includes the absent value on WRITE events: 32 × 9
-  settings, a superset of the task's writes. This is conservative.
+  settings, a superset of the task's writes. Its scope is the table
+  (review: acceptable, labelled); it introduces no query-value input.
 - Neutral rounded native cases are counted, not failed. Unstable or
   non-finite executed transitions fail validation. This applies to the
   native arm too, with a diagnosis, because exact arithmetic excludes them.

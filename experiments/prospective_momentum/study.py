@@ -23,6 +23,7 @@ verdict.
 
 import argparse
 import os
+import signal
 import sys
 import time
 from functools import partial
@@ -106,31 +107,47 @@ def to_jax(batch):
 
 
 # ------------------------------------------------------------ compiled -----
-def _episode_loss(rule, p, ep):
+def _episode_loss(rule, p, ep, with_gates=False):
     out = PM.rollout(rule, p, ep)
     q = (ep["event"] == TK.QUERY)
     lab = jnp.maximum(ep["label"], 0)
     ce = optax.softmax_cross_entropy(
         out["logits"], jax.nn.one_hot(lab, TK.N_VALUES)) * q
     correct = (jnp.argmax(out["logits"], -1) == lab) * q
-    return (jnp.sum(ce) / jnp.maximum(jnp.sum(q), 1.0),
-            dict(ce=ce, correct=correct.astype(jnp.float32),
-                 q=q.astype(jnp.float32), w_norm=out["w_norm"],
-                 aux_norm=out["aux_norm"]))
+    aux = dict(ce=ce, correct=correct.astype(jnp.float32),
+               q=q.astype(jnp.float32), w_norm=out["w_norm"],
+               aux_norm=out["aux_norm"])
+    if with_gates and rule in PD.MOMENTUM_FAMILY:
+        # the gates RETURNED by this rollout (observed-rollout coverage, R4)
+        aux["gates"] = tuple(out["gates"])
+    return jnp.sum(ce) / jnp.maximum(jnp.sum(q), 1.0), aux
 
 
-def batch_loss(rule, p, eps):
-    losses, aux = jax.vmap(lambda e: _episode_loss(rule, p, e))(eps)
+def batch_loss(rule, p, eps, with_gates=False):
+    losses, aux = jax.vmap(lambda e: _episode_loss(rule, p, e, with_gates))(
+        eps)
     return jnp.mean(losses), aux
 
 
 def _project(rule, p):
-    """Post-update projection from UPDATED parameters; optimizer untouched."""
+    """Post-update projection from UPDATED parameters; optimizer untouched.
+
+    For the old generalized arm the telemetry exports the REAL proposal
+    raw_r, its projection cap (the completed study's log_rho_upper, margin
+    included) and the un-margined log bound -log1p(-1/x), x = eta tau L
+    (+inf for x <= 1); all are logarithms of rho."""
     if rule == "gp_two_sided":
+        pre = p["raw_r"][0]
         p, t = MDD.project_two_sided(p)
-        z = jnp.zeros((), dtype=p["raw_r"].dtype)
-        return p, dict(n_projected=t["n_projected"], pre=z, post=p["raw_r"][0],
-                       cap=z, overshoot=t["max_overshoot"])
+        dt = p["raw_r"].dtype
+        eta, tau = jnp.exp(p["raw_eta"]), jnp.exp(p["raw_tau"])
+        cap = MDD.log_rho_upper(eta, tau, dt).astype(dt)[0]
+        x = (eta * tau * MDD.GATE_BOUND_L)[0]
+        xs = jnp.where(x > 1, x, 2.0)
+        bound = jnp.where(x > 1, -jnp.log1p(-1.0 / xs), jnp.inf).astype(dt)
+        return p, dict(n_projected=t["n_projected"], pre=pre,
+                       post=p["raw_r"][0], cap=cap, bound=bound,
+                       overshoot=t["max_overshoot"])
     return PD.project(p)
 
 
@@ -155,7 +172,7 @@ def train_step(rule, p, opt, eps, lr):
 
 @partial(jax.jit, static_argnums=(0,))
 def eval_batch(rule, p, eps):
-    _, aux = batch_loss(rule, p, eps)
+    _, aux = batch_loss(rule, p, eps, with_gates=True)
     return aux
 
 
@@ -172,7 +189,8 @@ def host_step(rule, p, opt, seed, u, lr, hist):
     scalars = dict(zip(SCALAR_NAMES, (float(x) for x in o[2:8])))
     rec = dict(update=u, n_projected=int(tel["n_projected"]),
                pre=float(tel["pre"]), post=float(tel["post"]),
-               cap=float(tel["cap"]), overshoot=float(tel["overshoot"]),
+               cap=float(tel["cap"]), bound=float(tel["bound"]),
+               overshoot=float(tel["overshoot"]),
                grad=float(o[9]))
     hist.append(rec)
     return p, opt, scalars
@@ -181,7 +199,7 @@ def host_step(rule, p, opt, seed, u, lr, hist):
 def evaluate(rule, p, eps_np, chunk=128):
     n = eps_np["event"].shape[0]
     cat, fam = eps_np["category"], eps_np["family"]
-    cs, ces, qs, wn, an = [], [], [], [], []
+    cs, ces, qs, wn, an, gs = [], [], [], [], [], []
     for i in range(0, n, chunk):
         sl = {k: jnp.asarray(v[i:i + chunk]) for k, v in eps_np.items()
               if k in ("key_id", "val_id", "event", "label")}
@@ -191,6 +209,8 @@ def evaluate(rule, p, eps_np, chunk=128):
         qs.append(onp.asarray(aux["q"]))
         wn.append(onp.asarray(aux["w_norm"]))
         an.append(onp.asarray(aux["aux_norm"]))
+        if "gates" in aux:
+            gs.append([onp.asarray(x) for x in aux["gates"]])
     c = onp.concatenate(cs); ce = onp.concatenate(ces)
     q = onp.concatenate(qs).astype(bool)
     wn = onp.concatenate(wn); an = onp.concatenate(an)
@@ -220,11 +240,33 @@ def evaluate(rule, p, eps_np, chunk=128):
         aux_frobenius_mean=float(an.mean()), aux_frobenius_max=float(an.max()),
         aux_meaning=("Q (momentum carry)" if rule in PD.MOMENTUM_FAMILY
                      else "second carry, or 0 for single-carry rules"))
+    if gs:
+        gates = [onp.concatenate([g[i] for g in gs]) for i in range(4)]
+        out["observed_rollout_gates"] = PD.observed_gate_report(
+            rule, gates, eps_np["event"],
+            kappa=(float(onp.asarray(p["kappa"]).ravel()[0])
+                   if "kappa" in p else None),
+            executed_g=(float(onp.asarray(PD.executed_gain(p)))
+                        if "log_g" in p else None))
     return out
 
 
 all_finite = MS.all_finite
-metrics_finite = MS.metrics_finite
+
+
+def metrics_finite(m):
+    """Task metrics (the completed study's check) AND the added computed
+    quantities: state norms and observed-rollout gates (review R3.4)."""
+    if not MS.metrics_finite(m):
+        return False
+    sn = m.get("state_norms")
+    if sn is None:
+        return False
+    vals = [v for v in sn.values() if not isinstance(v, str)]
+    if not all(onp.isfinite(float(v)) for v in vals):
+        return False
+    og = m.get("observed_rollout_gates")
+    return og is None or bool(og.get("finite"))
 write = MS.write
 save_tree = MS.save_tree
 
@@ -251,19 +293,19 @@ def validate(rule, p):
 
 
 def coefficient_report(rule, p, eps_np=None):
-    from experiments.nested_memory.study import gate_report
     if rule in PD.MOMENTUM_FAMILY:
-        out = dict(rule=rule, transition=PD.transition_report(p, rule),
-                   gate_table=PD.gate_range_report(p),
-                   gates_on_validation_tokens=(
-                       gate_report("momentum_delta", p, eps_np)
-                       if eps_np is not None else None))
+        # TABLE coverage here; OBSERVED-ROLLOUT gates are in each evaluation's
+        # `observed_rollout_gates` (returned by the actual rollouts, R4)
+        out = dict(rule=rule, table_transition=PD.transition_report(p, rule),
+                   gate_table=PD.gate_range_report(p))
         if rule == "prospective_momentum":
-            out["raw_kappa_stored_directly"] = float(
+            out["kappa_stored_directly"] = float(
                 onp.asarray(p["kappa"]).ravel()[0])
         if rule == "gain_momentum":
             lg = float(onp.asarray(p["log_g"]).ravel()[0])
-            out.update(raw_log_g=lg, exponentiated_g=float(onp.exp(lg)))
+            out.update(raw_log_g=lg,
+                       executed_g=float(onp.asarray(PD.executed_gain(p))),
+                       reference_g_f64=float(onp.exp(onp.float64(lg))))
         return out
     out = MS.coefficient_report(rule, p, eps_np)
     if rule in ("gp_two_sided", "tss_eq17"):
@@ -279,21 +321,46 @@ def coefficient_report(rule, p, eps_np=None):
     return out
 
 
-def summarize_history(hist):
+PARAMETERIZATION = {"prospective_momentum": "kappa (direct value)",
+                    "gain_momentum": "log_g (logarithm of the gain)",
+                    "gp_two_sided": "raw_r (logarithm of rho)"}
+
+
+def summarize_history(hist, rule):
+    """Projection summary with margins in the parameterization's own units.
+
+    kappa: relative margin 1 - post/cap to the projection cap.
+    log_g: log slack cap - post, and relative margin 1 - exp(post - cap) of
+           the executed gain to the gain cap.
+    raw_r: log slack cap - post.
+    `cap` includes the projection margin; `bound` is the un-margined bound
+    (for log parameterizations, a log bound)."""
     if not hist:
         return {}
     pre = onp.array([h["pre"] for h in hist])
     post = onp.array([h["post"] for h in hist])
     cap = onp.array([h["cap"] for h in hist])
-    finite_cap = onp.isfinite(cap) & (cap > 0)
-    margin = onp.where(finite_cap, 1.0 - post / onp.where(finite_cap, cap, 1),
-                       onp.inf)
-    return dict(n_projection_events=int(sum(h["n_projected"] for h in hist)),
-                first_value=float(pre[0]), last_value=float(post[-1]),
-                min_post=float(post.min()), max_post=float(post.max()),
-                min_cap=float(cap.min()),
-                min_relative_margin_to_cap=float(margin.min()),
-                max_overshoot=float(max(h["overshoot"] for h in hist)))
+    bound = onp.array([h["bound"] for h in hist])
+    out = dict(parameterization=PARAMETERIZATION[rule],
+               n_projection_events=int(sum(h["n_projected"] for h in hist)),
+               first_proposal=float(pre[0]), last_value=float(post[-1]),
+               min_post=float(post.min()), max_post=float(post.max()),
+               min_projection_cap=float(cap.min()),
+               min_unmargined_bound=float(bound.min()),
+               max_overshoot=float(max(h["overshoot"] for h in hist)))
+    fin = onp.isfinite(cap)
+    if rule == "prospective_momentum":
+        ok = fin & (cap > 0)
+        out["min_relative_margin_to_cap"] = (
+            float(onp.min(1.0 - post[ok] / cap[ok])) if ok.any() else None)
+    else:
+        out["min_log_slack_to_cap"] = (float(onp.min(cap[fin] - post[fin]))
+                                       if fin.any() else None)
+        if rule == "gain_momentum":
+            out["min_relative_gain_margin_to_cap"] = (
+                float(onp.min(1.0 - onp.exp(post[fin] - cap[fin])))
+                if fin.any() else None)
+    return out
 
 
 # --------------------------------------------------------------- one run ---
@@ -354,7 +421,7 @@ def run_one(rule, tag, lr_value, seed, source_p, val_np, updates, out,
                params=PM.parameter_counts(rule, p), carry=PD.CARRY[rule],
                coefficients_final=coefficient_report(rule, p, val_np),
                extension_history=(hist if rule in EXTRA_GRAD else None),
-               extension_summary=summarize_history(hist)
+               extension_summary=summarize_history(hist, rule)
                if rule in EXTRA_GRAD else None,
                invalid=bad)
     return rec, p
@@ -576,6 +643,107 @@ def screen(final_rows):
               "optimizer novelty is claimed."))
 
 
+# ------------------------------------------------------------ finalization ---
+class Terminated(BaseException):
+    """Raised by the SIGTERM handler so the finalizer runs within the
+    launcher's kill grace (review R1/R2)."""
+
+
+def _on_sigterm(signum, frame):
+    raise Terminated(f"signal {signum}")
+
+
+SEVERITY = {0: 0, 3: 1, 4: 2}
+LABEL = {0: "PASS", 3: "INCOMPLETE", 4: "FAILED"}
+
+
+def _worse(code, new_code):
+    return new_code if SEVERITY[new_code] > SEVERITY[code] else code
+
+
+def finalize(status, code, label, rehash, persist):
+    """ONE finalizer for success, ordinary failure and runtime exceptions.
+
+    * the computation's own outcome is kept as `computation_status`;
+    * source invariance is re-verified: a CHANGED or missing source forces
+      FAILED/4; an UNAVAILABLE verification (no restore baseline, or the
+      re-hash raised) can never yield PASS and never claims invariance
+      (INCOMPLETE/3 unless already worse);
+    * the original failure reason is preserved; integrity and persistence
+      problems are APPENDED under their own keys;
+    * the status actually persisted carries the returned (code, label).
+    Returns (code, label)."""
+    status["computation_status"] = label
+    status["computation_exit"] = code
+    before = (status.get("source") or {}).get("hashes_at_restore")
+    problems = []
+    try:
+        after = rehash()
+        status["source_hashes_at_finish"] = after
+        if before is None:
+            status["source_unchanged"] = None
+            status["integrity_verified"] = False
+            problems.append((3, "no restore-time source hashes; invariance "
+                                "not verified"))
+        elif after != before or any(v is None for v in after.values()):
+            status["source_unchanged"] = False
+            status["integrity_verified"] = False
+            problems.append((4, "source changed or missing at finish"))
+        else:
+            status["source_unchanged"] = True
+            status["integrity_verified"] = True
+    except Exception as e:                         # recorded, never hidden
+        status["source_unchanged"] = None
+        status["integrity_verified"] = False
+        problems.append((3, f"source re-hash failed: {e!r}; invariance not "
+                            "verified"))
+    for c, why in problems:
+        status.setdefault("integrity_failures", []).append(why)
+        code = _worse(code, c)
+    if code != status["computation_exit"]:
+        label = LABEL[code]
+        key = "failed" if code == 4 else None
+        if key and not status.get("failed"):
+            status["failed"] = "; ".join(w for _, w in problems)
+        if code == 3:
+            status.setdefault("incomplete", []).append(
+                "; ".join(w for _, w in problems))
+    status["study_status"] = label
+    status["study_exit"] = code
+    try:
+        persist(status)
+    except Exception as e:
+        print(f"[!] status could not be persisted: {e!r}")
+        code, label = 4, "FAILED"
+    print(f"SOURCE_UNCHANGED={status.get('source_unchanged')}")
+    print(f"PROSPECTIVE_MOMENTUM_STATUS={label}")
+    return code, label
+
+
+def guarded(body, status, rehash, persist):
+    """Run `body() -> (code, label)`; any runtime exception or termination
+    after this point still reaches `finalize`, with the original failure
+    reason preserved and the exception appended."""
+    import traceback
+    try:
+        code, label = body()
+    except Terminated as e:
+        status.setdefault("runtime_failures", []).append(
+            f"terminated: {e}")
+        status.setdefault("incomplete", []).append(
+            "terminated by the watchdog before completion")
+        code, label = 3, "INCOMPLETE"
+        if status.get("failed"):
+            code, label = 4, "FAILED"
+    except Exception as e:
+        status.setdefault("runtime_failures", []).append(
+            dict(error=repr(e), traceback=traceback.format_exc()))
+        if not status.get("failed"):
+            status["failed"] = f"runtime exception {e!r}"
+        code, label = 4, "FAILED"
+    return finalize(status, code, label, rehash, persist)
+
+
 # ------------------------------------------------------------------ main ---
 def main():
     ap = argparse.ArgumentParser()
@@ -618,26 +786,28 @@ def main():
                   production_dtype=dict(x64=False, float_dtype="float32"),
                   heldout_policy=("held-out episodes are GENERATED and hashed "
                                   "only at final evaluation, after all final "
-                                  "runs finish"),
+                                  "runs finish; the opening is persisted "
+                                  "BEFORE evaluation"),
+                  terminal_verdict_note=("study_status is this process's "
+                                         "verdict; the launcher adds "
+                                         "`terminal` (integrity re-check, "
+                                         "digest) as the final verdict"),
                   development=[], final=[], incomplete=[])
+    status_path = os.path.join(out, "status.json")
 
-    def finish(code, label):
-        # source hashes re-checked on EVERY exit path, including failures
-        try:
-            status["source_hashes_at_finish"] = SRC.hash_sources(
-                args.source_dir)
-            before = status.get("source", {}).get("hashes_at_restore")
-            status["source_unchanged"] = (
-                None if before is None
-                else status["source_hashes_at_finish"] == before)
-        except Exception as e:                        # recorded, not hidden
-            status["source_unchanged"] = f"re-hash failed: {e!r}"
-        status["wall_s"] = time.time() - t0
-        write(os.path.join(out, "status.json"), status)
-        print(f"SOURCE_UNCHANGED={status['source_unchanged']}")
-        print(f"PROSPECTIVE_MOMENTUM_STATUS={label} out={out}")
-        return code
+    def persist(st):
+        st["wall_s"] = time.time() - t0
+        write(status_path, st)
 
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    code, _ = guarded(lambda: run_study(args, status, out, deadline,
+                                        lambda: persist(status)),
+                      status, lambda: SRC.hash_sources(args.source_dir),
+                      persist)
+    return code
+
+
+def run_study(args, status, out, deadline, save):
     val_dev_src = TK.generate_batch(MS.STREAM["dev_validation"],
                                     MS.VAL_PER_FAMILY)
     val_np = TK.generate_batch(STREAM["dev_validation"], VAL_PER_FAMILY)
@@ -645,17 +815,13 @@ def main():
     status["task"] = dict(structure=TK.structure_check(val_np),
                           dev_validation_digest=TK.episode_digest(val_np),
                           eval_validation_digest=TK.episode_digest(eval_val_np))
-    write(os.path.join(out, "status.json"), status)
+    save()
 
-    try:
-        sources, why = source_stage(args.source_dir, val_dev_src, status)
-    except Exception as e:
-        status["failed"] = f"source stage raised {e!r}"
-        return finish(4, "FAILED")
+    sources, why = source_stage(args.source_dir, val_dev_src, status)
     if why:
         status["failed"] = why
         print(f"[!] {why}")
-        return finish(4, "FAILED")
+        return 4, "FAILED"
     # arms 1-3 must be the same function at update zero
     ident = {r: evaluate(r, sources[r], val_np) for r in PD.MOMENTUM_FAMILY}
     id_fail = {r: identity_differences(ident["momentum_delta"], ident[r])
@@ -666,8 +832,8 @@ def main():
     if any(id_fail.values()):
         status["failed"] = f"arms 1-3 differ at update zero: {id_fail}"
         print(f"[!] {status['failed']}")
-        return finish(4, "FAILED")
-    write(os.path.join(out, "status.json"), status)
+        return 4, "FAILED"
+    save()
 
     proj, retraced, failures = preflight(sources, val_np, status)
     d = decide_after_preflight(proj, retraced, failures,
@@ -677,7 +843,7 @@ def main():
         (status.__setitem__("failed", why) if code == 4
          else status["incomplete"].append(why))
         print(f"[!] {why}")
-        return finish(code, label)
+        return code, label
 
     dev_rows = []
     for rule in PD.RULES:
@@ -685,14 +851,14 @@ def main():
             r = run_one(rule, tag, lr, DEV_SEED, sources[rule], val_np,
                         UPDATES, out, deadline, args.reserve_s, status, "dev")
             if r is None:
-                return finish(3, "INCOMPLETE")
+                return 3, "INCOMPLETE"
             rec, _ = r
             dev_rows.append(rec)
             status["development"] = dev_rows
-            write(os.path.join(out, "status.json"), status)
+            save()
             if rec["invalid"]:
                 status["failed"] = f"dev {rule}/{tag}: {rec['invalid']}"
-                return finish(4, "FAILED")
+                return 4, "FAILED"
     sel, _ = select(dev_rows, status)
     write(os.path.join(out, "selection.json"), status["selection"])
 
@@ -705,16 +871,21 @@ def main():
                         status, "final")
             if r is None:
                 status["heldout_opened"] = False
-                return finish(3, "INCOMPLETE")
+                return 3, "INCOMPLETE"
             rec, p = r
             final_rows.append(rec)
             finals[(rule, seed)] = p
             status["final"] = final_rows
-            write(os.path.join(out, "status.json"), status)
+            save()
             if rec["invalid"]:
                 status["failed"] = f"final {rule}/{seed}: {rec['invalid']}"
-                return finish(4, "FAILED")
+                return 4, "FAILED"
 
+    # R1.4: the opening is persisted BEFORE the data are generated and used
+    status["heldout_opened"] = True
+    status["heldout_opened_at"] = time.time()
+    status["heldout_evaluation_complete"] = False
+    save()
     held_np = TK.generate_batch(STREAM["heldout"], HELDOUT_PER_FAMILY)
     status["task"]["heldout_digest"] = TK.episode_digest(held_np)
     for rec in final_rows:
@@ -722,8 +893,8 @@ def main():
                                                       rec["seed"])], held_np)
         if not metrics_finite(rec["heldout"]):
             status["failed"] = f"non-finite held-out {rec['rule']}/{rec['seed']}"
-            return finish(4, "FAILED")
-    status["heldout_opened"] = True
+            return 4, "FAILED"
+    status["heldout_evaluation_complete"] = True
     status["screen"] = screen(final_rows)
     sc = status["screen"]
     print(f"[screen] LITERATURE (Momentum AND Gated): "
@@ -733,7 +904,7 @@ def main():
           f"  TSS Eq.(17) direct (applicability-limited): "
           f"{sc['tss_eq17_comparison_passed']}")
     status["complete"] = True
-    return finish(0, "PASS")
+    return 0, "PASS"
 
 
 if __name__ == "__main__":

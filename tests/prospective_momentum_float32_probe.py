@@ -219,10 +219,27 @@ if not (all_finite(cap32) and 0 <= cap32 < kb64 and eff >= 0.5 * PD.PROJ_REL_MAR
     fails.append(f"float32 projection cap {cap32} vs bound {kb64}")
 pg, _ = PD.project(dict(PM.convert_momentum(pn, "gain_momentum"),
                         log_g=jnp.asarray([50.0], jnp.float32)))
-gcap = math.exp(float(pg["log_g"][0]))
-print(f"  projected gain cap {gcap:.6e} (bound {gb64:.6e})")
+# review R3: the EXECUTED gain (production float32 exp), not a float64
+# reconstruction of the logarithm
+gcap = float(onp.asarray(PD.executed_gain(pg)))
+check_dtype("executed gain", PD.executed_gain(pg))
+print(f"  projected executed gain cap {gcap:.6e} (reference_g_f64 "
+      f"{math.exp(float(pg['log_g'][0])):.6e}; bound {gb64:.6e})")
 if not (all_finite(gcap) and 0 < gcap < gb64):
-    fails.append(f"float32 gain cap {gcap} vs bound {gb64}")
+    fails.append(f"float32 executed gain cap {gcap} vs bound {gb64}")
+# executed-underflow regression and an ordinary positive case
+pg_u = dict(PM.convert_momentum(pn, "gain_momentum"),
+            log_g=jnp.asarray([-110.0], jnp.float32))
+rep_u = PD.transition_report(pg_u, "gain_momentum")
+print(f"  underflow regression: executed_g {rep_u['executed_g']} "
+      f"reference_g_f64 {rep_u['reference_g_f64']:.3e}")
+if not (rep_u["executed_g"] == 0.0 and rep_u["reference_g_f64"] > 0
+        and PD.transition_failure(rep_u) is not None):
+    fails.append("executed gain underflow to zero was not rejected")
+pg_o = dict(PM.convert_momentum(pn, "gain_momentum"),
+            log_g=jnp.asarray([-0.3], jnp.float32))  # g < 1 < every bound
+if PD.transition_failure(PD.transition_report(pg_o, "gain_momentum")):
+    fails.append("ordinary positive executed gain was rejected")
 
 cases = (("native kappa=0", PD.prospective_step, 0.0, 0.0),
          ("candidate at projected cap", PD.prospective_step, cap32, cap32),
@@ -275,13 +292,15 @@ elif abs(cap_step - cap_upd) > 1e-5 * cap_upd:
 why = PD.transition_failure(rep1)
 if why:
     fails.append(f"training step: {why}")
-# outward proposal on these UPDATED trained gates, then an inward move
+# projection behaviour only (not optimizer recovery): outward proposal on
+# these UPDATED trained gates, then a MANUAL inward move
 pq1, t1 = PD.project(dict(p1, kappa=jnp.asarray([2.0 * cap_upd], jnp.float32)))
 pin1, t2 = PD.project(dict(pq1, kappa=0.9 * pq1["kappa"]))
 if int(t1["n_projected"]) != 1 or int(t2["n_projected"]) != 0 or \
         PD.transition_failure(PD.transition_report(
             pq1, "prospective_momentum")):
-    fails.append("outward proposal / inward move on trained gates")
+    fails.append("projection behaviour: outward proposal / manual inward "
+                 "move on trained gates")
 
 print("FLOAT32 PROBE:", "PASS" if not fails else f"FAIL {fails}")
 sys.exit(0 if not fails else 1)

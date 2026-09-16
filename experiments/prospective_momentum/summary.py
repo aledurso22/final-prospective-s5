@@ -5,8 +5,11 @@ no recomputation.
     python -m experiments.prospective_momentum.summary <run_dir>
 
 Raw logarithmic leaves and exponentiated coefficients are printed under
-separate labels (`raw_log_g` vs `g`; `raw_log_leaves` vs `exponentiated`).
-kappa is stored directly, not as a logarithm.
+separate labels (`raw_log_g` vs `executed_g` [production float32 exp] vs
+`reference_g_f64`; `raw_log_leaves` vs `exponentiated`). kappa is stored
+directly, not as a logarithm. Extension summaries state their units: kappa
+relative margins; log_g and raw_r log slacks (plus the gain's relative
+margin). TABLE and OBSERVED-ROLLOUT gate coverage are labelled separately.
 """
 
 import json
@@ -54,9 +57,9 @@ def print_coefficients(c):
     if not c:
         return
     rule = c.get("rule")
-    if "transition" in c:
-        t = c["transition"]
-        print(f"      transition: {t.get('classification')} min Jury "
+    if "table_transition" in c:
+        t = c["table_transition"]
+        print(f"      TABLE-coverage transitions: {t.get('classification')} min Jury "
               f"{t.get('min_jury_expression')} kappa_bound_f64 "
               f"{t.get('kappa_bound_f64')} gain_bound_f64 "
               f"{t.get('gain_bound_f64')}")
@@ -64,8 +67,10 @@ def print_coefficients(c):
             print(f"      kappa (stored directly) {t.get('kappa')} "
                   f"kappa/bound {t.get('kappa_over_bound')}")
         if rule == "gain_momentum":
-            print(f"      raw_log_g {c.get('raw_log_g')}  g (exponentiated) "
-                  f"{c.get('exponentiated_g')}  g/bound {t.get('g_over_bound')}")
+            print(f"      raw_log_g {c.get('raw_log_g')}  executed_g "
+                  f"{t.get('executed_g')} ({t.get('executed_g_dtype')})  "
+                  f"reference_g_f64 {t.get('reference_g_f64')}  executed "
+                  f"g/bound {t.get('executed_g_over_bound')}")
         gt = c.get("gate_table", {})
         for k in ("alpha", "beta", "mu", "eta", "q"):
             print(f"      table {k}: {gt.get(k)}")
@@ -79,9 +84,8 @@ def print_coefficients(c):
                   f"{s.get('fraction_of_write_settings_in_passive_sector')} "
                   f"threshold mu/(1-mu) {s.get('passive_threshold_mu_over_1_minus_mu')}"
                   f" QHM nu {s.get('qhm_nu')}")
-        gv = c.get("gates_on_validation_tokens")
-        if gv:
-            print(f"      validation-token gates: " + json.dumps(gv))
+        print("      (observed-rollout gates: see each evaluation's "
+              "observed_rollout_gates below)")
     else:
         if "raw_log_leaves" in c:
             print(f"      raw_log_leaves {c['raw_log_leaves']}")
@@ -101,6 +105,14 @@ def main(run_dir):
           f"failed={st.get('failed')} incomplete={st.get('incomplete')} "
           f"heldout_opened={st.get('heldout_opened')} wall={st.get('wall_s')}"
           f" source_unchanged={st.get('source_unchanged')}")
+    print(f"computation_status={st.get('computation_status')} study_status="
+          f"{st.get('study_status')} integrity_verified="
+          f"{st.get('integrity_verified')} integrity_failures="
+          f"{st.get('integrity_failures')} runtime_failures="
+          f"{st.get('runtime_failures')} heldout_evaluation_complete="
+          f"{st.get('heldout_evaluation_complete')}")
+    print("(the launcher's terminal verdict is merged AFTER this digest; see "
+          "status.json `terminal` and logs/terminal.json)")
     print(f"streams {st.get('streams')} ranges {st.get('stream_ranges')}")
     print(f"projection relative margin {st.get('projection_relative_margin')}")
 
@@ -174,6 +186,9 @@ def main(run_dir):
                   f"{f(r['wall_s'], 1)}s")
             print(f"  {'':<22}      {categories(h)}")
             print(f"  {'':<22}      state norms {h.get('state_norms')}")
+            if h.get("observed_rollout_gates"):
+                print(f"  {'':<22}      OBSERVED-ROLLOUT gates "
+                      + json.dumps(h["observed_rollout_gates"]))
         if len(hs) == len(seeds) and hs:
             n = len(hs)
             mean = {k: sum(h[k] for h in hs) / n for k in
@@ -197,6 +212,10 @@ def main(run_dir):
               f"invalid {r['invalid']}")
         for c in r.get("curve", []):
             print(f"      curve {c}")
+        og = (r.get("final_validation") or {}).get("observed_rollout_gates")
+        if og:
+            print("      OBSERVED-ROLLOUT gates (final validation) "
+                  + json.dumps(og))
         for v in r.get("validation", []):
             print(f"      val u={v['update']} {f(v['primary'])} norms "
                   f"{v.get('state_norms')}")

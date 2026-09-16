@@ -81,14 +81,17 @@ substitution.
 - **Hashes.** sha256 of `status.json`, `selection.json` and the four
   checkpoints is taken before anything else. It is re-checked at every exit,
   both by the launcher (`sha256sum -c`) and by the study (`source_unchanged`).
+  The re-check affects the verdict (§8): a changed or missing source forces
+  FAILED, and an unavailable verification can never give PASS or claim
+  invariance.
 - **Reproduction.** Each restored source is re-evaluated on the completed
   study's development validation stream (60,000,000, 256 per family) and
   compared with the saved `final_validation`.
   - Tolerance, new and explained: every family × category accuracy within
     **1 query**, and cross-entropy within **1e-4 relative**. These are the
-    same code, data, chunking and dtype. The only allowed difference is a
-    GPU kernel or reduction-order change that flips an exact argmax tie or
-    perturbs a float32 mean.
+    same code, data, chunking and dtype. An allowed one-query difference is
+    recorded as a discrepancy; no cause (such as an argmax tie) is
+    attributed without observing it.
   - All differences are recorded, including primary, retention and recall.
 - **Update-zero identity of arms 1–3.** Evaluated on the new development
   validation stream: per-category accuracy counts must be **identical** (0
@@ -144,19 +147,32 @@ After every optimizer update, and before the next forward pass, from the
   absent}, i.e. 288 inputs. This is a superset of the task's writes.
   Non-write tokens have `m = 0` and triangular transitions independent of
   kappa.
-- The margin 1e-3 is derived in audit §6; it is not copied from rho.
+- The margin 1e-3 is a declared numerical safety margin, supported by the
+  arithmetic estimates and measured checks in audit §6. It is not a
+  universal certificate for trained gates, and it is not copied from rho
+  (amendment R4).
 - Zero is the exact native fallback. The optimizer state is untouched.
 - The meta-delta `raw_r` projection is applied unchanged to arm 5.
-- **Telemetry, every update, arms 2, 3 and 5.** Proposal, post value, cap,
-  overshoot, projection flag and the extension scalar's gradient.
-  - Summary: event count, min/max, minimum relative margin to the cap.
+- **Telemetry, every update, arms 2, 3 and 5.** Proposal, post value,
+  projection cap (margin included), un-margined bound, overshoot,
+  projection flag and the extension scalar's gradient.
+  - kappa is a direct value, so its summary is the relative margin
+    `1 - post/cap`.
+  - log_g and raw_r are logarithms, so their summaries are the log slack
+    `cap - post`; the gain additionally reports its relative margin
+    `1 - exp(post - cap)`.
+  - Arm 5 exports its real proposal, cap (`log_rho_upper`) and un-margined
+    log bound. Arms without an extension scalar report NaN, meaning
+    unavailable, never zero placeholders.
 
 ## 6. Validity (checked at source, preflight and every run end)
 
 Nothing is clamped by validation. FAILED stops the batch.
 
 - **All arms.** Finite parameters, optimizer state, training scalars and
-  metrics.
+  metrics. Metrics include the computed W/Q state norms and, for the
+  momentum family, the finiteness of the observed-rollout gates (amendment
+  R3.4).
 - **Momentum family.**
   - Gates on all 864 token inputs must be finite, with alpha ∈ [0,1],
     beta ∈ [0,1], mu ∈ (0,1] and eta ∈ [0,2].
@@ -165,12 +181,24 @@ Nothing is clamped by validation. FAILED stops the batch.
     the exactly representable key e_0, v = 0 and m = 1.
   - Classification is exact rational arithmetic on the rounded float32
     entries: stable, **neutral** (a Jury expression exactly 0, only possible
-    from rounded native gates; counted and reported, not failed),
+    from rounded native gates; counted and reported, not failed; a spectral
+    label for that rounded matrix, not a theorem that such trajectories stay
+    bounded),
     **unstable** or **non-finite**. The last two are FAILED, including for
     the native arm, since exact arithmetic excludes them (audit §5).
   - Candidate: `0 ≤ kappa < B_f64`, the float64 bound on the executed float32
     gates.
-  - Gain: `0 < g < G_f64`.
+  - Gain: `0 < executed_g < G_f64`. Here `executed_g = jnp.exp(log_g)` in the
+    parameter dtype, the value the rollout uses. The host float64
+    exponential is reported only as `reference_g_f64` (amendment R3).
+  - Coverage labels (amendment R4). TABLE coverage is the exact
+    classification of rounded executed transitions of table-evaluated gates.
+    OBSERVED-ROLLOUT coverage is the gates returned by the actual
+    evaluation rollouts (`observed_rollout_gates` in every evaluation):
+    distributions, and at write tokens the float64 bound, kappa/bound (or
+    executed g/bound) and analytic Jury minima on those rounded gates. They
+    are reported separately; neither is a proof for arbitrary rollout
+    states, reduction orders or switching.
 - **Arm 5 and arm 6.** The completed study's `validate_coefficients`,
   unchanged.
 - **Scope.** This is a frozen-token diagnostic, not a stability proof under
@@ -222,8 +250,9 @@ Nothing is clamped by validation. FAILED stops the batch.
 11. Projection:
     - it uses the updated gates;
     - zero is the fallback;
-    - an outward proposal is projected, and a subsequent inward move is not
-      blocked;
+    - an outward proposal is projected, and a subsequent MANUAL inward move
+      is not blocked (projection behaviour only; not optimizer or
+      task-gradient recovery);
     - gain cap;
     - trees without an extension scalar are untouched;
     - in a real compiled training step, the cap equals the bound of the
@@ -235,7 +264,21 @@ Nothing is clamped by validation. FAILED stops the batch.
     old-generalized and TSS comparisons, incomplete pairs, retention
     safeguard. Source refusals and the reproduction rule.
 14. The restored sources verify, and their gates are valid.
-15. `tests/prospective_momentum_float32_probe.py` in its own process, x64 off:
+15. Finalization and terminal paths, with no model:
+    - the study finalizer: a changed checksum, a re-hash exception, a missing
+      baseline and a persistence failure; a post-restore runtime exception
+      and termination through `guarded`, with the original reason kept;
+    - terminal verdict rules;
+    - the launcher library, run with dummy children: a TERM-ignoring child
+      and grandchild are killed within TERM + grace; a not-started step
+      gives 125; source verification reports unchanged, changed and no time;
+      the digest is omitted when there is no time; a changed source on a PASS
+      stage gives FAILED, merged into `status.json`.
+
+    Also checked: metrics acceptance with state norms and observed gates;
+    the observed-rollout gate report; extension summary units; NaN
+    telemetry for non-extension trees.
+16. `tests/prospective_momentum_float32_probe.py` in its own process, x64 off:
     - guard regressions for finite-before-resolution;
     - on the restored checkpoint: native nesting of logits, carries and
       streaming at TRAJ32 = 2e-5, with the mixed parameter and incoming-carry
@@ -250,15 +293,30 @@ Nothing is clamped by validation. FAILED stops the batch.
     - executed float32 transitions (native, candidate at cap, gain at cap):
       classification, and entries against A in float64 at ENTRY32 = 2e-5
       relative;
-    - a real float32 training step: cap equals the updated-gate cap; outward
-      proposal and inward move on the trained gates;
+    - a real float32 training step from a valid interior kappa: cap equals
+      the updated-gate cap; projection behaviour (outward proposal, manual
+      inward move) on the trained gates;
+    - executed-gain underflow (`log_g = -110` executes as 0) is rejected, and
+      an ordinary positive executed gain is accepted;
     - dtype assertions.
 
-## 8. Budget and statuses
+## 8. Budget, finalization and statuses
 
-- **Cap.** One 600-second cap covers the backend probe, focused checks,
-  source restoration and reproduction, update-zero identity, preflight, 30
-  runs, held-out evaluation and the digest, with a 30-second reserve.
+- **Cap.** One absolute deadline, DEADLINE = start + 600 s, covers the
+  backend probe, focused checks, source restoration and reproduction,
+  update-zero identity, preflight, 30 runs, held-out evaluation, the kill
+  grace, source verification, the digest and the terminal verdict. The
+  30-second reserve is allocated explicitly
+  (`bin/run_experiments/prospective_momentum_terminal.sh`, amendment R2):
+  - every stage receives TERM at DEADLINE−30 and KILL 5 s later;
+  - source verification (`sha256sum -c`) is bounded to finish by
+    DEADLINE−20;
+  - the digest is bounded to DEADLINE−8, at most 12 s;
+  - the terminal verdict is bounded to DEADLINE−3, at most 5 s.
+
+  A step with no time left is not started and is recorded as such.
+  Descendant processes are covered because GNU `timeout` signals its whole
+  process group. Partial logs are kept.
 - **Preflight.** It measures the actual continuation path from each restored
   source, for all six arms:
   - one shared host-step function (batch generation, compiled step with
@@ -273,10 +331,38 @@ Nothing is clamped by validation. FAILED stops the batch.
   (exit 4). A retrace, or a projection larger than the remaining time, gives
   INCOMPLETE (exit 3), and nothing starts. There are no trimmed arms, fewer
   updates, retries or extended cap.
+- **Study finalization (amendment R1).** One finalizer handles success,
+  ordinary failure, runtime exceptions and SIGTERM, which is converted to an
+  exception so the finalizer runs within the kill grace.
+  - It keeps `computation_status`.
+  - It re-hashes the source. Changed or missing gives FAILED. An
+    unavailable verification (no baseline, or the re-hash raised) gives at
+    best INCOMPLETE and sets `source_unchanged = null` and
+    `integrity_verified = false`.
+  - It preserves the original `failed` reason and appends
+    `integrity_failures` and `runtime_failures`.
+  - It persists `study_status`. A persistence failure gives FAILED.
+  - The held-out opening (`heldout_opened`, `heldout_opened_at`) is persisted
+    BEFORE held-out generation and evaluation;
+    `heldout_evaluation_complete` marks the end.
+- **Terminal verdict (amendments R1–R2).** It is computed by
+  `experiments.prospective_momentum.terminal` and merged into `status.json`
+  under `terminal`, and it is always written to `logs/<stamp>/terminal.json`.
+  Worst wins:
+  - the stage outcome: 0 PASS; 3, the watchdog or not started INCOMPLETE;
+    4 or any other exit FAILED;
+  - a changed or missing source checksum gives FAILED;
+  - an uncompleted verification or no baseline is never PASS;
+  - when a `status.json` exists, a digest that is not `complete` is never
+    an unqualified PASS (INCOMPLETE). The saved results stay on disk.
+
+  If the verdict cannot be computed or persisted, the launcher reports
+  FAILED.
 - **Reference cost.** The completed meta-delta dispatch took 273 s of 600,
   with checks 140 s. This study's cost is unmeasured until preflight.
-- **Status fields.** `PROSPECTIVE_MOMENTUM_STATUS=PASS|INCOMPLETE|FAILED`. PASS
-  is operational only. Partial `status.json` is persisted after every run.
+- **Status fields.** `PROSPECTIVE_MOMENTUM_STATUS=PASS|INCOMPLETE|FAILED` is
+  the terminal verdict. PASS is operational only. Partial `status.json` is
+  persisted after every run.
 
 ## 9. Screens (development)
 
@@ -302,8 +388,8 @@ automatically at the end of the launcher. It reads JSON only. It prints:
 - source hashes, reproduction tables and update-zero identity;
 - preflight costs, parameters, carry and runtime;
 - every development and final run: start and end validation, gains, curves;
-- held-out per seed per arm, with all eight category accuracies, means and
-  W/Q norms;
+- held-out per seed per arm, with all eight category accuracies, means,
+  W/Q norms and observed-rollout gates;
 - the full kappa and log_g history (sampled) with projection summary and
   gradients;
 - executed transition classification, bounds and ratios;
@@ -313,7 +399,8 @@ automatically at the end of the launcher. It reads JSON only. It prints:
 - every screen condition.
 
 Raw logarithmic leaves (`raw_log_g`, `raw_log_leaves`) are printed separately
-from exponentiated coefficients (`g`, `exponentiated`). The earlier
+from exponentiated coefficients (`executed_g` as executed in float32,
+`reference_g_f64`, `exponentiated`). The earlier
 mislabelling of exponentiated values as `raw_eta` is not reproduced.
 
 ## 11. Not claimed
@@ -324,7 +411,28 @@ mislabelling of exponentiated values as `raw_eta` is not reproduced.
 - kappa = 0 is outside the passive sector (9). Arms 2–3 use the
   computational generalized equation, and the occupied sector is reported.
 
-## 12. Open items for the reviewer
+## 12. Amendments after static review of a1f0439 (before execution)
+
+These record corrections; the equations, arms, sources, initialization,
+tolerances, data, schedule, criteria and cap are unchanged.
+
+- **R1.** Source integrity now determines the terminal verdict. There is
+  one finalizer for all exit paths, the held-out opening is persisted
+  before use, and control-flow fixtures cover these paths.
+- **R2.** All finalization runs inside the absolute deadline, with a bounded
+  grace, process-group cleanup and explicit digest status. Stub-child
+  fixtures cover it.
+- **R3.** Acceptance uses the executed gain. Computed state norms and
+  observed gates are included in finiteness acceptance.
+- **R4.** The projection margin is described as a declared safety margin
+  with its scope stated. TABLE and OBSERVED-ROLLOUT coverage are separated,
+  and the observed coverage uses gates returned by the rollouts.
+- **Reporting.** The telemetry reports real quantities or NaN, and each
+  margin in its parameterization's units. The manual inward move is labelled
+  as projection behaviour. The reproduction-discrepancy wording no longer
+  attributes a cause.
+
+## 13. Open items for the reviewer (as at a1f0439)
 
 1. The two new tolerances: reproduction (≤ 1 query per category, CE 1e-4
    relative) and update-zero identity (0 queries, CE 2e-5 relative).

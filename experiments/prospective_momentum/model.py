@@ -35,7 +35,9 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
         dtype = p["key_raw"].dtype
     ep = AM.sanitize_episode(ep)                      # the common contract
     key_id, val_id, event = ep["key_id"], ep["val_id"], ep["event"]
-    # --- identical to nested_memory.model.rollout's shell
+    # --- the same source operations as nested_memory.model.rollout's shell
+    # (same helpers, same order). Equal SOURCE is not a proof of bitwise-equal
+    # arithmetic in another compilation context; nesting is checked numerically.
     k_all, k_valid = NMD.safe_normalize(p["key_raw"])   # the SAME helper
     keys = k_all[key_id].astype(dtype)
     valid = k_valid[key_id]
@@ -49,7 +51,7 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
         scalar, step_fn = p["kappa"][0], PD.prospective_step
         coeff = dict(kappa=p["kappa"][0])
     else:
-        scalar, step_fn = jnp.exp(p["log_g"][0]), PD.gain_step
+        scalar, step_fn = PD.executed_gain(p), PD.gain_step
         coeff = dict(raw_log_g=p["log_g"][0], g=scalar)
 
     def step(carry, t):

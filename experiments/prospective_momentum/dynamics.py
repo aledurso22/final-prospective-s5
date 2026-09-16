@@ -36,7 +36,18 @@ kappa is a directly stored scalar, initialized to exactly 0, never clipped in
 the forward pass. After each optimizer update it is projected to
 [0, (1 - PROJ_REL_MARGIN) Kmax], Kmax the frozen-token bound (12) minimized
 over EVERY gate setting at which a write can occur, from the UPDATED gate
-parameters. The rounding margin is derived in the audit, s6.
+parameters. PROJ_REL_MARGIN is a DECLARED numerical safety margin, supported
+by the arithmetic estimates of audit s6 and by the measured checks; it is not
+a universal certificate for arbitrary trained gate parameters, reduction
+orders or rollout states (review R4, a1f0439).
+
+Coverage labels used throughout:
+  * TABLE coverage: gates recomputed by `table_gates` on the finite gate-input
+    table; the rounded executed 2x2 transitions of these table gates (unit key
+    e_0) are classified exactly. This certifies those rounded matrices only.
+  * OBSERVED-ROLLOUT coverage: gates RETURNED by actual evaluation rollouts
+    (`observed_gate_report`). The same gate function in a different
+    compilation context is not proven bitwise identical to the table.
 """
 
 from fractions import Fraction
@@ -123,11 +134,20 @@ def full_table():
 
 
 def table_gates(p, table):
-    """The pinned gate function on a table, in the leaves' dtype."""
+    """The pinned gate function on a table, in the leaves' dtype.
+
+    TABLE coverage. This is the same function the rollout calls, but in a
+    different array shape and compilation context; bitwise equality with the
+    gates computed inside a rollout is NOT assumed or claimed."""
     key, val, ev = table
     x = NM.gate_features(jnp.asarray(key), jnp.asarray(val),
                          jnp.asarray(ev)).astype(p["key_raw"].dtype)
     return NM._momentum_gates(p, x)
+
+
+def executed_gain(p):
+    """g exactly as the production rollout forms it."""
+    return jnp.exp(p["log_g"][0])
 
 
 # ------------------------------------------------------------- bounds ------
@@ -154,7 +174,11 @@ def project(p):
     gates. Optimizer state untouched. A no-op for trees without an extension
     scalar (the meta-delta raw_r projection is applied separately).
 
-    Telemetry: n_projected, pre (proposal), post, cap, overshoot."""
+    Telemetry: n_projected, pre (proposal), post, cap (the PROJECTION cap,
+    margin included), bound (the un-margined frozen-token bound), overshoot.
+    kappa entries are values of kappa; log_g entries are LOGARITHMS (cap and
+    bound are log caps). For a tree without an extension scalar every entry
+    is NaN: unavailable, not an observation."""
     WT = write_table()
     if "kappa" in p:
         a, b, mu, eta = table_gates(p, WT)
@@ -163,7 +187,7 @@ def project(p):
         pre = p["kappa"]
         post = jnp.minimum(jnp.maximum(pre, 0.0), cap)
         tel = dict(n_projected=jnp.sum(post != pre), pre=pre[0], post=post[0],
-                   cap=cap, overshoot=jnp.max(jnp.abs(pre - post)))
+                   cap=cap, bound=kmax, overshoot=jnp.max(jnp.abs(pre - post)))
         return dict(p, kappa=post), tel
     if "log_g" in p:
         a, b, mu, eta = table_gates(p, WT)
@@ -172,11 +196,12 @@ def project(p):
         pre = p["log_g"]
         post = jnp.minimum(pre, cap)
         tel = dict(n_projected=jnp.sum(post != pre), pre=pre[0], post=post[0],
-                   cap=cap, overshoot=jnp.max(jnp.maximum(pre - post, 0.0)))
+                   cap=cap, bound=jnp.log(gmax),
+                   overshoot=jnp.max(jnp.maximum(pre - post, 0.0)))
         return dict(p, log_g=post), tel
-    z = jnp.zeros((), dtype=p["key_raw"].dtype)
-    return p, dict(n_projected=jnp.asarray(0), pre=z, post=z,
-                   cap=jnp.asarray(jnp.inf, dtype=z.dtype), overshoot=z)
+    nan = jnp.full((), jnp.nan, dtype=p["key_raw"].dtype)
+    return p, dict(n_projected=jnp.asarray(0), pre=nan, post=nan, cap=nan,
+                   bound=nan, overshoot=nan)
 
 
 # ------------------------------------------------ executed transition ------
@@ -204,7 +229,10 @@ def jury(alpha, beta, mu, eta, kappa):
 def executed_transitions(step, gates, scalar, dtype):
     """The key-aligned transition of the PRODUCTION step, extracted by
     applying it to basis carries with the exactly representable unit key e_0,
-    v = 0 and m = 1. Returns (n, 2, 2) in the executed dtype."""
+    v = 0 and m = 1, for the SUPPLIED gates. Returns (n, 2, 2) in the executed
+    dtype. Classifying these matrices certifies exactly these rounded
+    frozen-token matrices; it is not a proof for arbitrary rollout states,
+    non-basis keys, other reduction orders or switching trajectories."""
     a, b, mu, eta = gates
     d_k = NM.D_K
     k = jnp.zeros((d_k,), dtype=dtype).at[0].set(1)
@@ -247,16 +275,22 @@ def classify(A):
 
 
 def transition_report(p, rule):
-    """Executed frozen-token classification over the write table, plus the
-    exact float64 bound from the executed gates, for a momentum-family tree.
-    Host-side; used for source, preflight and final validation."""
+    """TABLE coverage: exact classification of the rounded executed
+    frozen-token transitions over the write table, plus float64 bounds
+    evaluated on the rounded table gates, for a momentum-family tree.
+    Host-side; used for source, preflight and final validation.
+
+    Review R3: the gain is the PRODUCTION transform `jnp.exp(log_g)` in the
+    leaves' dtype (`executed_g`); positivity and the bound are validated on
+    that value. The host float64 exponential is reported separately as
+    `reference_g_f64` and is never used for acceptance."""
     dtype = p["key_raw"].dtype
     a, b, mu, eta = table_gates(p, write_table())
     ga = [onp.asarray(x) for x in (a, b, mu, eta)]
     if rule == "prospective_momentum":
         step, scalar = prospective_step, p["kappa"][0]
     elif rule == "gain_momentum":
-        step, scalar = gain_step, jnp.exp(p["log_g"][0])
+        step, scalar = gain_step, executed_gain(p)
     else:                                   # the executed native step itself
         step = (lambda c, k, v, m, a_, b_, mu_, e_, _:
                 NMD.momentum_delta_step(c, k, v, m, a_, b_, mu_, e_))
@@ -289,9 +323,12 @@ def transition_report(p, rule):
                                               else 0.0))
     if rule == "gain_momentum":
         lg = float(onp.asarray(p["log_g"]).ravel()[0])
-        rep.update(raw_log_g=lg, g=float(onp.exp(lg)),
-                   g_over_bound=(float(onp.exp(lg)) / gb if onp.isfinite(gb)
-                                 else 0.0))
+        g_exec = float(onp.asarray(scalar))
+        rep.update(raw_log_g=lg, executed_g=g_exec,
+                   executed_g_dtype=str(onp.asarray(scalar).dtype),
+                   reference_g_f64=float(onp.exp(onp.float64(lg))),
+                   executed_g_over_bound=(g_exec / gb if onp.isfinite(gb)
+                                          else 0.0))
     return rep
 
 
@@ -310,9 +347,10 @@ def transition_failure(rep):
             return (f"kappa {k} outside [0, {rep['kappa_bound_f64']}) "
                     "(float64 bound from executed gates)")
     if rep["rule"] == "gain_momentum":
-        g = rep["g"]
+        g = rep["executed_g"]                     # production value (R3)
         if not (onp.isfinite(g) and 0.0 < g < rep["gain_bound_f64"]):
-            return f"g {g} outside (0, {rep['gain_bound_f64']})"
+            return (f"executed g {g} outside (0, {rep['gain_bound_f64']}) "
+                    f"(reference float64 exp {rep['reference_g_f64']})")
     return None
 
 
@@ -348,3 +386,55 @@ def gate_range_report(p):
             note=("kappa >= mu/(1-mu) is the passive two-compartment sector; "
                   "kappa = 0 (native) is outside it"))
     return rep
+
+
+def observed_gate_report(rule, gates, event, kappa=None, executed_g=None):
+    """OBSERVED-ROLLOUT coverage: statistics of the gates RETURNED by actual
+    evaluation rollouts (arrays (n_episodes, L)), with float64 frozen-token
+    quantities evaluated analytically on those rounded observed gates at
+    WRITE tokens. This is not an executed-entry classification and not a
+    switching-stability statement; it is labelled separately from TABLE
+    coverage."""
+    a, b, mu, eta = (onp.asarray(x, onp.float64) for x in gates)
+    w = onp.asarray(event) == WRITE
+
+    def st(v):
+        if v.size == 0:
+            return None
+        return dict(min=float(v.min()), median=float(onp.median(v)),
+                    max=float(v.max()), mean=float(v.mean()))
+    out = dict(coverage="observed rollout gates (returned by evaluation)",
+               finite=bool(all(onp.all(onp.isfinite(x))
+                               for x in (a, b, mu, eta))),
+               all_tokens={k: st(v) for k, v in
+                           dict(alpha=a, beta=b, mu=mu, eta=eta).items()},
+               write_tokens={k: st(v[w]) for k, v in
+                             dict(alpha=a, beta=b, mu=mu, eta=eta,
+                                  q=b * eta).items()},
+               n_tokens=int(a.size), n_write_tokens=int(w.sum()))
+    if not w.any():
+        return out
+    aw, bw, mw, ew = a[w], b[w], mu[w], eta[w]
+    aq = aw * bw * ew
+    pos = aq > 0
+    kb = onp.where(pos, ((1 + aw) * (1 + mw) - aq)
+                   / (2 * onp.where(pos, aq, 1.0)), onp.inf)
+    gb = onp.where(pos, (1 + aw) * (1 + mw) / onp.where(pos, aq, 1.0),
+                   onp.inf)
+    out.update(kappa_bound_f64_min=float(kb.min()),
+               gain_bound_f64_min=float(gb.min()))
+    if rule == "prospective_momentum" and kappa is not None:
+        J = jury(aw, bw, mw, ew, kappa)
+        out.update(kappa=float(kappa),
+                   kappa_over_min_bound=(float(kappa / kb.min())
+                                         if onp.isfinite(kb.min()) else 0.0),
+                   analytic_jury_min=[float(onp.min(j)) for j in J],
+                   write_tokens_with_negative_analytic_jury=int(
+                       onp.sum(onp.minimum(onp.minimum(J[0], J[1]), J[2])
+                               < 0)))
+    if rule == "gain_momentum" and executed_g is not None:
+        out.update(executed_g=float(executed_g),
+                   executed_g_over_min_bound=(float(executed_g / gb.min())
+                                              if onp.isfinite(gb.min())
+                                              else 0.0))
+    return out

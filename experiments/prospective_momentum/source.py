@@ -138,8 +138,10 @@ def reproduction_differences(saved, measured):
     """Compare a re-evaluation with the saved development metrics.
 
     Accuracies are counts over a fixed validation set: each family/category
-    may differ by at most REPRO_QUERIES_PER_CATEGORY queries (a tie flipped by
-    a different GPU kernel); cross-entropies within REPRO_CE_REL relative.
+    may differ by at most REPRO_QUERIES_PER_CATEGORY queries; cross-entropies
+    within REPRO_CE_REL relative. An allowed discrepancy is recorded as a
+    discrepancy; no cause (e.g. an argmax tie) is attributed without
+    observing it.
     Returns (failures, table). All differences are recorded."""
     fails, table = [], []
     for fam in ("recall", "revision"):

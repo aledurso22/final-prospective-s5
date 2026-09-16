@@ -401,7 +401,9 @@ def test_projection_uses_updated_gates_and_keeps_zero_fallback():
     pq_up, _ = PD.project(p_up)
     assert float(pq_up["kappa"][0]) <= kb_up * (1 - PD.PROJ_REL_MARGIN) \
         * (1 + 10 * EXACT64)
-    # outward proposal, then an inward gradient move is not blocked
+    # PROJECTION BEHAVIOUR ONLY: an outward proposal is projected, and a
+    # manual inward move of the scalar is then not blocked by the projection.
+    # This is not an optimizer or task-gradient recovery test.
     inward = dict(pq, kappa=pq["kappa"] - 0.1 * float(pq["kappa"][0]))
     pin, telin = PD.project(inward)
     assert int(telin["n_projected"]) == 0
@@ -421,10 +423,11 @@ def test_projection_uses_updated_gates_and_keeps_zero_fallback():
 
 def test_a_real_training_step_projects_from_the_updated_parameters():
     """The cap reported by the compiled step is the bound of the POST-update
-    gates, not of the incoming ones. (An outward kappa cannot be placed in the
-    incoming state without making the forward pass itself diverge, so the
-    outward-proposal/inward-move sequence is checked on the projection above
-    and, from real trained gates, in the float32 probe.)"""
+    gates, not of the incoming ones. The step starts from a valid interior
+    kappa; an outward INCOMING kappa is not used here because nothing
+    guarantees a finite forward pass beyond the frozen-token bound. The
+    outward-proposal / manual-inward-move sequence below checks projection
+    behaviour only, not optimizer recovery (review, reporting)."""
     from experiments.prospective_momentum import study as ST
     p = PM.convert_momentum(_perturbed_native(23), "prospective_momentum")
     kb0, _ = _independent_caps(p)
@@ -443,7 +446,8 @@ def test_a_real_training_step_projects_from_the_updated_parameters():
     assert onp.isfinite(float(o[9])) and float(o[9]) != 0.0
     assert PD.transition_failure(PD.transition_report(
         p1, "prospective_momentum")) is None
-    # proposal beyond the cap of these updated gates, then an inward move
+    # projection behaviour only: proposal beyond the cap of these updated
+    # gates, then a MANUAL inward move (not an optimizer update)
     pq, t1 = PD.project(dict(p1, kappa=jnp.asarray([2.0 * kb1])))
     assert int(t1["n_projected"]) == 1
     pin, t2 = PD.project(dict(pq, kappa=0.9 * pq["kappa"]))
@@ -579,6 +583,233 @@ def test_the_restored_source_verifies_and_its_gates_are_valid():
         SRC.restore(fam, d)
     pn = SRC.restore("momentum_delta", d)
     assert PD.gate_range_report(pn)["gates_valid"]
+
+
+# ============================ 9. executed gain, finiteness, telemetry (R3) ===
+def test_executed_gain_underflow_is_rejected_and_ordinary_gain_accepted():
+    """float32 leaves inside the x64 test process: jnp.exp stays float32."""
+    pn32 = NM.init_params("momentum_delta", 43)
+    pg = PM.convert_momentum(pn32, "gain_momentum")
+    assert pg["log_g"].dtype == jnp.float32
+    under = dict(pg, log_g=jnp.asarray([-110.0], dtype=jnp.float32))
+    rep = PD.transition_report(under, "gain_momentum")
+    assert rep["executed_g"] == 0.0 and rep["reference_g_f64"] > 0.0
+    assert rep["executed_g_dtype"] == "float32"
+    assert PD.transition_failure(rep) is not None
+    ok = dict(pg, log_g=jnp.asarray([-0.3], dtype=jnp.float32))
+    rep_ok = PD.transition_report(ok, "gain_momentum")
+    assert rep_ok["executed_g"] == float(onp.exp(onp.float32(-0.3)))
+    assert PD.transition_failure(rep_ok) is None
+
+
+def _metrics_fixture():
+    cat = {c: dict(accuracy=0.5, cross_entropy=1.0, n=10)
+           for c in TK.CATEGORIES}
+    m = {f: dict(accuracy=0.5, cross_entropy=1.0, macro_accuracy=0.5,
+                 by_category=cat) for f in TK.FAMILIES}
+    m.update(primary=0.5, retention_revision_untouched=0.5,
+             recall_overall=0.5,
+             state_norms=dict(W_frobenius_mean=1.0, W_frobenius_max=2.0,
+                              aux_frobenius_mean=0.1, aux_frobenius_max=0.2,
+                              aux_meaning="Q"))
+    return m
+
+
+def test_metrics_acceptance_includes_state_norms_and_observed_gates():
+    from experiments.prospective_momentum import study as ST
+    m = _metrics_fixture()
+    assert ST.metrics_finite(m)
+    bad = _metrics_fixture()
+    bad["state_norms"]["aux_frobenius_max"] = float("nan")
+    assert not ST.metrics_finite(bad)
+    missing = _metrics_fixture()
+    missing.pop("state_norms")
+    assert not ST.metrics_finite(missing)
+    gates = _metrics_fixture()
+    gates["observed_rollout_gates"] = dict(finite=False)
+    assert not ST.metrics_finite(gates)
+
+
+def test_observed_rollout_gate_report_uses_supplied_gates():
+    ev = onp.array([[TK.WRITE, TK.QUERY], [TK.IDLE, TK.WRITE]])
+    a = onp.array([[0.5, 0.1], [0.05, 1.0]])
+    b = onp.array([[0.2, 0.9], [0.9, 0.5]])
+    mu = onp.array([[0.5, 0.9], [0.9, 0.2]])
+    eta = onp.array([[1.0, 1.9], [1.9, 1.5]])
+    rep = PD.observed_gate_report("prospective_momentum", (a, b, mu, eta), ev,
+                                  kappa=0.1)
+    assert rep["n_write_tokens"] == 2 and rep["finite"]
+    kb = min(((1 + 0.5) * 1.5 - 0.5 * 0.2) / (2 * 0.5 * 0.2),
+             ((1 + 1.0) * 1.2 - 0.75) / (2 * 0.75))
+    assert abs(rep["kappa_bound_f64_min"] - kb) <= EXACT64 * kb
+    assert rep["write_tokens"]["alpha"]["min"] == 0.5   # non-writes excluded
+    assert rep["all_tokens"]["alpha"]["min"] == 0.05
+
+
+def test_extension_summary_uses_each_parameterizations_units():
+    from experiments.prospective_momentum import study as ST
+    h = [dict(n_projected=0, pre=0.5, post=0.5, cap=1.0, bound=1.001,
+              overshoot=0.0)]
+    s1 = ST.summarize_history(h, "prospective_momentum")
+    assert abs(s1["min_relative_margin_to_cap"] - 0.5) < 1e-12
+    s2 = ST.summarize_history(h, "gain_momentum")
+    assert abs(s2["min_log_slack_to_cap"] - 0.5) < 1e-12
+    assert abs(s2["min_relative_gain_margin_to_cap"]
+               - (1 - math.exp(-0.5))) < 1e-12
+    assert "min_relative_margin_to_cap" not in s2
+    s3 = ST.summarize_history(h, "gp_two_sided")
+    assert "min_relative_gain_margin_to_cap" not in s3
+    pn, tel = PD.project(_perturbed_native(47))
+    assert all(onp.isnan(float(tel[k])) for k in
+               ("pre", "post", "cap", "bound", "overshoot"))
+
+
+# ================================ 10. finalization and terminal paths (R1/R2)
+def _status(before):
+    return ({} if before is None
+            else dict(source=dict(hashes_at_restore=before)))
+
+
+def test_finalizer_changed_checksum_forces_failed():
+    from experiments.prospective_momentum import study as ST
+    saved = []
+    st = _status({"a": "1"})
+    code, label = ST.finalize(st, 0, "PASS", lambda: {"a": "2"},
+                              lambda x: saved.append(json.loads(json.dumps(
+                                  x))))
+    assert (code, label) == (4, "FAILED")
+    assert st["source_unchanged"] is False and not st["integrity_verified"]
+    assert st["computation_status"] == "PASS"
+    assert saved and saved[-1]["study_status"] == "FAILED"
+    st2 = _status({"a": "1"})
+    assert ST.finalize(st2, 0, "PASS", lambda: {"a": None},
+                       lambda x: None)[0] == 4
+
+
+def test_finalizer_unavailable_verification_never_passes_and_keeps_reason():
+    from experiments.prospective_momentum import study as ST
+
+    def boom():
+        raise OSError("disk gone")
+    st = _status({"a": "1"})
+    assert ST.finalize(st, 0, "PASS", boom, lambda x: None) == \
+        (3, "INCOMPLETE")
+    assert st["source_unchanged"] is None and not st["integrity_verified"]
+    st2 = dict(_status({"a": "1"}), failed="original reason")
+    assert ST.finalize(st2, 4, "FAILED", boom, lambda x: None) == \
+        (4, "FAILED")
+    assert st2["failed"] == "original reason"
+    assert any("re-hash failed" in w for w in st2["integrity_failures"])
+    st3 = _status(None)
+    assert ST.finalize(st3, 0, "PASS", lambda: {"a": "1"},
+                       lambda x: None)[0] == 3
+    st4 = _status({"a": "1"})
+    assert ST.finalize(st4, 0, "PASS", lambda: {"a": "1"},
+                       lambda x: None) == (0, "PASS")
+    assert st4["source_unchanged"] is True and st4["integrity_verified"]
+
+    def cannot_write(x):
+        raise OSError("read-only")
+    assert ST.finalize(_status({"a": "1"}), 0, "PASS", lambda: {"a": "1"},
+                       cannot_write)[0] == 4
+
+
+def test_post_restore_runtime_exception_is_finalized():
+    from experiments.prospective_momentum import study as ST
+    saved = []
+    st = dict(_status({"a": "1"}), incomplete=[])
+
+    def body():
+        st["development"] = ["partial"]
+        raise RuntimeError("crash after restore")
+    code, label = ST.guarded(body, st, lambda: {"a": "1"}, saved.append)
+    assert (code, label) == (4, "FAILED")
+    assert "crash after restore" in st["failed"]
+    assert "Traceback" in st["runtime_failures"][0]["traceback"]
+    assert st["source_unchanged"] is True and saved
+    assert st["development"] == ["partial"]
+    st2 = dict(_status({"a": "1"}), incomplete=[])
+
+    def body2():
+        st2["failed"] = "dev arm invalid"
+        raise RuntimeError("second error")
+    ST.guarded(body2, st2, lambda: {"a": "1"}, lambda x: None)
+    assert st2["failed"] == "dev arm invalid"
+    st3 = dict(_status({"a": "1"}), incomplete=[])
+
+    def body3():
+        raise ST.Terminated("signal 15")
+    assert ST.guarded(body3, st3, lambda: {"a": "1"}, lambda x: None) == \
+        (3, "INCOMPLETE")
+
+
+def test_terminal_verdict_rules():
+    from experiments.prospective_momentum.terminal import terminal_verdict as V
+    assert V("study", 0, 0, "complete", True)["label"] == "PASS"
+    assert V("study", 0, 1, "complete", True)["label"] == "FAILED"
+    assert V("study", 0, 2, "complete", True)["label"] == "INCOMPLETE"
+    assert V("study", 0, 3, "complete", True)["label"] == "INCOMPLETE"
+    assert V("study", 0, 0, "omitted:no-time", True)["label"] == "INCOMPLETE"
+    assert V("study", 0, 0, "failed:exit-1", True)["label"] == "INCOMPLETE"
+    assert V("checks", 4, 0, "omitted:no-status-json", False)["code"] == 4
+    assert V("study", 124, 0, "complete", True)["label"] == "INCOMPLETE"
+    assert V("study", 1, 0, "complete", True)["label"] == "FAILED"
+    v = V("study", 4, 1, "failed:timeout", True)
+    assert v["label"] == "FAILED" and v["reasons"][0].startswith("study")
+    assert len(v["reasons"]) == 3
+
+
+def test_launcher_terminal_paths_with_dummy_children(tmp_path):
+    """Bounded stages with TERM-ignoring children and grandchildren, source
+    verification (unchanged, changed, no time), digest omission and the
+    persisted terminal verdict. Dummy commands only; no model."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    lib = os.path.join(repo, "bin", "run_experiments",
+                       "prospective_momentum_terminal.sh")
+    script = r"""
+set -u
+source "$LIB"
+START=$(date +%s); TOTAL_S=40; DEADLINE=$(( START + 40 ))
+t0=$(date +%s)
+pm_bounded 2 1 bash -c 'trap "" TERM; sleep 60 & echo $! > "$0/gc.pid"; wait' "$LOG_DIR"
+rc=$?
+echo "BOUNDED_RC=$rc ELAPSED=$(( $(date +%s) - t0 ))"
+sleep 1
+if kill -0 "$(cat "$LOG_DIR/gc.pid")" 2>/dev/null; then echo GRANDCHILD=alive; else echo GRANDCHILD=gone; fi
+pm_bounded 0 1 true; echo NOTIME_RC=$?
+mkdir -p "$SOURCE_DIR"; echo a > "$SOURCE_DIR/f"
+(cd "$SOURCE_DIR" && sha256sum f) > "$LOG_DIR/source_sha256_before.txt"
+pm_verify_source > /dev/null; echo VERIFY_OK=$PM_INTEGRITY_RC
+echo b > "$SOURCE_DIR/f"
+pm_verify_source > /dev/null; echo VERIFY_CHANGED=$PM_INTEGRITY_RC
+DEADLINE=$(( $(date +%s) + 10 ))
+pm_verify_source > /dev/null; echo VERIFY_NOTIME=$PM_INTEGRITY_RC
+mkdir -p "$LOG_DIR/run"; echo '{"study_status": "PASS"}' > "$LOG_DIR/run/status.json"
+DEADLINE=$(( $(date +%s) + 5 ))
+pm_digest "$LOG_DIR/run" > /dev/null; echo DIGEST=$PM_DIGEST
+DEADLINE=$(( $(date +%s) + 30 )); PM_INTEGRITY_RC=1; PM_DIGEST=complete
+pm_terminal "$LOG_DIR/run" study 0 > /dev/null; echo TERMINAL=$PM_LABEL/$PM_CODE
+"""
+    env = dict(os.environ, LIB=lib, LOG_DIR=str(tmp_path),
+               SOURCE_DIR=str(tmp_path / "src"), PY=sys.executable)
+    r = subprocess.run(["bash", "-c", script], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=60)
+    print(r.stdout); print(r.stderr[-2000:])
+    out = dict(line.split("=", 1) for line in r.stdout.split()
+               if "=" in line and line.split("=", 1)[0].isupper())
+    rc = int(out["BOUNDED_RC"])
+    elapsed = int(r.stdout.split("ELAPSED=")[1].split()[0])
+    assert rc in (124, 137) and elapsed <= 5, (rc, elapsed)
+    assert out["GRANDCHILD"] == "gone"
+    assert out["NOTIME_RC"] == "125"
+    assert out["VERIFY_OK"] == "0" and out["VERIFY_CHANGED"] == "1"
+    assert out["VERIFY_NOTIME"] == "2"
+    assert out["DIGEST"] == "omitted:no-time"
+    assert out["TERMINAL"] == "FAILED/4"
+    st = json.load(open(tmp_path / "run" / "status.json"))
+    assert st["terminal"]["label"] == "FAILED"
+    assert st["terminal"]["integrity_verified"] is False
+    assert json.load(open(tmp_path / "terminal.json"))["code"] == 4
 
 
 def test_production_float32_probe_in_its_own_process():
