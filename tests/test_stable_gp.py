@@ -938,7 +938,11 @@ def test_generalized_step_equals_eq17_on_identical_inputs():
         h, T = rs.uniform(0.05, 1.0), rs.uniform(0.5, 5.0)
         a = SG.tss_eq17_step(s, f, f_prev, h, T)
         b = SG.generalized_discrete_step(s, s_prev, f, f_prev, h, 0.0, 0.0, T)
-        worst = max(worst, float(onp.max(onp.abs(a - b))))
+        # finiteness first: max() would silently ignore a NaN discrepancy
+        assert onp.all(onp.isfinite(a)) and onp.all(onp.isfinite(b)), (a, b)
+        d = float(onp.max(onp.abs(a - b)))
+        assert onp.isfinite(d), d
+        worst = max(worst, d)
     print(f"  one-step Eq.(17) identity, worst abs {worst:.3e}")
     assert worst < TSS64, worst
 
@@ -970,7 +974,11 @@ def test_generalized_discrete_equation_recovers_TSS_eq17_exactly():
         s_a_next = SG.tss_eq17_step(s_a, f_a, f_prev_a, h, T)
         s_b_next = SG.generalized_discrete_step(s_b, s_prev_b, f_b, f_prev_b,
                                                 h, 0.0, 0.0, T)
+        # finiteness first: a NaN would fail `d > worst` and never be recorded
+        assert onp.all(onp.isfinite(s_a_next)), (k, s_a_next)
+        assert onp.all(onp.isfinite(s_b_next)), (k, s_b_next)
         d = float(onp.max(onp.abs(s_a_next - s_b_next)))
+        assert onp.isfinite(d), (k, d)
         if d > worst:
             worst, worst_k = d, k
         s_a, f_prev_a = s_a_next, f_a

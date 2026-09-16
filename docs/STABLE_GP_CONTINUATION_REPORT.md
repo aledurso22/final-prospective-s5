@@ -175,14 +175,19 @@ Nothing has been rerun.
    same tolerance. It separates an algebraic disagreement from accumulated
    trajectory rounding.
 
-**Diagnosis status.** The shared-history bug is real, but it only takes effect
-after the two paths have already diverged by rounding, since both start from
-identical states. It is therefore probably **not** the whole explanation. If
-the one-step check passes and the rollout still exceeds 1e-12, the evidence
-points to accumulated rounding under a strict absolute rollout tolerance. That
-discrepancy will be reported with its measured magnitude before any
-measurement amendment is proposed. The traceback from dispatch 1's `checks.log`
-is still needed to confirm the original failing step and magnitude.
+**Diagnosis status: UNRESOLVED.** The cause of dispatch 1's Eq. (17) failure
+is not established. The shared previous-drive defect may by itself explain the
+threshold crossing, as may accumulated rounding, or both. No cause is recorded
+until the original traceback from `checks.log` is read.
+
+Nor will the next run settle it by itself. A failed one-step check alone does
+not establish an algebraic error, and a failed rollout alone does not
+establish "rounding only". Any remaining discrepancy will be reported with its
+step and magnitude before a measurement amendment is proposed.
+
+Both identity tests now assert finiteness of each step's outputs and of the
+discrepancy before updating the worst value, so a NaN cannot be silently
+skipped. Tolerances and fixtures are unchanged.
 
 ### Timing observed
 
