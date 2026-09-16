@@ -3,9 +3,9 @@
 **Status: executed. `ADAPTIVE_STATUS=PASS` (dispatch 2, `f096242`), all 14
 development and 21 final runs complete, held-out opened. Both performance
 screens FAILED. The prospective term is credited against the inertial control
-only.** Per-seed held-out values and categories are pending the read-only digest
-(`experiments/adaptive_memory/summary.py`); the numbers below are exactly those
-printed by the run.
+only.** Every number below was printed by the run or by the read-only digest
+`experiments/adaptive_memory/summary.py`, which reads the saved JSON without
+recomputation.
 
 ## Provenance
 
@@ -275,9 +275,34 @@ All counts match the declared values.
 | Gated DeltaNet | **B** (lr 0.01) |
 | Momentum DeltaNet | **A** (lr 0.003) |
 
-Development values for the unselected slots were not in the console tail and
-are pending the digest. Both new-rule families selected the short timescale;
-the declared long-τ configuration did not win selection for either.
+| Family | A primary | A rev-CE | B primary | B rev-CE | Selected |
+|---|---|---|---|---|---|
+| Generalized prospective | **0.4795** | 1.5933 | 0.4531 | 1.6233 | A (τ .75) |
+| Inertial control | **0.4685** | 1.6687 | 0.2019 | 2.0873 | A (τ .75) |
+| First-order delta | 0.4624 | 1.6511 | **0.5466** | 1.4229 | B (lr .01) |
+| TSS prospective | **0.4968** | 1.6101 | 0.4136 | 1.7950 | A (ε/τ_m .1) |
+| Ideal equilibrium | 0.4036 | 1.7340 | **0.4138** | 1.7108 | B (lr .01) |
+| Gated DeltaNet | 0.4353 | 1.6586 | **0.5481** | 1.4147 | B (lr .01) |
+| Momentum DeltaNet | **0.4280** | 1.6170 | 0.3506 | 1.5937 | A (lr .003) |
+
+Both new second-order families selected the short timescale; at τ = 32 the
+inertial control reached only 0.2019.
+
+### Calibration
+
+`β* = 0.606018662389`; slot 1A recovered `ν = 4/3` to 1.23e−10 (tolerance
+1e−8). Every solve found its first bracket and met the 1e−10 observable
+tolerance (errors 9.2e−12 to 3.4e−11).
+
+| Slot | Solved rate | Derived |
+|---|---|---|
+| prospective A | ν = 1.333333333 | τ .75, ρ .75 |
+| prospective B | ν = 0.9484261736 | τ 32, ρ .75 |
+| inertial A | η = 0.8055350393 | τ .75 |
+| inertial B | η = 14.08597438 | τ 32 |
+| TSS A | q = 0.07330897071 | τ_m 13.641, ε 1.364, M 18.61, T 15.00 |
+| TSS B | q = 0.2295413235 | τ_m 4.357, ε 2.178, M 9.49, T 6.53 |
+| delta A/B | η = 0.931452 (closed form) | |
 
 ### Final-seed validation primary (update 200, evaluation-seed validation)
 
@@ -294,89 +319,165 @@ split.
 | Gated DeltaNet | 0.5430 | 0.5574 | 0.5681 |
 | Momentum DeltaNet | 0.5215 | 0.5232 | 0.4739 |
 
-### Held-out, mean over three seeds (512 sequences per family)
+### Held-out per seed (512 sequences per family)
 
-| Arm | Primary (revision macro) | Revision untouched retention | Recall-family accuracy |
-|---|---|---|---|
-| Generalized prospective | 0.4671 | 0.3068 | 0.4755 |
-| Inertial control | 0.4547 | 0.2918 | 0.4653 |
-| First-order delta | **0.5497** | 0.4917 | 0.6253 |
-| TSS prospective | 0.5017 | 0.4822 | 0.6018 |
-| Ideal equilibrium | 0.4069 | 0.2174 | 0.4147 |
-| Gated DeltaNet | **0.5512** | 0.5029 | 0.6333 |
-| Momentum DeltaNet | 0.5015 | **0.6135** | **0.7136** |
+| Arm | Seed | Primary | Revision untouched retention | Recall | Rev CE |
+|---|---|---|---|---|---|
+| Generalized prospective | 201 | 0.4688 | 0.3052 | 0.4783 | 1.5946 |
+| | 202 | 0.4586 | 0.2971 | 0.4692 | 1.6183 |
+| | 203 | 0.4739 | 0.3181 | 0.4791 | 1.5991 |
+| | **mean** | **0.4671** | **0.3068** | **0.4755** | 1.6040 |
+| Inertial control | 201 | 0.4585 | 0.2952 | 0.4703 | 1.6683 |
+| | 202 | 0.4468 | 0.2817 | 0.4601 | 1.6924 |
+| | 203 | 0.4587 | 0.2986 | 0.4653 | 1.6717 |
+| | **mean** | **0.4547** | **0.2918** | **0.4653** | 1.6775 |
+| First-order delta | 201 | 0.5432 | 0.4836 | 0.6216 | 1.4202 |
+| | 202 | 0.5476 | 0.4851 | 0.6188 | 1.4410 |
+| | 203 | 0.5583 | 0.5063 | 0.6356 | 1.4158 |
+| | **mean** | **0.5497** | **0.4917** | **0.6253** | 1.4256 |
+| TSS prospective | 201 | 0.5009 | 0.4795 | 0.6035 | 1.6018 |
+| | 202 | 0.4907 | 0.4673 | 0.5900 | 1.6325 |
+| | 203 | 0.5137 | 0.4998 | 0.6118 | 1.6090 |
+| | **mean** | **0.5017** | **0.4822** | **0.6018** | 1.6145 |
+| Ideal equilibrium | 201 | 0.4108 | 0.2217 | 0.4130 | 1.7289 |
+| | 202 | 0.3964 | 0.2024 | 0.4115 | 1.7426 |
+| | 203 | 0.4136 | 0.2280 | 0.4196 | 1.7105 |
+| | **mean** | **0.4069** | **0.2174** | **0.4147** | 1.7273 |
+| Gated DeltaNet | 201 | 0.5475 | 0.4980 | 0.6300 | 1.4108 |
+| | 202 | 0.5461 | 0.4937 | 0.6265 | 1.4272 |
+| | 203 | 0.5599 | 0.5171 | 0.6433 | 1.4060 |
+| | **mean** | **0.5512** | **0.5029** | **0.6333** | 1.4147 |
+| Momentum DeltaNet | 201 | 0.5189 | 0.5681 | 0.6848 | 1.3796 |
+| | 202 | 0.5217 | 0.6064 | 0.7241 | 1.3822 |
+| | 203 | 0.4639 | 0.6660 | 0.7318 | 1.6475 |
+| | **mean** | **0.5015** | **0.6135** | **0.7136** | 1.4698 |
 
-### Verdicts
+### Held-out categories (accuracy, mean over seeds)
+
+| Arm | Recall: immediate | middle untouched | late selected | late untouched | Revision: immediate | middle untouched | late selected | late untouched |
+|---|---|---|---|---|---|---|---|---|
+| Generalized prospective | 1.0000 | 0.4285 | 0.3006 | 0.1730 | 1.0000 | 0.4378 | 0.2547 | 0.1758 |
+| Inertial control | 1.0000 | 0.4167 | 0.2752 | 0.1691 | 0.9995 | 0.4181 | 0.2355 | 0.1655 |
+| First-order delta | 0.9924 | 0.6271 | 0.5898 | 0.2920 | 0.8426 | 0.6756 | 0.3729 | 0.3078 |
+| TSS prospective | 0.9792 | 0.6217 | 0.5251 | 0.2811 | 0.6582 | 0.6802 | 0.3844 | 0.2842 |
+| Ideal equilibrium | 1.0000 | 0.2948 | 0.2129 | 0.1510 | 1.0000 | 0.2868 | 0.1929 | 0.1479 |
+| Gated DeltaNet | 0.9919 | 0.6346 | 0.6035 | 0.3031 | 0.8242 | 0.6859 | 0.3747 | 0.3200 |
+| Momentum DeltaNet | 0.9518 | 0.7134 | 0.7912 | 0.3979 | 0.3688 | 0.7886 | 0.4102 | 0.4385 |
+
+Chance is 0.125.
+
+### Verdicts, with paired seeds
 
 **Literature screen — FAILED.**
 
-| vs | Δ mean primary | all seeds positive | Δ retention | Δ recall | safeguard |
-|---|---|---|---|---|---|
-| Momentum DeltaNet | −0.0344 | no | −0.3067 | −0.2381 | failed |
-| Gated DeltaNet | −0.0841 | no | −0.1961 | −0.1578 | failed |
+| vs | Δ mean primary | paired Δ 201 / 202 / 203 | Δ retention | Δ recall |
+|---|---|---|---|---|
+| Momentum DeltaNet | −0.0344 | −0.0502 / −0.0631 / **+0.0100** | −0.3067 | −0.2380 |
+| Gated DeltaNet | −0.0841 | −0.0787 / −0.0875 / −0.0861 | −0.1961 | −0.1577 |
+
+The single positive seed against Momentum is seed 203, where Momentum's own
+primary fell to 0.4639 (see below). All other conditions fail.
 
 **Ordinary-prospectivity extension screen — FAILED.**
 
-| vs | Δ mean primary | all seeds positive | Δ retention | Δ recall | safeguard |
+| vs | Δ mean primary | paired Δ 201 / 202 / 203 | Δ retention | Δ recall | condition |
 |---|---|---|---|---|---|
-| TSS prospective | −0.0347 | no | −0.1754 | −0.1263 | failed |
-| Ideal equilibrium | +0.0602 | **yes** | +0.0894 | +0.0608 | met |
+| TSS prospective | −0.0347 | −0.0321 / −0.0321 / −0.0398 | −0.1754 | −0.1262 | failed |
+| Ideal equilibrium | +0.0602 | +0.0580 / +0.0623 / +0.0603 | +0.0894 | +0.0609 | **passed** |
 
-The candidate passes every condition against the ideal minimum-change
-reference, but the screen needs both references, and it loses to TSS on all
-three measures.
+**Attribution (independent of both screens).**
 
-**Attribution (independent of both screens) — credited against the inertial
-control.** Mean differences: primary +0.0124, retention +0.0150, recall
-+0.0102, with positive paired primary differences in all three final seeds. The
-per-seed held-out values are pending the digest. This is a comparison of
-separately calibrated and trained rule families, not a term-removal ablation
-of one trajectory. It does not imply competitive performance.
+| vs | paired Δ primary 201 / 202 / 203 | per-seed Δ retention | per-seed Δ recall | mean Δ ret / rec | verdict |
+|---|---|---|---|---|---|
+| Inertial control | +0.0103 / +0.0118 / +0.0151 | +0.0100 / +0.0154 / +0.0195 | +0.0080 / +0.0091 / +0.0138 | +0.0150 / +0.0103 | **credited** |
+| First-order delta | −0.0745 / −0.0890 / −0.0845 | −0.1784 / −0.1880 / −0.1882 | −0.1433 / −0.1496 / −0.1565 | −0.1849 / −0.1498 | not exceeded |
 
-**First-order delta comparison — the simpler account wins.** The equally
-source-gated adaptive first-order delta arm scores **0.5497** primary against
-the generalized candidate's 0.4671, with better retention and recall. It is
-essentially level with Gated DeltaNet (0.5512) on primary. The protocol said
-that if the first-order delta arm matched the candidate's outcome, a simpler
-write-control account would remain viable; here it *exceeds* the candidate on
-every reported measure. In this pilot the second-order structure, prospective
-or inertial, costs accuracy relative to the gated first-order rule.
+The per-seed retention and recall differences here are arithmetic on the
+per-seed table above.
+
+The inertial comparison compares separately calibrated and trained rule
+families; it is not a term-removal ablation, and it does not make the
+candidate competitive. The equally gated first-order delta arm exceeds the
+candidate by 7.5–8.9 points in every seed, with better retention and recall.
+By the protocol's own rule, the simpler write-control account remains viable
+and, in this pilot, is the better one.
+
+### Learned coefficients (final seeds)
+
+| Arm | 201 | 202 | 203 | Initial |
+|---|---|---|---|---|
+| Generalized prospective | ν 1.469, τ 1.643, ρ .659, M 1.697, γ 1.033, T 2.493 | ν 1.493, τ 1.643, ρ .664 | ν 1.509, τ 1.635, ρ .675 | ν 1.333, τ .75, ρ .75 |
+| Inertial control | η .666, τ .412 | η .693, τ .410 | η .719, τ .408 | η .806, τ .75 |
+| First-order delta | η .2748 | η .2781 | η .2741 | η .9315 |
+| TSS prospective | τ_m 21.75, ε 3.44 (ratio .158) | τ_m 21.70, ε 3.42 | τ_m 21.79, ε 3.48 | τ_m 13.64, ε 1.36 |
+
+Every checkpoint passed `validate_coefficients`. The generalized candidate
+stayed admissible (`γT − M` = 0.878 / 0.838 / 0.771) and TSS kept `γ = 0`. The
+learned source weight stayed near one for the second-order arms (range about
+0.89–1.18) and spread more for first-order delta (0.76–1.31).
+
+Gated DeltaNet's α gate saturated near 1 (median ≈ 0.9997) in every seed.
+Momentum DeltaNet's α median was 0.008 and 0.011 in seeds 201/202 but 0.976
+in seed 203, where primary fell to 0.4639 while retention rose to 0.666.
+Momentum therefore did not converge to one consistent gate regime across
+seeds.
+
+### Training gain (validation primary, update 0 → 200)
+
+| Arm | 201 | 202 | 203 |
+|---|---|---|---|
+| Generalized prospective | +0.022 | +0.021 | +0.015 |
+| Inertial control | +0.041 | +0.031 | +0.028 |
+| First-order delta | +0.102 | +0.120 | +0.101 |
+| TSS prospective | +0.062 | +0.061 | +0.057 |
+| Ideal equilibrium | +0.025 | +0.013 | +0.012 |
+| Gated DeltaNet | +0.174 | +0.205 | +0.137 |
+| Momentum DeltaNet | +0.179 | +0.061 | +0.073 |
+
+Each final run took 2.0–2.3 s of wall time.
 
 ### What the results support
 
-* The implementation passed all 190 focused checks, including the dense
-  references, the TSS original-equation integration, both derivative routes and
-  every recorded numerical error, and completed the declared batch inside the
-  cap.
-* **No improvement over Momentum or Gated DeltaNet.** The candidate is below
-  both on primary, with retention 31 and 20 points lower respectively.
-* **No improvement over ordinary prospectivity as a whole.** The candidate
-  beats the ideal minimum-change reference on all declared conditions but loses
-  to TSS finite adaptation, which also has substantially better retention and
-  recall.
-* **A small, seed-consistent advantage over the inertial control** (+1.2
-  points primary), in a regime where both second-order rules trail the gated
-  first-order rule by about 8–9 points.
-* Momentum DeltaNet has the best retention and recall by a wide margin, while
-  Gated DeltaNet and the adaptive first-order delta arm lead on primary. No
-  single arm dominates every measure.
-* This is one bounded development screen with three seeds, one task and 200
-  updates. The failed verdicts are reported as they stand; no criterion,
-  selection or configuration is changed in response.
+* The implementation passed all 190 focused checks and recorded 45 numerical
+  errors, none outside tolerance. It completed the declared batch in 283 s of
+  600.
+* **No improvement over Momentum or Gated DeltaNet.** The candidate trails both
+  on mean primary, trails Gated in every seed, and is 20–31 points lower on
+  retention.
+* **No improvement over ordinary prospectivity as a whole.** It clears every
+  condition against the ideal minimum-change reference but trails TSS finite
+  adaptation in every seed and on retention and recall.
+* **A small, seed-consistent advantage over the inertial control** (+1.0 to +1.5
+  points primary, with retention and recall also higher in every seed).
+* **The gated first-order delta rule beats both second-order rules in every
+  seed.** The adaptive second-order structure did not help in this pilot.
 
-## Results pending the digest
+### Descriptive observations — not tested hypotheses
 
-Per-seed held-out primary/retention/recall and CE, the paired per-seed
-differences behind each verdict, all four categories for both families,
-development values for every slot, learned coefficients and gate
-distributions, training gains and norms. None requires another run; all are in
-the saved JSON. Obtain them with the read-only digest:
+These patterns were seen after the results. They were not predeclared and are
+not claims:
 
-```
-python -m experiments.adaptive_memory.summary \
-  /Users/durso/s5-runs/adaptive-memory/20260916-153803 \
-  /Users/durso/s5-runs/adaptive-memory/logs/20260916-153803
-```
+* **Immediate revision versus retention.** The arms at ≈1.0 immediate revision
+  accuracy (generalized prospective, inertial, ideal equilibrium) have the
+  lowest untouched and late-category retention. The arms that give up
+  immediate revision (first-order delta 0.84, Gated 0.82, TSS 0.66, Momentum
+  0.37) retain far better. Across seven arms and one task this is a
+  correlation, not a mechanism.
+* **Softer writes.** The first-order delta arm reduced its write rate from
+  η = 0.93 to about 0.275, a first-write strength of about 0.24 instead of the
+  calibrated 0.61. The two second-order arms that kept ≈1.0 immediate revision
+  did not move their effective response nearly as far.
+* **Learning-rate budget asymmetry.** The declared selection axes differ by
+  family: the generalized, inertial and TSS families searched timescales at
+  lr 0.003, while first-order delta, ideal equilibrium, Gated and Momentum
+  searched lr 0.003 against 0.01. Three of those four chose lr 0.01. The
+  candidate learned least (+1.5 to +2.2 points) and was never offered lr 0.01.
+  This was declared in advance as equal selection budget rather than equal
+  tuning, and it limits interpretation. It does **not** license a rerun, and
+  none is proposed.
+
+No criterion, selection or configuration is changed in response to these
+results, and no follow-up run is launched.
 
 ## Limitations, declared in advance
 
