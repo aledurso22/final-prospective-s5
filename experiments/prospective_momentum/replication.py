@@ -363,6 +363,22 @@ def direction(d):
     return "increased" if d > 0 else ("decreased" if d < 0 else "unchanged")
 
 
+#: R3 (review of 7344e32): the reused screen's default note describes the
+#: completed study's SHARED source. This replication replaces it; the screen's
+#: comparisons, thresholds and the original default note are untouched.
+REPLICATION_NOTE = (
+    "Independent-source replication. The three final seeds vary "
+    "initialization, source pretraining AND continuation: each has its own "
+    "freshly initialized and independently pretrained source per family. The "
+    "held-out evaluation set and the development-selected recipe (slot) are "
+    "common to all final models by design. Three seeds on this small "
+    "associative task are not significance, not a benchmark and not SOTA. "
+    "The fixed-coefficient update remains QHM-equivalent at alpha = 1; no "
+    "optimizer novelty is claimed. Frozen-token stability is not switching "
+    "stability, and each source's occupied sector is reported from its own "
+    "learned coefficients.")
+
+
 def annotate_directions(sc):
     for c in sc["literature"] + [sc["gain_control"], sc["old_generalized"],
                                  sc["tss_eq17"]]:
@@ -370,6 +386,8 @@ def annotate_directions(sc):
         c["recall_direction"] = direction(c["recall_difference"])
         c["safeguard_note"] = ("passing the -1 pp safeguard does not mean "
                                "zero measured loss")
+    sc["reused_screen_default_note"] = sc["note"]
+    sc["note"] = REPLICATION_NOTE
     return sc
 
 
@@ -424,7 +442,9 @@ def main():
                   completed_study_reference=(
                       "/Users/durso/s5-runs/prospective-momentum/"
                       "20260917-000431 (verdicts unchanged)"),
-                  source=dict(hashes_at_restore={}, manifest=manifest),
+                  # R2: no source baseline exists yet; `None` means source
+                  # invariance is UNAVAILABLE, never "verified"
+                  source=dict(hashes_at_restore=None, manifest=manifest),
                   development=[], final=[], incomplete=[])
     status_path = os.path.join(out, "status.json")
 
@@ -433,7 +453,11 @@ def main():
         ST.write(status_path, st)
 
     def rehash():
-        return RS.rehash(out, list(status["source"]["hashes_at_restore"]))
+        """Re-hash exactly the source files recorded so far. Before the first
+        source exists the baseline is None: return {} without raising, so the
+        finalizer reports invariance as unavailable (R2)."""
+        keys = (status.get("source") or {}).get("hashes_at_restore")
+        return RS.rehash(out, list(keys)) if keys else {}
 
     signal.signal(signal.SIGTERM, ST._on_sigterm)
     code, _ = ST.guarded(lambda: run_replication(args, status, manifest, out,

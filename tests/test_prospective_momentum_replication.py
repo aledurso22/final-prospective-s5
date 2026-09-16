@@ -252,8 +252,12 @@ def test_preflight_decision_and_planned_projection_fields():
 # ============================================== 6. launcher verification ====
 def test_launcher_verifies_the_new_source_manifest(tmp_path):
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    lib = os.path.join(repo, "bin", "run_experiments",
-                       "prospective_momentum_replication_verify.sh")
+    bindir = os.path.join(repo, "bin", "run_experiments")
+    # the launcher sources the shared terminal library FIRST (pm_bounded,
+    # PM_VERIFY_END, the supervisor) and the replication helper second; this
+    # fixture does the same instead of relying on inherited shell state
+    lib_term = os.path.join(bindir, "prospective_momentum_terminal.sh")
+    lib = os.path.join(bindir, "prospective_momentum_replication_verify.sh")
     run = tmp_path / "run"
     (run / "sources").mkdir(parents=True)
     (run / "sources" / "a.msgpack").write_bytes(b"hello")
@@ -261,8 +265,10 @@ def test_launcher_verifies_the_new_source_manifest(tmp_path):
                    cwd=str(run / "sources"), check=True)
     script = r"""
 set -u
-source "$LIB"
 START=$(date +%s); DEADLINE=$(( START + 40 )); LOG_DIR="$TMP"
+SOURCE_DIR="$RUN/sources"
+source "$LIB_TERM"
+source "$LIB"
 PM_INTEGRITY_RC=0
 pm_extra_verify "$RUN" > /dev/null; echo NEW_OK=$PM_INTEGRITY_RC
 printf 'x' >> "$RUN/sources/a.msgpack"
@@ -274,17 +280,80 @@ rm -f "$RUN/sources/SHA256SUMS"
 PM_INTEGRITY_RC=0
 pm_extra_verify "$RUN" > /dev/null; echo NEW_MISSING=$PM_INTEGRITY_RC
 """
-    env = dict(os.environ, LIB=lib, RUN=str(run), TMP=str(tmp_path),
-               PY=sys.executable)
+    env = dict(os.environ, LIB_TERM=lib_term, LIB=lib, RUN=str(run),
+               TMP=str(tmp_path), PY=sys.executable)
+    env.pop("PM_SUPERVISOR", None)          # use the production supervisor
     r = subprocess.run(["bash", "-c", script], cwd=repo, env=env,
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=120)
     print(r.stdout); print(r.stderr[-2000:])
+    assert r.returncode == 0, (r.returncode, r.stdout[-3000:],
+                               r.stderr[-3000:])
     out = dict(tok.split("=", 1) for tok in r.stdout.split()
                if "=" in tok and tok.split("=", 1)[0].isupper())
     assert out["NEW_OK"] == "0"
     assert out["NEW_CHANGED"] == "1"
     assert out["WORST_KEPT"] == "1"
     assert out["NEW_MISSING"] == "3"
+
+
+def test_finalization_before_any_source_reports_invariance_as_unavailable():
+    """R2: the pre-source phase must not claim verified invariance."""
+    st = dict(source=dict(hashes_at_restore=None))
+    keys = st["source"]["hashes_at_restore"]
+    rehash = lambda: {} if not keys else {}                    # noqa: E731
+    assert ST.finalize(st, 0, "PASS", rehash, lambda x: None) == (3,
+                                                                  "INCOMPLETE")
+    assert st["source_unchanged"] is None
+    assert st["integrity_verified"] is False
+    # an existing FAILED computation verdict is preserved
+    st2 = dict(source=dict(hashes_at_restore=None), failed="preflight failure")
+    assert ST.finalize(st2, 4, "FAILED", rehash, lambda x: None) == (4,
+                                                                     "FAILED")
+    assert st2["failed"] == "preflight failure"
+    assert st2["integrity_verified"] is False
+    # a preflight refusal stays INCOMPLETE
+    st3 = dict(source=dict(hashes_at_restore=None), incomplete=["over budget"])
+    assert ST.finalize(st3, 3, "INCOMPLETE", rehash,
+                       lambda x: None) == (3, "INCOMPLETE")
+
+
+def test_partial_manifest_is_verified_against_its_own_baseline(tmp_path):
+    """R2: once one source exists, its files are verified as before."""
+    _, entry = _tiny_source(tmp_path)
+    base = RS.baseline_hashes(dict(entries=[entry]))
+    st = dict(source=dict(hashes_at_restore=base))
+    rehash = lambda: RS.rehash(str(tmp_path),                  # noqa: E731
+                               list(st["source"]["hashes_at_restore"] or []))
+    assert rehash() == base
+    assert ST.finalize(st, 0, "PASS", rehash, lambda x: None) == (0, "PASS")
+    assert st["integrity_verified"] is True
+    # and a later source that is not yet in the baseline does not hide a change
+    with open(os.path.join(RS.sources_dir(str(tmp_path)), entry["file"]),
+              "ab") as fh:
+        fh.write(b"x")
+    st2 = dict(source=dict(hashes_at_restore=base))
+    assert ST.finalize(st2, 0, "PASS", rehash, lambda x: None) == (4, "FAILED")
+
+
+def test_replication_screen_note_replaces_the_shared_source_description():
+    """R3: the reused screen's default note describes the completed study's
+    single shared source; the replication states its own scope."""
+    base = dict(prospective_momentum=0.60, momentum_delta=0.55,
+                gated_delta=0.55, gain_momentum=0.55, gp_two_sided=0.50,
+                tss_eq17=0.50)
+    raw = ST.screen(_final_rows(base), seeds=RS.SOURCE_FINAL)
+    default_note = raw["note"]
+    assert "ONE source" in default_note
+    sc = RP.annotate_directions(dict(raw))
+    assert sc["note"] == RP.REPLICATION_NOTE
+    assert sc["reused_screen_default_note"] == default_note
+    assert "ONE source" not in sc["note"]
+    for phrase in ("initialization, source pretraining AND continuation",
+                   "held-out evaluation set", "not SOTA", "QHM",
+                   "own learned coefficients"):
+        assert phrase in sc["note"], phrase
+    # the completed study's default is untouched for its own runs
+    assert ST.screen(_final_rows(base))["note"] == default_note
 
 
 def test_no_parameter_comes_from_the_completed_studys_checkpoints():

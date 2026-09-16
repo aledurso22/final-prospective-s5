@@ -129,6 +129,8 @@ The existing screen implementation and thresholds, evaluated on seeds
 - revision improvement positive in every final seed;
 - mean retention AND mean recall differences each ≥ −1 pp.
 
+The screen implementation, its comparisons and thresholds are reused
+unchanged; only its scope note is replaced by the replication's own (R3).
 The joint literature screen (native Momentum AND Gated DeltaNet) and the
 gain-only comparison are reported together; the previous generalized rule and
 the applicability-limited TSS comparison are reported separately. The digest
@@ -161,6 +163,11 @@ terminal paths). `tests/test_prospective_momentum_replication.py` adds only:
    directions, and are incomplete under the old seeds;
 10. the launcher's extra verification of the new sources: unchanged, changed,
     missing baseline, and that it can only worsen the integrity code.
+11. finalization before any source exists reports invariance as unavailable,
+    preserves a FAILED verdict and keeps a preflight refusal INCOMPLETE; a
+    partial manifest is verified against its own baseline (R2);
+12. the replication's screen scope note replaces the reused default, which is
+    kept alongside and is unchanged for the completed study's own runs (R3).
 
 ## 8. Budget, preflight and finalization
 
@@ -196,7 +203,38 @@ parameters and cost; and every screen with its direction statements.
 ## 10. Not claimed
 
 Three independently pretrained seeds on this small task do not establish a
-benchmark or SOTA result, and do not erase the other scope limits: frozen-token
-stability is not switching stability, the learned operating points lie outside
-the passive two-compartment sector under the declared mapping, and the
-fixed-gate QHM relationship remains relevant to novelty.
+benchmark or SOTA result, and do not erase the other scope limits:
+
+- frozen-token stability is not switching stability;
+- the **completed study** (20260917-000431) observed learned operating points
+  outside the passive two-compartment sector under the declared mapping. That
+  is a record of that run. These new sources' occupied sectors are not
+  asserted in advance: each is reported from its own learned coefficients in
+  the digest (`sector (9)`, QHM nu, kappa and the bound ratios);
+- the fixed-gate QHM relationship remains relevant to novelty.
+
+## 11. Amendments after static review of 7344e32 (before execution)
+
+Fixture, orchestration and reporting only. The six arms, equations, loss,
+source seeds, streams, schedule, criteria and the 600-second cap are
+unchanged.
+
+- **R1.** The launcher-verification fixture now sources the shared terminal
+  library first and the replication helper second, exactly as the launcher
+  does, supplies its own `PY`, `LOG_DIR` and deadline instead of relying on
+  inherited shell state, and asserts the subprocess exit code (with stdout
+  and stderr) before parsing its output. The four integrity assertions and
+  the production verifier are unchanged.
+- **R2.** Before the first source exists the baseline is `None`, meaning
+  source invariance is **unavailable**, never "verified". The re-hash
+  callback tolerates that state without raising. An existing FAILED verdict
+  is preserved, and a preflight refusal stays INCOMPLETE. Once a baseline
+  exists, every recorded file is verified as before. New non-numerical
+  fixtures cover the pre-source phase and a partial manifest.
+- **R3.** The replication sets its own screen scope note: the final seeds
+  vary initialization, source pretraining and continuation, while the
+  held-out set and the development-selected recipe are common by design; the
+  small-task, three-seed, non-SOTA, QHM and frozen-token limits are retained,
+  and each source's sector is reported from its own coefficients. The reused
+  screen's comparisons, thresholds and original default note are untouched;
+  the default is kept alongside as `reused_screen_default_note`.
