@@ -5,7 +5,9 @@ PREDECLARED TOLERANCES, by dtype and route:
     TRAJ32    2e-5   the same over a 64-token float32 trajectory
     GRAD64    1e-5   relative, JVP vs central differences, with an absolute
                      near-zero branch
-    GRAD32    2e-2   production float32, at BOTH declared perturbations
+    GRAD32    2e-2   production float32, at BOTH declared perturbations, each
+                     enforced separately, with an absolute fallback that bounds
+                     the actual discrepancy rather than excusing it
     IDENT64   1e-10  analytic limits and the literature reductions
     PARITY32  2e-5   literature rules vs separate literal references
     STREAM32  2e-5   chunked carry vs an unsplit sequence
@@ -275,16 +277,25 @@ def test_the_literature_rules_match_separate_literal_references():
 
 
 def test_momentum_with_mu_zero_and_eta_one_reduces_to_gated_delta():
+    """The declared literature reduction, in float64 where `1e-10` is meaningful.
+
+    This is an exact algebraic identity: with `mu = 0, eta = 1`,
+    `W' = alpha W - beta m (Wbar k - v)k^T = Wbar + beta m (v - Wbar k)k^T`.
+    The earlier revision checked it in float32 against a float64 tolerance.
+    """
     rs = onp.random.RandomState(17)
-    W = jnp.asarray(rs.randn(5, 5)); Q = jnp.zeros((5, 5))
+    W = jnp.asarray(rs.randn(5, 5), dtype=jnp.float64)
+    Q = jnp.zeros((5, 5), dtype=jnp.float64)
     Wg = W
     for t in range(16):
-        k = jnp.asarray(rs.randn(5) / onp.linalg.norm(rs.randn(5) * 0 + 1))
+        k = jnp.asarray(rs.randn(5), dtype=jnp.float64)
         k = k / jnp.linalg.norm(k)
-        v = jnp.asarray(rs.randn(5)); m = jnp.float32(t % 4 != 3)
+        v = jnp.asarray(rs.randn(5), dtype=jnp.float64)
+        m = jnp.asarray(float(t % 4 != 3), dtype=jnp.float64)
         a, b = 0.9, 0.4
         W, Q = D.momentum_delta_step((W, Q), k, v, m, a, b, 0.0, 1.0)
         (Wg,) = D.gated_delta_step((Wg,), k, v, m, a, b)
+        assert W.dtype == onp.float64
         assert float(jnp.max(jnp.abs(W - Wg))) < IDENT64, t
 
 
@@ -350,15 +361,32 @@ def test_the_task_supplies_no_value_at_a_query_and_the_oracle_is_exact():
 
 
 @pytest.mark.parametrize("rule", list(D.RULES))
-def test_batched_and_per_example_execution_agree(rule):
+@pytest.mark.parametrize("dt,tol", [(onp.float64, IDENT64),
+                                    (onp.float32, TRAJ32)])
+def test_batched_and_per_example_execution_agree(rule, dt, tol):
+    """Checked at BOTH dtypes with the tolerance each can actually reach.
+
+    An earlier revision ran this in production float32 and gated it at the
+    float64 identity tolerance `1e-10`, which float32 cannot reach; all five
+    arms failed on the cluster for that reason alone. The construction's
+    exactness is now checked in float64 at `1e-10` and the production route at
+    its declared trajectory tolerance, which is stronger than the original,
+    not weaker.
+    """
     b = TK.generate_batch(4245, 2)
-    const = MD.constants_for(rule)
-    p = MD.init_params(rule, 100)
+    const = MD.constants_for(rule, dtype=dt)
+    p = MD.init_params(rule, 100, dtype=dt)
     eps = {k: jnp.asarray(b[k]) for k in ("key_id", "val_id", "event")}
     batched = jax.vmap(lambda e: MD.rollout(rule, p, e, const)["logits"])(eps)
+    assert batched.dtype == dt, (rule, batched.dtype)
     for i in range(b["event"].shape[0]):
-        one = MD.rollout(rule, p, {k: eps[k][i] for k in eps}, const)["logits"]
-        assert float(jnp.max(jnp.abs(one - batched[i]))) < IDENT64, (rule, i)
+        out = MD.rollout(rule, p, {k: eps[k][i] for k in eps}, const)
+        assert out["dtype"] == dt and out["logits"].dtype == dt
+        for c in out["final_carry"]:
+            assert c.dtype == dt, (rule, dt, c.dtype)
+        err = float(jnp.max(jnp.abs(out["logits"] - batched[i])))
+        scale = max(1.0, float(jnp.max(jnp.abs(batched[i]))))
+        assert err / scale < tol, (rule, dt, i, err / scale)
 
 
 # ---------------------------------------- gradients, streaming, learning --
@@ -376,20 +404,26 @@ def test_gradients_match_finite_differences_on_raw_embeddings(rule):
     differences on the raw embeddings, before normalization. float64."""
     b = TK.generate_batch(4246, 1)
     ep = {k: jnp.asarray(b[k][0]) for k in ("key_id", "val_id", "event")}
-    const = MD.constants_for(rule)
     p = MD.init_params(rule, 100, dtype=onp.float64)
+    const = MD.constants_for(rule, dtype=onp.float64)
+    assert p["key_raw"].dtype == onp.float64
     rs = onp.random.RandomState(23)
     dirn = jnp.asarray(rs.randn(*p["key_raw"].shape))
     dirn = dirn / jnp.linalg.norm(dirn)
     f = lambda e: _raw_embedding_probe(rule, p, ep, const, dirn, e)  # noqa: E731
-    ana = float(jax.grad(f)(0.0))
-    best = None
+    ana = float(jax.grad(f)(onp.float64(0.0)))
+    lad = {}
     for h in (1e-4, 1e-5, 1e-6):
-        num = float((f(h) - f(-h)) / (2 * h))
-        rel = abs(num - ana) / max(abs(ana), 1e-300)
-        best = rel if best is None else min(best, rel)
-    print(f"  {rule}: |dL|={abs(ana):.3e}  best rel={best:.3e}")
-    assert best < GRAD64 or abs(ana) < 1e-8, (rule, best, ana)
+        num = float((f(onp.float64(h)) - f(onp.float64(-h))) / (2 * h))
+        lad[h] = dict(rel=abs(num - ana) / max(abs(ana), 1e-300),
+                      abs=abs(num - ana))
+    best_rel = min(v["rel"] for v in lad.values())
+    best_abs = min(v["abs"] for v in lad.values())
+    print(f"  {rule}: |dL|={abs(ana):.3e}  best rel={best_rel:.3e}  "
+          f"best abs={best_abs:.3e}")
+    # the near-zero branch bounds the ACTUAL discrepancy; it does not pass
+    # merely because the analytic derivative is small
+    assert best_rel < GRAD64 or best_abs < 1e-8, (rule, lad, ana)
 
 
 @pytest.mark.parametrize("rule", list(D.RULES))
@@ -397,20 +431,25 @@ def test_production_float32_gradients_at_both_declared_perturbations(rule):
     """Production dtype, BOTH declared perturbation sizes, both recorded."""
     b = TK.generate_batch(4247, 1)
     ep = {k: jnp.asarray(b[k][0]) for k in ("key_id", "val_id", "event")}
-    const = MD.constants_for(rule)
     p = MD.init_params(rule, 100, dtype=onp.float32)
+    const = MD.constants_for(rule, dtype=onp.float32)
     assert p["key_raw"].dtype == onp.float32, "production leaves must be f32"
     rs = onp.random.RandomState(29)
     dirn = jnp.asarray(rs.randn(*p["key_raw"].shape).astype(onp.float32))
     dirn = dirn / jnp.linalg.norm(dirn)
     f = lambda e: _raw_embedding_probe(rule, p, ep, const, dirn, e)  # noqa: E731
     ana = float(jax.grad(f)(jnp.float32(0.0)))
-    rels = {}
+    rels, absd = {}, {}
     for h in GRAD_PERTURBATIONS:
         num = float((f(jnp.float32(h)) - f(jnp.float32(-h))) / (2 * h))
         rels[h] = abs(num - ana) / max(abs(ana), 1e-30)
-    print(f"  {rule}: f32 |dL|={abs(ana):.3e}  rels={rels}")
-    assert min(rels.values()) < GRAD32 or abs(ana) < 1e-4, (rule, rels, ana)
+        absd[h] = abs(num - ana)
+    print(f"  {rule}: f32 |dL|={abs(ana):.3e}  rels={rels}  abs={absd}")
+    # R4: the committed criterion is BOTH declared perturbations, and the
+    # near-zero branch bounds the actual discrepancy. An earlier revision
+    # accepted whichever step happened to agree.
+    for h in GRAD_PERTURBATIONS:
+        assert rels[h] < GRAD32 or absd[h] < 1e-4, (rule, h, rels, absd, ana)
 
 
 @pytest.mark.parametrize("rule", list(D.RULES))
@@ -445,8 +484,10 @@ def test_a_real_optimizer_update_reaches_every_trainable_leaf(rule):
     p = MD.init_params(rule, 100)
     tx = S.get_tx()
     opt = tx.init(p)
-    q, opt2, loss, acc, gn, wn = S.train_step(rule, tx, p, opt, eps, const)
+    q, opt2, loss, acc, gn, wn, an = S.train_step(
+        rule, tx, p, opt, eps, const)
     assert onp.isfinite(float(loss)) and onp.isfinite(float(gn))
+    assert onp.isfinite(float(wn)) and onp.isfinite(float(an))
     moved = {k: float(jnp.max(jnp.abs(q[k] - p[k]))) for k in p}
     print(f"  {rule}: moved {[(k, '%.2e' % v) for k, v in moved.items()]}")
     for k in ("key_raw", "value_table", "readout_W"):
@@ -462,7 +503,8 @@ def test_a_real_optimizer_update_reaches_every_trainable_leaf(rule):
     # the step must NOT retrace when fed its own output
     n0 = S.train_step._cache_size()
     for _ in range(3):
-        q, opt2, loss, acc, gn, wn = S.train_step(rule, tx, q, opt2, eps, const)
+        q, opt2, loss, acc, gn, wn, an = S.train_step(
+            rule, tx, q, opt2, eps, const)
     assert S.train_step._cache_size() == n0, rule
 
 
@@ -474,6 +516,46 @@ def test_a_checkpoint_round_trips():
     back = serialization.from_bytes(jax.tree_util.tree_map(onp.asarray, p), blob)
     for k in p:
         assert onp.array_equal(onp.asarray(p[k]), onp.asarray(back[k])), k
+
+
+@pytest.mark.parametrize("rule", list(D.RULES))
+def test_the_compiled_constants_are_numeric_only(rule):
+    """R1: a reporting string in a dynamic JAX argument blocks the call.
+
+    `study.train_step` takes `const` dynamically, and JAX validates that
+    argument whether or not the model reads the field. An earlier revision put
+    a `note` string in the inertial arm's constants, and on the cluster exactly
+    that one arm's optimizer check failed. Metadata now lives in
+    `dynamics.LAW_METADATA`, which never enters a traced call.
+    """
+    c = MD.constants_for(rule)
+    leaves = jax.tree_util.tree_leaves(c)
+    assert leaves, rule
+    bad = [l for l in leaves if isinstance(l, (str, bytes))]
+    assert not bad, (rule, bad)
+    assert set(c) == {"F", "a0", "b0", "beta"}, (rule, sorted(c))
+    assert D.LAW_METADATA[rule] and isinstance(MD.constants_metadata(rule),
+                                               dict)
+
+
+@pytest.mark.parametrize("rule", list(D.RULES))
+@pytest.mark.parametrize("dt", [onp.float32, onp.float64])
+def test_the_executed_dtype_follows_the_parameters(rule, dt):
+    """R2: constants, carries and outputs must all be the parameters' dtype.
+
+    A float64 fixture that silently built float32 carries made `lax.scan`
+    reject a carry whose dtype changed between input and output, and all five
+    float64 gradient fixtures failed before comparing a derivative.
+    """
+    b = TK.generate_batch(4250, 1)
+    ep = {k: jnp.asarray(b[k][0]) for k in ("key_id", "val_id", "event")}
+    p = MD.init_params(rule, 100, dtype=dt)
+    assert p["key_raw"].dtype == dt, "x64 must be enabled for the f64 route"
+    const = MD.constants_for(rule, dtype=dt)
+    out = MD.rollout(rule, p, ep, const)
+    assert out["dtype"] == dt and out["logits"].dtype == dt
+    for c in out["final_carry"]:
+        assert c.dtype == dt, (rule, dt, c.dtype)
 
 
 def test_every_parameter_leaf_is_explicitly_typed():

@@ -298,7 +298,30 @@ float32 at **both** declared perturbations `1e-2` and `3e-3`, both recorded;
 literature parity against separate literal references; `2e-5` for chunked
 streaming against an unsplit sequence.
 
-## 11. Prepared, not launched
+## 11. Amendment, 16 September 2026: dispatch 1 failed its checks
+
+Recorded before any training and before any comparative number exists. The
+first dispatch (`aa51abb`) ended `NESTED_STATUS=FAILED` at the focused checks,
+12 failed of 61, 79 s of 600, logs preserved at
+`/Users/durso/s5-runs/nested-memory/logs/20260916-132523/`. **No training ran
+and the held-out set was never opened**, so no result is affected.
+
+Two root causes, both predicted by the coordinator's static review:
+
+* a **reporting string** inside the inertial arm's constants reached a dynamic
+  JAX argument — one arm had it, one arm failed;
+* **dtype inconsistency** between float64 fixture parameters and float32
+  constants and carries, which `lax.scan` rejects, plus two checks written at
+  a float64 tolerance while executing in float32.
+
+The corrections are listed in `docs/NESTED_MEMORY_REPORT.md`. **No equation,
+comparison, coefficient, task, seed, schedule or success criterion changed, and
+no tolerance was loosened**: the two tolerance-inconsistent checks now run at
+both dtypes, each at the tolerance it can reach, which is stronger than before.
+The preflight's accounting, the two-perturbation gradient gate and the
+completion checks were tightened per R3, R4 and R5.
+
+## 12. Prepared, not launched
 
 An S5 bridge — native S5, Rawat prospective-input S5, and the same S5 encoder
 augmented with delta, momentum-delta or generalized prospective memory — is a

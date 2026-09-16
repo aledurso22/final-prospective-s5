@@ -82,7 +82,8 @@ def train_step(rule, tx, p, opt, eps, const):
     upd, opt = tx.update(g, opt, p)
     p = optax.apply_updates(p, upd)
     acc = jnp.sum(aux["correct"]) / jnp.maximum(jnp.sum(aux["q"]), 1.0)
-    return p, opt, loss, acc, optax.global_norm(g), jnp.mean(aux["w_norm"])
+    return (p, opt, loss, acc, optax.global_norm(g),
+            jnp.mean(aux["w_norm"]), jnp.mean(aux["aux_norm"]))
 
 
 @partial(jax.jit, static_argnums=(0,))
@@ -161,6 +162,51 @@ def save_tree(path, tree):
             jax.tree_util.tree_map(lambda v: onp.asarray(v), tree)))
 
 
+def all_finite(tree):
+    return bool(all(onp.all(onp.isfinite(onp.asarray(v)))
+                    for v in jax.tree_util.tree_leaves(tree)))
+
+
+def metrics_finite(m):
+    """Every reported scalar, including per-category cross entropies."""
+    vals = []
+    for fam in TK.FAMILIES:
+        vals += [m[fam]["accuracy"], m[fam]["cross_entropy"],
+                 m[fam]["macro_accuracy"]]
+        for cn in TK.CATEGORIES:
+            c = m[fam]["by_category"][cn]
+            vals += [v for v in (c["accuracy"], c["cross_entropy"])
+                     if v is not None]
+    vals += [m["primary"], m["retention_revision_untouched"],
+             m["recall_overall"]]
+    return bool(onp.all(onp.isfinite(onp.asarray(vals, dtype=float))))
+
+
+def gate_report(rule, p, eps):
+    """Trained gate distributions and boundary occupancy, for the record."""
+    if rule not in ("gated_delta", "momentum_delta"):
+        return None
+    x = MD.gate_features(jnp.asarray(eps["key_id"]).reshape(-1),
+                         jnp.asarray(eps["val_id"]).reshape(-1),
+                         jnp.asarray(eps["event"]).reshape(-1))
+    x = x.astype(p["key_raw"].dtype)
+
+    def st(v):
+        v = onp.asarray(v).ravel()
+        return dict(min=float(v.min()), median=float(onp.median(v)),
+                    max=float(v.max()), mean=float(v.mean()))
+
+    if rule == "gated_delta":
+        a, b = MD._gated_delta_gates(p, x)
+        return dict(alpha=st(a), beta=st(b))
+    a, b, mu, eta = MD._momentum_gates(p, x)
+    at_clamp = float(onp.mean(
+        onp.abs(onp.log(onp.asarray(mu)) - MD.MIN_LOG_MU) < 1e-6))
+    return dict(alpha=st(a), beta=st(b), mu=st(mu), eta=st(eta),
+                min_log_mu=MD.MIN_LOG_MU,
+                fraction_of_tokens_at_the_mu_clamp=at_clamp)
+
+
 def config_hash(rule, seed):
     h = hashlib.sha256()
     h.update(repr((rule, seed, UPDATES, BATCH_PER_FAMILY, LR, GRAD_CLIP,
@@ -182,22 +228,22 @@ def preflight(val_eps, status, seeds):
     tx = get_tx()
     eps = to_jax(TK.generate_batch(train_stream_seed(seeds[0], 0),
                                    BATCH_PER_FAMILY))
-    rows, total = [], 0.0
+    rows, total, incurred, retraced_any = [], 0.0, 0.0, False
     for rule in D.RULES:
         const = MD.constants_for(rule)
         p = MD.init_params(rule, seeds[0])
         opt = tx.init(p)
         t0 = time.time()
-        p2, opt2, loss, acc, gn, wn = train_step(rule, tx, p, opt, eps, const)
+        p2, opt2, loss, acc, gn, wn, an = train_step(rule, tx, p, opt, eps, const)
         jax.block_until_ready(loss)
         compile_s = time.time() - t0
         # consume our own output once before timing
-        p2, opt2, loss, acc, gn, wn = train_step(rule, tx, p2, opt2, eps, const)
+        p2, opt2, loss, acc, gn, wn, an = train_step(rule, tx, p2, opt2, eps, const)
         jax.block_until_ready(loss)
         n_before = train_step._cache_size()
         t1 = time.time()
         for _ in range(5):
-            p2, opt2, loss, acc, gn, wn = train_step(rule, tx, p2, opt2, eps,
+            p2, opt2, loss, acc, gn, wn, an = train_step(rule, tx, p2, opt2, eps,
                                                      const)
         jax.block_until_ready(loss)
         step_s = (time.time() - t1) / 5.0
@@ -210,15 +256,23 @@ def preflight(val_eps, status, seeds):
         evaluate(rule, p, val_eps, const)
         jax.block_until_ready(p["key_raw"])
         eval_s = time.time() - t3
-        # per run: UPDATES steps + 3 validation passes; per arm: one compile.
-        # The held-out pass is 2x the validation size.
-        arm_s = (compile_s + eval_compile_s
-                 + len(seeds) * (UPDATES * step_s + len(VAL_AT) * eval_s
-                                 + 2.0 * eval_s))
+        # R3: compilation that has ALREADY HAPPENED here is incurred, not
+        # outstanding. The jitted functions and the cached optimizer transform
+        # persist in this process and every arm's training and evaluation
+        # shapes are identical to the ones just compiled, so no further
+        # compilation is outstanding for them. Counting it again compares
+        # already-spent time against the clock that has already advanced past
+        # it, and can refuse a batch that fits.
+        incurred += compile_s + eval_compile_s
+        arm_s = len(seeds) * (UPDATES * step_s + len(VAL_AT) * eval_s
+                              + 2.0 * eval_s)
         total += arm_s
+        retraced_any |= bool(retraced)
         rows.append(dict(rule=rule, display=D.DISPLAY[rule],
-                         compile_s=compile_s, eval_compile_s=eval_compile_s,
-                         step_s=step_s, eval_s=eval_s, arm_total_s=arm_s,
+                         compile_s_incurred=compile_s,
+                         eval_compile_s_incurred=eval_compile_s,
+                         step_s=step_s, eval_s=eval_s,
+                         arm_remaining_s=arm_s,
                          retraced_during_timing=bool(retraced),
                          params=MD.parameter_counts(rule, p),
                          carry=D.CARRY[rule]))
@@ -231,15 +285,26 @@ def preflight(val_eps, status, seeds):
             print(f"[!] {rule}: RETRACE during step timing; projection "
                   f"unreliable")
         del p2, opt2
-    host_s = 45.0        # serialization, metrics assembly, episode generation
+    # An ALLOWANCE, not a measurement: episode generation, metrics assembly
+    # and serialization. Labelled as such.
+    host_s = 45.0
     total += host_s
     status["preflight"] = dict(
-        rows=rows, host_allowance_s=host_s, projected_total_s=total,
-        scope=("training and evaluation compilation once per arm, plus "
-               "seeds x updates, three validation passes per run and the "
-               "held-out pass, plus a host allowance"))
+        rows=rows, host_allowance_s=host_s,
+        incurred_compilation_s=incurred, projected_remaining_s=total,
+        retraced_any=retraced_any,
+        scope=("PROJECTED REMAINING work only: seeds x updates, three "
+               "validation passes per run, the held-out pass and a host "
+               "allowance. Compilation already performed in this preflight is "
+               "reported separately as incurred; every training and evaluation "
+               "shape is identical to one already compiled in this process, so "
+               "no further compilation is outstanding."))
+    print(f"PREFLIGHT_INCURRED_COMPILATION_S={incurred:.1f}")
     print(f"PREFLIGHT_PROJECTED_TOTAL_S={total:.1f}")
-    return total
+    if retraced_any:
+        print("[!] a retrace was detected during step timing; the projection "
+              "is not trustworthy and the batch will not be started")
+    return total, retraced_any
 
 
 # ------------------------------------------------------------------ main --
@@ -279,6 +344,7 @@ def main():
         updates=args.updates, batch_per_family=BATCH_PER_FAMILY,
         lr=LR, grad_clip=GRAD_CLIP, streams=STREAM,
         arms={r: D.DISPLAY[r] for r in D.RULES},
+        law_metadata={r: MD.constants_metadata(r) for r in D.RULES},
         coefficients=dict(M=D.M_REF, gamma=D.GAMMA_REF, T=D.T_REF, h=D.H_REF,
                           F=const_p["F"].tolist(), a0=const_p["a0"],
                           b0=const_p["b0"],
@@ -293,6 +359,22 @@ def main():
             note=("min_log_mu = -2 is the OFFICIAL constructor default, which "
                   "resolves the -1/-2 ambiguity between the paper's passages "
                   "from a pinned configuration rather than by preference")),
+        heldout_policy=(
+            "held-out episodes are generated and hashed BEFORE training from "
+            "their own named stream; their EVALUATION is DEFERRED until every "
+            "declared configuration finishes. This is deferred evaluation, "
+            "not data first created after training."),
+        resume_policy=(
+            "config hashes are recorded for identification only. No "
+            "resume-by-hash path is implemented, so none is promised. "
+            "Completed artifacts are preserved and are never overwritten: "
+            "each run writes under its own run id."),
+        diagnostic_scope=(
+            "collected: state and auxiliary norms, gradient norms, trained "
+            "gate distributions and mu-clamp occupancy, parameter and carry "
+            "counts, per-category metrics, final parameters AND optimizer "
+            "state. Anything absent is stated rather than inferred, and no "
+            "run is repeated merely to fill a reporting field."),
         task=dict(structure=struct,
                   validation_digest=TK.episode_digest(val_np),
                   heldout_digest=TK.episode_digest(held_np),
@@ -308,8 +390,15 @@ def main():
           f"b0={const_p['b0']:.7f}  min_log_mu={MD.MIN_LOG_MU}")
     write(os.path.join(out, "status.json"), status)
 
-    proj = preflight(val_np, status, seeds)
+    proj, retraced = preflight(val_np, status, seeds)
     write(os.path.join(out, "status.json"), status)
+    if retraced:
+        status["incomplete"].append(
+            "a retrace was detected during preflight step timing; the "
+            "projection is untrustworthy and the batch was NOT started")
+        write(os.path.join(out, "status.json"), status)
+        print(f"NESTED_STATUS=INCOMPLETE out={out}")
+        return 3
     if args.preflight_only:
         print(f"NESTED_STATUS=PREFLIGHT_ONLY out={out}")
         return 0
@@ -345,27 +434,45 @@ def main():
                     break
                 eps = to_jax(TK.generate_batch(train_stream_seed(seed, u),
                                                BATCH_PER_FAMILY))
-                p, opt, loss, acc, gn, wn = train_step(rule, tx, p, opt, eps,
+                p, opt, loss, acc, gn, wn, an = train_step(rule, tx, p, opt, eps,
                                                        const)
                 if u % 50 == 0:
                     curve.append(dict(update=u, loss=float(loss),
                                       train_acc=float(acc),
                                       grad_norm=float(gn),
-                                      w_norm=float(wn)))
+                                      w_norm=float(wn), aux_norm=float(an)))
             wall = time.time() - t_run
+            # R5: the sampled curve is not the whole run. Final parameters,
+            # the last step's scalars and every reported validation metric are
+            # checked too, so a NaN in an unsampled tail cannot reach a
+            # nominal complete status.
+            bad = None
             if not all(onp.isfinite([c["loss"] for c in curve])):
-                status["failed"] = f"{rule}/{seed}: non-finite training loss"
+                bad = "non-finite sampled training loss"
+            elif not all(onp.isfinite([float(loss), float(acc), float(gn),
+                                       float(wn), float(an)])):
+                bad = "non-finite final training scalars"
+            elif not all_finite(p):
+                bad = "non-finite final parameters"
+            elif not all(metrics_finite(v) for v in val_hist):
+                bad = "non-finite validation metric"
+            if bad is not None:
+                status["failed"] = f"{rule}/{seed}: {bad}"
                 write(os.path.join(out, "status.json"), status)
+                print(f"[FAIL] {status['failed']}")
                 print(f"NESTED_STATUS=FAILED out={out}")
                 return 4
             save_tree(os.path.join(out, "params", f"{rule}_seed{seed}.msgpack"),
                       p)
+            save_tree(os.path.join(out, "params",
+                                   f"{rule}_seed{seed}_opt.msgpack"), opt)
             finals[(rule, seed)] = p
             rows.append(dict(rule=rule, display=D.DISPLAY[rule], seed=seed,
                              wall_s=wall, curve=curve, validation=val_hist,
                              config_hash=config_hash(rule, seed),
                              params=MD.parameter_counts(rule, p),
-                             carry=D.CARRY[rule]))
+                             carry=D.CARRY[rule], law=D.LAW_METADATA[rule],
+                             gates=gate_report(rule, p, val_np)))
             status["results"] = rows
             write(os.path.join(out, "results.json"), rows)
             write(os.path.join(out, "status.json"), status)
@@ -380,6 +487,13 @@ def main():
                                     held_np, const)
         status["results"] = rows
         status["heldout_opened"] = True
+        for r in rows:
+            if not metrics_finite(r["heldout"]):
+                status["failed"] = (f"{r['rule']}/{r['seed']}: non-finite "
+                                    f"held-out metric")
+                write(os.path.join(out, "status.json"), status)
+                print(f"NESTED_STATUS=FAILED out={out}")
+                return 4
     else:
         status["heldout_opened"] = False
         status["incomplete"].append(

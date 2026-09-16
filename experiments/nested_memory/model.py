@@ -129,20 +129,28 @@ def _momentum_gates(p, x):
     return jnp.exp(log_alpha), beta, jnp.exp(log_mu), eta
 
 
-def rollout(rule, p, ep, const, dtype=jnp.float32, carry0=None):
+def rollout(rule, p, ep, const, dtype=None, carry0=None):
     """One episode through the shell. Returns query logits and diagnostics.
 
     The query is read AFTER advancing its interval, so it sees the autonomous
     motion during that interval. Carries persist across the whole sequence and
     are reset only between episodes.
     """
+    # R2: the executed dtype is DERIVED from the parameters, not defaulted.
+    # An earlier revision built float32 carries and constants while the keys
+    # and values came from float64 parameters, so the scan's carry changed
+    # dtype between its input and its output and every float64 gradient
+    # fixture failed before it could compare a derivative.
+    if dtype is None:
+        dtype = p["key_raw"].dtype
     key_id, val_id, event = ep["key_id"], ep["val_id"], ep["event"]
     k_all, k_valid = D.safe_normalize(p["key_raw"])
-    keys = k_all[key_id]                                   # (L, d_k)
+    keys = k_all[key_id].astype(dtype)                     # (L, d_k)
     valid = k_valid[key_id]
     has_v = (val_id >= 0).astype(dtype)
-    vals = p["value_table"][jnp.maximum(val_id, 0)] * has_v[:, None]
-    mask = ((event == WRITE).astype(dtype)) * valid        # zero-key => no write
+    vals = (p["value_table"][jnp.maximum(val_id, 0)]
+            * has_v[:, None]).astype(dtype)
+    mask = ((event == WRITE).astype(dtype)) * valid.astype(dtype)  # zero key
     gx = gate_features(key_id, val_id, event).astype(dtype)
 
     if rule in ("gated_delta", "momentum_delta"):
@@ -155,10 +163,10 @@ def rollout(rule, p, ep, const, dtype=jnp.float32, carry0=None):
     else:
         gates = ()
 
-    F = jnp.asarray(const["F"], dtype=dtype) if "F" in const else None
-    a0 = jnp.asarray(const.get("a0", 0.0), dtype=dtype)
-    b0 = jnp.asarray(const.get("b0", 0.0), dtype=dtype)
-    beta_fixed = jnp.asarray(const.get("beta", 0.0), dtype=dtype)
+    F = jnp.asarray(const["F"], dtype=dtype)
+    a0 = jnp.asarray(const["a0"], dtype=dtype)
+    b0 = jnp.asarray(const["b0"], dtype=dtype)
+    beta_fixed = jnp.asarray(const["beta"], dtype=dtype)
 
     def step(carry, t):
         k, v, m = keys[t], vals[t], mask[t]
@@ -177,20 +185,57 @@ def rollout(rule, p, ep, const, dtype=jnp.float32, carry0=None):
         return carry, (logits, jnp.sqrt(jnp.sum(W ** 2)), aux)
 
     carry = D.init_carry(rule, D_V, D_K, dtype) if carry0 is None else carry0
+    for c in carry:
+        if c.dtype != dtype:                      # a scan carry must not drift
+            raise TypeError(f"carry dtype {c.dtype} != executed dtype {dtype}")
     carry, (logits, w_norm, aux_norm) = jax.lax.scan(
         step, carry, jnp.arange(key_id.shape[0]))
     return dict(logits=logits, w_norm=w_norm, aux_norm=aux_norm,
-                gates=gates, final_carry=carry)
+                gates=gates, final_carry=carry, dtype=dtype)
 
 
-def constants_for(rule):
+def constants_for(rule, dtype=jnp.float32):
+    """NUMERIC-ONLY execution constants, uniform across arms.
+
+    R1: this is what the compiled training and evaluation steps receive as a
+    dynamic argument, so it contains numbers and nothing else - no note, no
+    label, no name. Reporting text lives in `dynamics.LAW_METADATA` and never
+    reaches a traced call.
+
+    The structure is identical for every arm (unused slots are zero) so the
+    pytree cannot differ between arms for a structural reason, and every leaf
+    is explicitly typed.
+    """
+    F = onp.zeros((2, 2))
+    a0 = b0 = beta = 0.0
+    if rule in ("prospective_memory", "inertial_memory"):
+        c = (D.prospective_constants() if rule == "prospective_memory"
+             else D.inertial_constants())
+        F, a0, b0 = c["F"], c["a0"], c["b0"]
+    elif rule == "delta_matched_write":
+        beta = D.beta_match()
+    return dict(F=jnp.asarray(F, dtype=dtype),
+                a0=jnp.asarray(a0, dtype=dtype),
+                b0=jnp.asarray(b0, dtype=dtype),
+                beta=jnp.asarray(beta, dtype=dtype))
+
+
+def constants_metadata(rule):
+    """Reporting companion to `constants_for`. Never enters a compiled call."""
+    md = dict(rule=rule, display=D.DISPLAY[rule], law=D.LAW_METADATA[rule],
+              carry_real_numbers=D.CARRY[rule])
     if rule == "prospective_memory":
-        return D.prospective_constants()
-    if rule == "inertial_memory":
-        return D.inertial_constants()
-    if rule == "delta_matched_write":
-        return dict(beta=D.beta_match())
-    return {}
+        c = D.prospective_constants()
+        md |= dict(M=c["M"], gamma=c["gamma"], T=c["T"], h=c["h"],
+                   F=c["F"].tolist(), a0=c["a0"], b0=c["b0"],
+                   response=D.response_coefficients(c))
+    elif rule == "inertial_memory":
+        c = D.inertial_constants()
+        md |= dict(M=c["M"], gamma=c["gamma"], T=c["T"], h=c["h"],
+                   F=c["F"].tolist(), a0=c["a0"], b0=c["b0"])
+    elif rule == "delta_matched_write":
+        md |= dict(beta=D.beta_match())
+    return md
 
 
 def parameter_counts(rule, p):

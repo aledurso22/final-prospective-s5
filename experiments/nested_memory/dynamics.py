@@ -103,8 +103,29 @@ def inertial_constants(M=M_REF, gamma=GAMMA_REF, h=H_REF):
     a0 = float(onp.exp(-gamma * h / M))
     b0 = float(-onp.expm1(-gamma * h / M) / gamma)
     return dict(A1=A1, F=_expm2(h * A1), a0=a0, b0=b0,
-                M=float(M), gamma=float(gamma), T=0.0, h=float(h),
-                note="heavy-ball ablation; T = 0 is outside M <= gamma*T")
+                M=float(M), gamma=float(gamma), T=0.0, h=float(h))
+
+
+#: Reporting-only descriptions. R1: these must never travel into a compiled
+#: call. An earlier revision carried a `note` string inside the inertial arm's
+#: constants, which `study.train_step` receives as a DYNAMIC argument, and
+#: JAX validates that argument whether or not the model reads the field. Only
+#: the inertial arm had such a note, and on the cluster exactly that arm's
+#: optimizer check failed.
+LAW_METADATA = {
+    "prospective_memory": (
+        "exact held-input law M Wddot + gamma Wdot + R + T Rdot = 0, carried "
+        "as P = M Wdot + T R; gamma = T = 1, M = 3/4, fixed"),
+    "inertial_memory": (
+        "heavy-ball ablation M Wddot + gamma Wdot + R = 0 with P = M Wdot. "
+        "T = 0 puts it OUTSIDE M <= gamma*T, so it is not another admissible "
+        "point of the same circuit family"),
+    "delta_matched_write": (
+        "fixed beta = 1 - F11, the write-end response of the proposed law; no "
+        "auxiliary state, no decay"),
+    "gated_delta": "Gated DeltaNet rule, official gate family",
+    "momentum_delta": "Momentum DeltaNet rule, official gate family",
+}
 
 
 def beta_match(const=None):
