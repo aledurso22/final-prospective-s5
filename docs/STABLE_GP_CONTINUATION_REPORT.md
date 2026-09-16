@@ -1,7 +1,8 @@
 # Stable generalized prospective continuation — report
 
-**Status: dispatch 1 at `c94ab1f` FAILED at the focused checks (2 of 38), no
-training. Logs preserved. Awaiting diagnosis and authorization; no retry.**
+**Status: dispatch 2 at `9aa73e1` completed — `STABLE_GP_STATUS=PASS`, 857 s
+of 1200. Development screen FAILED against both Rawat controls. Dispatch 1
+(`c94ab1f`, failed checks) is preserved.**
 
 No check, restore, calibration or training for this study has run anywhere.
 Local work was limited to editing, `ast` syntax checks, and static audits of
@@ -210,9 +211,75 @@ for restore, the gate, compilation, preflight and nine runs, against roughly
 810 s of estimated training. This is recorded as a budget risk only; preflight
 would have measured it.
 
-## Results
+## Dispatch 2 — `9aa73e1`: operational PASS; development screen FAILED
 
-*(empty — no training has run)*
+| | |
+|---|---|
+| host | `pgi15-gpu3`, RTX 3090, SLURM 66044, jax 0.11.0 |
+| started | 2026-09-16T18:23:50Z |
+| status | `STABLE_GP_STATUS=PASS`, exit 0, **857 s of 1200** |
+| checks | **39 passed in 263.3 s** |
+| artifacts | `/Users/durso/s5-runs/stable-gp/20260916-202350/` |
+| logs | `/Users/durso/s5-runs/stable-gp/logs/20260916-202350/` |
+
+### Operational verification
+
+* **Focused checks: all 39 passed.** This includes the one-step Eq. (17)
+  identity and the corrected rollout, both at the unchanged 1e-12; the float32
+  probe with dtype assertions on all arms and the r-only fixture; and the r-only
+  derivative and zero `t` derivative at the start. pytest captures stdout of
+  passing tests, so their measured MAGNITUDES (the corrected rollout's worst
+  discrepancy and step, and the probe's float32 numbers) are **not in the log**.
+  Only "below tolerance" is established. **The cause of dispatch 1's rollout
+  failure therefore remains unresolved**; the corrected test only shows the
+  rollout now stays below 1e-12.
+* **Source.** `alpha_p_s5__lr1e-3__seed100`, best epoch 9. Reproduced exactly:
+  5494/5783 correct saved and restored, CE difference 0.0.
+* **Identity gate: PASS for both pairs.**
+  * B vs A: logits 0, gradients within the mixed tolerance, routing 0,
+    independent first update 0, argmax agreement 1.0.
+  * C vs B: logits 2.48e-6, parameter and input gradients within the mixed
+    tolerance (worst leaf `encoder/encoder/kernel`), routing 0, argmax 1.0.
+  * The **independently computed** first update differed by **1.05 lr** at its
+    worst entry. That quantity is reported, not gated. It is consistent with
+    Adam's `g/(|g|+eps)` normalization amplifying float noise in near-zero
+    gradient entries, but that reading is not verified here.
+* **Epoch 0:** all three arms 0.9500.
+* **Preflight:** projected 454.1 s of remaining work; no failures and no
+  retrace. Per-arm steps were A 3.91 ms, B 3.81 ms, C 8.79 ms; epochs took
+  3.2 s, 3.2 s and 7.6 s.
+
+### Performance at the epoch-10 endpoint
+
+| Stream | A acc / CE | B acc / CE | C acc / CE |
+|---|---|---|---|
+| 202 | 0.9575 / 0.2578 | 0.9582 / 0.2576 | 0.9576 / 0.2559 |
+| 203 | 0.9550 / 0.2616 | 0.9557 / 0.2614 | 0.9573 / 0.2597 |
+
+Stream 201's per-arm endpoints were cut off in the console; they are in
+`results.json`.
+
+| Comparison | Mean accuracy | Per stream 201 / 202 / 203 | Mean CE | Verdict |
+|---|---|---|---|---|
+| **C vs A (Rawat)** | **+0.121 pp** | +0.12 / +0.02 / +0.22 | **-0.00181** | **FAILED**: below 0.3 pp |
+| **C vs B (learned input horizon)** | **+0.075 pp** | +0.12 / **-0.05** / +0.16 | **-0.00155** | **FAILED**: below 0.3 pp, and negative in stream 202 |
+| B vs A (descriptive) | +0.046 pp | +0.00 / +0.07 / +0.07 | — | not a criterion |
+
+**DEVELOPMENT SUCCESS: False.** C does reach lower mean unsmoothed CE than both
+controls, and its accuracy difference against A is positive in all three
+streams. The accuracy gains, 0.12 pp and 0.075 pp, are below the 0.3 pp
+threshold against both controls, and against B one stream is negative. The
+criterion is reported as it stands and not loosened.
+
+Scale: 0.1 pp on 5783 validation examples is about 6 examples.
+
+### Pending
+
+Learned `T_in`, `rho` and `T`; passive occupancy and stability margins;
+projection telemetry; response changes; stream-201 endpoints. All are in the
+saved run and will be read with
+`python -m experiments.gp.stable_gp_summary <run_dir>`, a read-only tool added
+after the run that does not affect it.
 
 ### Checks
 ### Source checkpoint and reproduction
