@@ -1,7 +1,8 @@
 # Generalized prospective memory around the delta boundary — proposed frozen protocol
 
-**Status: prepared for static review. No local numerical run. No cluster
-launch is authorized.** Completed memory and S5 studies, their verdicts and
+**Status: prepared for static review, amended before execution by the review
+of `535fb02` (§12, which supersedes the corresponding passages). No local
+numerical run. No cluster launch is authorized.** Completed memory and S5 studies, their verdicts and
 their artifacts are unchanged.
 
 | | |
@@ -166,10 +167,11 @@ arm and **not** the minimum-change projection.
 * In the key direction, the error obeys
   `μ² − [2 − (1 + h/T)ηw]μ + (1 − ηw) = 0`. It is stable iff `0 < ηw < 2`
   and `ηw(2 + h/T) < 4`.
-* In any direction with zero residual, including every idle interval, the
-  increment is **preserved**: `W_{k+1} − W_k = W_k − W_{k−1}`. A write
-  therefore keeps drifting through idle intervals, linearly in the number of
-  intervals.
+* The increment obeys
+  `ΔW_{k+1} = ΔW_k − η(1+h/T)R_k + ηR_{k−1}`. It is preserved only after
+  **two consecutive zero-residual inputs**; the first idle interval after a
+  write still changes it. After that a write keeps drifting, linearly in the
+  number of further idle intervals (§12 D1).
 
 This reference is **not a stable memory in unforced directions**, and it is
 outside the certified `γ > 0` sector. **This is recorded as an unresolved
@@ -209,7 +211,12 @@ memory studies:
 The task distribution has informed this proposal: **this is a development
 study.**
 
-## 8. Verdicts — three, separate
+## 8. Verdicts — SUPERSEDED IN PART by §12 D1
+
+The verdicts in force are: literature, and matched delta alongside it; TSS
+Eq. (17) applied directly to the fast weight (applicability-limited); and the
+heavy-ball family comparison (not causal attribution). The table below is the
+original proposal, kept as the record.
 
 Every comparison uses paired final seeds, and all three pairs must be present.
 
@@ -298,3 +305,103 @@ checks are kept in the log.
    saved-tree map is prepared but unused.
 4. **Check-suite timing** is unmeasured; the 600 s fit is decided by
    preflight, not assumed.
+
+
+## 12. Pre-execution amendments — review of `535fb02`
+
+Source: `META_DELTA_REVIEW_535fb02_2026_09_16.md`. Recorded **before** any
+execution. The six arms, equations, initial coefficients, data, schedule,
+tolerances and 600 s cap are unchanged. The completed memory and S5 studies
+and their conclusions are unchanged.
+
+### Accepted by the review
+
+* The equation.
+* The `(η, τ, ρ)` parameterization, in which `raw_r` varies `T` at fixed
+  `γ` and `M`.
+* The exact delta start.
+* The wider-sector certificate and the direction of its conservative
+  inflation.
+* The "computational application, not the passive circuit" labelling.
+* Cold starts, which answer a fresh-training question, not a continuation
+  question.
+
+### R1 — verification of the actual start and of the float32 wider region
+
+* **Fixture names.** The nonzero-gate fixtures are kept and renamed as stress
+  fixtures.
+* **Actual start.** New checks use the **unchanged initialized tree** (zero
+  gate, `ρ = 1`, `τ = 1`): nesting in value and shared gradients (float64),
+  the `raw_r` tangent against finite differences, and a vanishing `raw_tau`
+  tangent. This runs in float64 and in the float32 probe.
+* **Resolvability.** If a derivative falls below the declared resolvability
+  threshold, that limitation of finite differences in that dtype is
+  **reported**, not treated as a failure or a dead parameter.
+* **Wider region in float32.** The float32 probe executes a sequence with key
+  changes, writes and idle intervals, at `ρ` safely above 1 and at the
+  projection margin. It is compared with an independent float64 dense
+  augmented-ODE reference for the same rounded inputs, at the existing float32
+  tolerance `2e-5`.
+* **Wider-region derivative.** A `raw_r` directional derivative is checked at
+  an interior wider-region point, with `r ± h` strictly inside the bound, so
+  no finite difference crosses the projection.
+* **Dtypes.** Assertions cover coefficients, generator, `F`, `a0`, carries and
+  outputs.
+* **Training process.** `study.main` refuses to run unless x64 is disabled
+  and the default dtype is float32.
+
+### R2 — executed arithmetic and measured preflight scalars
+
+* **Report fields.** `domain_report` keeps executed values as `executed_*` and
+  the float64 certificate reconstruction as `certificate_f64_*`.
+* **Early failure.** It fails, without raising, when any executed scalar is
+  zero, negative or non-finite, before any division.
+* **Generator.** It forms the **production** `two_sided_generator` in the
+  executed dtype at the gate endpoints `w = 0` and `w = L`, and checks its
+  entries and the executed idle coefficient `a0` for finiteness. The
+  certificate is reported separately.
+* **Regression.** The scalar-finite, generator-non-finite counterexample
+  (`η ≈ 1e20`, `τ = 1`, `ρ ≈ 5e-19`, `w = 2`) is rejected.
+* **Preflight.** Acceptance includes the **measured** loss, accuracy,
+  gradient norm, update norm and state norms, and records any failed field.
+  Any non-finite measured scalar makes preflight FAILED (4) before training.
+* No coefficient is clamped and the law is unchanged.
+
+### D1 — comparator scope (coordinator decisions)
+
+**TSS Eq. (17)** is kept, labelled **"TSS Eq. (17) applied directly to the
+fast weight; applicability-limited"**.
+* With `f(W) = W − ηR(W)` for one association,
+  `(I − Df)[X] = ηw(Xk)kᵀ`. This is singular off the current key and zero on
+  idle intervals, so TSS Eq. (15)'s inverse does not exist for this
+  application.
+* The comparison is a well-defined discrete experiment, **not** a reproduction
+  of TSS's teaching-synchronization experiments. No unrestricted "ordinary
+  prospectivity" verdict is printed.
+* The idle statement is corrected to require two consecutive zero-residual
+  inputs, and a check covers the first idle increment.
+* No damping, reset or substitute comparator is added.
+
+**Heavy ball** is kept as a **separately trained family comparison**, with
+`γ` and `M` matched at initialization only. The verdict is renamed
+`heavy_ball_family_comparison_passed` and is not causal attribution to
+`T Ṙ`. The fixed-quadratic residual-velocity identity remains a separate
+analytical mechanism statement.
+
+**Matched delta** becomes an **explicit development verdict**,
+`matched_delta_departure_passed`, with the same rule: +1 point mean primary,
+positive in all three paired seeds, and retention and recall each within −1
+point. It is reported **alongside** the literature verdict, so a literature
+win cannot hide a loss to the simpler delta rule with the same source gate.
+All per-seed differences are kept whether or not a verdict passes.
+
+This supersedes §8's descriptive treatment of delta and its "attribution"
+wording.
+
+### Reporting corrections
+
+* **Held-out data.** Held-out episodes are now **generated and hashed only at
+  final evaluation**, after all final runs. The stream seed is unchanged.
+* **Literature gates.** Gated and Momentum DeltaNet coefficient reports now
+  save gate distributions on validation inputs, using the completed study's
+  gate reporter.

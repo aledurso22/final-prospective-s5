@@ -6,6 +6,19 @@ Declared smoke-check constants (not accuracy certificates):
   h = 1e-2 and 3e-3, 2e-2 relative at EACH, resolvability
   |jvp| >= 100 eps32 max(|f|, 1) / h_min; raw_tau gradient at rho = 1
   <= 1e-3 max|dL/draw_r|; projected float32 points certified in float64.
+
+The first block uses a nonzero-gate STRESS fixture. Review R1 (535fb02) adds:
+  * the ACTUAL initialized tree (zero gate, rho = 1, tau = 1): raw_r tangent
+    and vanishing raw_tau tangent; if the raw_r derivative is below the float32
+    resolvability threshold that is REPORTED as a limitation of float32
+    finite differences, not as a failure or a dead parameter;
+  * an executed float32 WIDER-REGION sequence (key changes, write, idle) at a
+    point safely above rho = 1 and one at the projection margin, against an
+    independent float64 dense-ODE reference for the same rounded inputs, at
+    the existing float32 trajectory tolerance TRAJ32 = 2e-5;
+  * a raw_r directional derivative at an INTERIOR wider-region point with
+    h such that r +- h stays strictly inside the projection bound;
+  * dtype assertions on coefficients, generator, carries and outputs.
 """
 
 import math
@@ -30,7 +43,9 @@ assert not jax.config.read("jax_enable_x64"), "an import enabled x64"
 fails = []
 eps32 = float(onp.finfo(onp.float32).eps)
 rs = onp.random.RandomState(7)
+TRAJ32, FD32, REL32 = 2e-5, (1e-2, 3e-3), 2e-2
 slot = CAL.configurations()["slots"]["adaptive_delta/A"]
+# ---- STRESS fixture: nonzero random gate (not the trained start)
 pd = MM.init_params("adaptive_delta", 11, init_coeffs=slot)
 pd = dict(pd, gate_u=jnp.asarray(0.5 * rs.randn(31), jnp.float32),
           gate_b=jnp.asarray(0.5 * rs.randn(7), jnp.float32))
@@ -114,6 +129,146 @@ for dx in (1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 3e-7, 1.5e-7):
         if not rep["passed"]:
             fails.append(f"edge x-1={dx} jitter {jitter}: {rep}")
 print(f"  projection edge x -> 1+: {n_edge} points checked")
+
+
+# ---- ACTUAL START (review R1): unchanged initialized tree ----------------
+slots = CAL.configurations()["slots"]
+pc0 = MM.init_params("gp_two_sided", 300, init_coeffs=slots["gp_two_sided/A"])
+pd0 = MM.init_params("adaptive_delta", 300, init_coeffs=slots["adaptive_delta/A"])
+assert float(onp.max(onp.abs(onp.asarray(pc0["gate_u"])))) == 0.0
+f0 = loss("gp_two_sided")
+fr0 = lambda r: f0(dict(pc0, raw_r=jnp.asarray([r], jnp.float32)))  # noqa: E731
+jvp0 = float(jax.jvp(fr0, (jnp.float32(0.0),), (jnp.float32(1.0),))[1])
+fv0 = float(fr0(jnp.float32(0.0)))
+thr0 = 100 * eps32 * max(abs(fv0), 1.0) / min(FD32)
+g0 = jax.grad(f0)(pc0)
+print(f"  ACTUAL START raw_r jvp {jvp0:.5e} (float32 resolvability {thr0:.2e}"
+      f": {abs(jvp0) >= thr0})  raw_tau grad {float(g0['raw_tau'][0]):.3e}")
+if not onp.isfinite(jvp0):
+    fails.append("actual start raw_r jvp non-finite")
+if abs(jvp0) >= thr0:
+    for h in FD32:
+        fd = (float(fr0(jnp.float32(h))) - float(fr0(jnp.float32(-h)))) / (2 * h)
+        e = abs(jvp0 - fd) / max(abs(fd), 1e-30)
+        print(f"  ACTUAL START fd(h={h}) {fd:.5e} rel {e:.2e}")
+        if not e < REL32:
+            fails.append(f"actual start raw_r tangent h={h}: rel {e:.2e}")
+else:
+    print("  LIMITATION: actual-start raw_r derivative is below the float32 "
+          "finite-difference resolvability threshold; the float64 check is "
+          "the evidence for this tangent. Not a dead parameter.")
+if not abs(float(g0["raw_tau"][0])) <= 1e-3 * max(abs(jvp0), abs(
+        float(g0["raw_r"][0])), 1e-30) + 1e3 * eps32:
+    fails.append("actual start raw_tau tangent not ~0")
+
+# ---- WIDER REGION, executed float32 vs float64 dense reference ----------
+from experiments.adaptive_memory import dynamics as AD            # noqa: E402
+from scipy.linalg import expm as sp_expm                          # noqa: E402
+
+
+def dense_ref(W, Z, k, v, w, eta, tau, rho):
+    """Independent float64 reference: the full (W, Z) matrix ODE,
+    Wdot = -nu w (W K - v k^T) - Z/tau, Zdot = -nu (1-rho) w (W K - v k^T) - Z/tau,
+    exponentiated as an augmented affine system."""
+    dv, dk = W.shape
+    n = dv * dk
+    nu = eta / rho
+    K = onp.outer(k, k)
+    WK = onp.kron(K.T, onp.eye(dv))
+    vk = onp.reshape(onp.outer(v, k), -1, order="F")
+    A = onp.zeros((2 * n + 1, 2 * n + 1))
+    A[:n, :n] = -nu * w * WK
+    A[:n, n:2 * n] = -onp.eye(n) / tau
+    A[:n, 2 * n] = nu * w * vk
+    A[n:2 * n, :n] = -nu * (1 - rho) * w * WK
+    A[n:2 * n, n:2 * n] = -onp.eye(n) / tau
+    A[n:2 * n, 2 * n] = nu * (1 - rho) * w * vk
+    z = onp.concatenate([onp.reshape(W, -1, order="F"),
+                         onp.reshape(Z, -1, order="F"), [1.0]])
+    out = sp_expm(A) @ z
+    return (onp.reshape(out[:n], (dv, dk), order="F"),
+            onp.reshape(out[n:2 * n], (dv, dk), order="F"))
+
+
+eta_w, tau_w = jnp.float32(0.9), jnp.float32(1.0)
+b_w = float(MD.log_rho_upper(eta_w[None], tau_w[None], onp.float32)[0])
+points = dict(safely_above=onp.float32(0.3 * b_w),
+              at_projection_margin=onp.float32(b_w))
+rsw = onp.random.RandomState(99)
+seq = []
+for s_ in range(12):
+    kk = rsw.randn(4); kk /= onp.linalg.norm(kk)
+    w = 0.0 if s_ in (3, 4, 8, 9, 10) else float(rsw.uniform(0.2, 2.0))
+    seq.append((kk.astype(onp.float32), rsw.randn(3).astype(onp.float32),
+                onp.float32(w)))
+for name, r in points.items():
+    pr = dict(raw_eta=jnp.log(eta_w)[None], raw_tau=jnp.log(tau_w)[None],
+              raw_r=jnp.asarray([r], jnp.float32))
+    pr, _ = MD.project_two_sided(pr)
+    c = MD.two_sided_response(pr)
+    for k_, v_ in c.items():
+        if onp.asarray(v_).dtype != onp.float32:
+            fails.append(f"coefficient {k_} dtype {onp.asarray(v_).dtype}")
+    eta_e, tau_e, rho_e = c["eta"][0], c["tau"][0], c["rho"][0]
+    if not float(rho_e) > 1.0:
+        fails.append(f"{name}: rho {float(rho_e)} not above 1")
+    W32 = jnp.zeros((3, 4), jnp.float32); Z32 = jnp.zeros((3, 4), jnp.float32)
+    W64 = onp.zeros((3, 4)); Z64 = onp.zeros((3, 4))
+    worst = 0.0
+    for kk, vv, w in seq:
+        G = MD.two_sided_generator(eta_e, tau_e, rho_e, jnp.asarray(w))
+        F = AD.expm2(G)
+        a0 = jnp.exp(-AD.H / tau_e)
+        for arr, lab in ((G, "generator"), (F, "F"), (a0, "a0")):
+            if onp.asarray(arr).dtype != onp.float32:
+                fails.append(f"{name}: {lab} dtype {onp.asarray(arr).dtype}")
+        W32, Z32 = AD.two_state_step(W32, Z32, jnp.asarray(kk), jnp.asarray(vv),
+                                     F, a0)
+        if W32.dtype != onp.float32 or Z32.dtype != onp.float32:
+            fails.append(f"{name}: carry dtype {W32.dtype}/{Z32.dtype}")
+        W64, Z64 = dense_ref(W64, Z64, kk.astype(onp.float64),
+                             vv.astype(onp.float64), float(w),
+                             float(eta_e), float(tau_e), float(rho_e))
+        worst = max(worst, float(onp.max(onp.abs(onp.asarray(W32, onp.float64)
+                                                  - W64)))
+                    / max(1.0, float(onp.max(onp.abs(W64)))))
+    print(f"  WIDER REGION {name}: rho {float(rho_e):.6f} float32 vs float64 "
+          f"dense worst rel {worst:.2e} (tol {TRAJ32:.0e})")
+    if not worst < TRAJ32:
+        fails.append(f"wider region {name}: {worst:.2e}")
+
+# interior wider-region derivative of the smooth forward law, via the model
+r_int = 0.3 * b_w
+h_max = max(FD32)
+if not r_int + h_max < b_w:
+    fails.append("interior point too close to the bound for the declared h")
+pci = MM.delta_to_two_sided(pd0)
+pci = dict(pci, raw_eta=jnp.log(eta_w)[None], raw_tau=jnp.log(tau_w)[None])
+fi = loss("gp_two_sided")
+fri = lambda r: fi(dict(pci, raw_r=jnp.asarray([r], jnp.float32)))  # noqa: E731
+out_i = MM.rollout("gp_two_sided", dict(pci, raw_r=jnp.asarray([r_int],
+                                                               jnp.float32)), ep)
+if out_i["logits"].dtype != onp.float32:
+    fails.append(f"output dtype {out_i['logits'].dtype}")
+for carry in out_i["final_carry"]:
+    if carry.dtype != onp.float32:
+        fails.append(f"final carry dtype {carry.dtype}")
+jvp_i = float(jax.jvp(fri, (jnp.float32(r_int),), (jnp.float32(1.0),))[1])
+fv_i = float(fri(jnp.float32(r_int)))
+thr_i = 100 * eps32 * max(abs(fv_i), 1.0) / min(FD32)
+print(f"  WIDER INTERIOR raw_r={r_int:.4f} jvp {jvp_i:.5e} resolvable "
+      f"{abs(jvp_i) >= thr_i}")
+if abs(jvp_i) >= thr_i:
+    for h in FD32:
+        fd = (float(fri(jnp.float32(r_int + h)))
+              - float(fri(jnp.float32(r_int - h)))) / (2 * h)
+        e = abs(jvp_i - fd) / max(abs(fd), 1e-30)
+        print(f"  WIDER INTERIOR fd(h={h}) {fd:.5e} rel {e:.2e}")
+        if not e < REL32:
+            fails.append(f"wider interior raw_r tangent h={h}: rel {e:.2e}")
+else:
+    print("  LIMITATION: wider-interior raw_r derivative below float32 "
+          "resolvability; reported, not a failure")
 
 if fails:
     print("FAILURES:")

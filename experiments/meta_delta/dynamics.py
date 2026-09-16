@@ -75,9 +75,10 @@ ORDINARY_PROSPECTIVE = ("tss_eq17",)
 DISPLAY = {
     "gp_two_sided": "Generalized prospective memory, both sides of M = gamma T",
     "adaptive_delta": "Adaptive first-order delta memory (existing control)",
-    "heavy_ball_same_mass": "Attribution control: same gamma and M, T Rdot "
-                            "removed (T = 0)",
-    "tss_eq17": "Ordinary prospective reference: TSS Eq. (17), f = W - eta R",
+    "heavy_ball_same_mass": ("Heavy ball, T = 0: separately trained family, "
+                             "gamma and M matched at initialization only"),
+    "tss_eq17": ("TSS Eq. (17) applied directly to the fast weight; "
+                 "applicability-limited"),
     "gated_delta": "Gated DeltaNet rule",
     "momentum_delta": "Momentum DeltaNet rule",
 }
@@ -153,29 +154,68 @@ def project_two_sided(p):
 
 
 def domain_report(p):
-    """Executed-dtype coefficients first; the sector condition in float64."""
-    c = {k: onp.asarray(v).ravel()[0] for k, v in two_sided_response(p).items()}
-    finite = all(onp.isfinite(v) for v in c.values())
-    positive = all(c[k] > 0 for k in ("eta", "tau", "rho", "nu", "gamma", "M",
-                                      "T"))
-    eta, tau, rho = (float(c[k]) for k in ("eta", "tau", "rho"))
-    gamma, M, T = 1.0 / eta, tau / eta, tau / rho
-    d = M - gamma * T
-    if rho < 1.0:
+    """Validate EXECUTED arithmetic first, then the analytical certificate.
+
+    Review R2 (535fb02):
+      * executed-dtype response scalars are kept under `executed_*` names; the
+        float64 reconstruction used ONLY for the certificate is kept under
+        `certificate_f64_*` names, never overwriting executed values;
+      * if any executed scalar is zero or non-finite the report FAILS before
+        any division, instead of raising while diagnosing it;
+      * the PRODUCTION `two_sided_generator` is formed in the executed dtype at
+        the permitted gate endpoints w = 0 and w = L, and its entries must be
+        finite, as must the executed idle coefficient a0 = exp(-h/tau);
+      * the side of M = gamma T and the sufficient switching certificate are
+        then evaluated in float64. Arithmetic checks and certificate are
+        reported separately. Nothing is clamped.
+    """
+    c = two_sided_response(p)
+    dtype = p["raw_r"].dtype
+    executed = {k: float(onp.asarray(v).ravel()[0]) for k, v in c.items()}
+    names = ("eta", "tau", "rho", "nu", "gamma", "M", "T")
+    finite = all(onp.isfinite(executed[k]) for k in names + ("d",))
+    positive = all(executed[k] > 0 for k in names)
+    rep = dict({f"executed_{k}": v for k, v in executed.items()},
+               executed_dtype=str(dtype), scalars_finite=bool(finite),
+               scalars_positive=bool(positive),
+               note=("rho > 1 is NOT the passive two-compartment circuit; "
+                     "the certificate there is the sufficient switching "
+                     "bound d L < gamma^2"))
+    if not (finite and positive):
+        return dict(rep, passed=False, failed="executed response scalar "
+                    "zero, negative or non-finite", generator_finite=None,
+                    certified=None, side=None)
+    eta, tau, rho = c["eta"][0], c["tau"][0], c["rho"][0]
+    gen_ok = True
+    for w in (0.0, GATE_BOUND_L):
+        G = onp.asarray(two_sided_generator(eta, tau, rho,
+                                            jnp.asarray(w, dtype=dtype)))
+        if G.dtype != onp.dtype(dtype) or not onp.all(onp.isfinite(G)):
+            gen_ok = False
+    a0 = onp.asarray(jnp.exp(-H / tau))
+    a0_ok = bool(onp.isfinite(a0) and 0.0 < float(a0) <= 1.0
+                 and a0.dtype == onp.dtype(dtype))
+    rep.update(generator_finite=bool(gen_ok), idle_coefficient_a0=float(a0),
+               idle_coefficient_finite=a0_ok)
+    if not (gen_ok and a0_ok):
+        return dict(rep, passed=False, certified=None, side=None,
+                    failed="production generator or idle coefficient "
+                           "non-finite in the executed dtype")
+    e64 = {k: float(onp.float64(executed[k])) for k in ("eta", "tau", "rho")}
+    g64, M64 = 1.0 / e64["eta"], e64["tau"] / e64["eta"]
+    T64 = e64["tau"] / e64["rho"]
+    d64 = M64 - g64 * T64
+    if e64["rho"] < 1.0:
         side, cert = "passive_sector_M_lt_gammaT", True
-    elif rho == 1.0:
+    elif e64["rho"] == 1.0:
         side, cert = "exact_delta_boundary", True
     else:
         side = "wider_computational_sector_M_gt_gammaT"
-        cert = bool(d * GATE_BOUND_L < gamma * gamma)
-    ok = bool(finite and positive and cert)
-    return dict(side=side, certified=cert, finite=bool(finite),
-                positive=bool(positive), passed=ok,
-                eta=eta, tau=tau, rho=rho, gamma=gamma, M=M, T=T, d=d,
-                dL_over_gamma2=(d * GATE_BOUND_L / (gamma * gamma)),
-                note=("rho > 1 is NOT the passive two-compartment circuit; "
-                      "the certificate there is the sufficient switching "
-                      "bound d L < gamma^2"))
+        cert = bool(d64 * GATE_BOUND_L < g64 * g64)
+    return dict(rep, side=side, certified=cert, passed=bool(cert),
+                certificate_f64_gamma=g64, certificate_f64_M=M64,
+                certificate_f64_T=T64, certificate_f64_d=d64,
+                certificate_f64_dL_over_gamma2=d64 * GATE_BOUND_L / (g64 * g64))
 
 
 def storage_V(X, Y, gamma, M, T):
@@ -198,10 +238,21 @@ def eq17_step(W, f_prev, k, v, w, eta, T, h=H):
     before the episode). This is TSS's finite-step rule, NOT the earlier
     finite-adaptation ZOH arm and NOT the minimum-change projection.
 
-    Applicability (protocol s4): in any direction with zero residual the
-    increment is PRESERVED, d_k = d_{k-1}, so a write keeps drifting through
-    idle intervals; in the key direction its roots are stable iff
-    0 < eta w < 2 and eta w (2 + h/T) < 4.
+    Applicability (protocol s6; review D1). With f(W) = W - eta R(W) for a
+    single association, (I - Df)[X] = eta w (X k) k^T: singular in every
+    direction orthogonal to the current key and ZERO on idle intervals, so
+    the inverse used in TSS Eq. (15) does not exist here. Applying Eq. (17) is
+    still a well-defined discrete experiment, labelled "TSS Eq. (17) applied
+    directly to the fast weight; applicability-limited". It is NOT a
+    reproduction of TSS's teaching-synchronization experiments. Its increment
+    obeys
+
+        Delta W_{k+1} = Delta W_k - eta (1 + h/T) R_k + eta R_{k-1},
+
+    so the increment is preserved only after TWO consecutive zero-residual
+    inputs; the first idle interval after a write still changes it. In the
+    key direction its roots are stable iff 0 < eta w < 2 and
+    eta w (2 + h/T) < 4.
     """
     R = w * jnp.outer(W @ k - v, k)
     f = W - eta * R

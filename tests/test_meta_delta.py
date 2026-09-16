@@ -66,9 +66,10 @@ def _rel(a, b):
     return float(onp.linalg.norm(a - b)) / (n if n > 0 else 1.0)
 
 
-def _perturbed_start(seed, rs):
-    """A nondegenerate start: calibrated eta, a NONZERO gate, and a delta tree
-    plus its candidate twin. Returns (p_delta, p_cand)."""
+def _nonzero_gate_fixture(seed, rs):
+    """A STRESS fixture, not the trained start: calibrated eta with a NONZERO
+    random gate, a delta tree and its candidate twin. Returns (p_delta,
+    p_cand)."""
     slot = CAL.configurations()["slots"]["adaptive_delta/A"]
     pd = MM.init_params("adaptive_delta", seed, init_coeffs=slot, dtype=F64)
     pd = dict(pd, gate_u=jnp.asarray(0.5 * rs.randn(31)),
@@ -83,7 +84,7 @@ def test_rho_one_is_the_first_order_delta_model_forward_and_gradient(seed):
     nonzero gate: outputs and shared gradients (common, gate, eta) agree, and
     the unidentifiable raw_tau has zero task gradient."""
     rs = onp.random.RandomState(seed)
-    pd, pc = _perturbed_start(seed, rs)
+    pd, pc = _nonzero_gate_fixture(seed, rs)
     for i in range(2):
         ep = _ep(9000 + seed, i)
         yd = MM.rollout("adaptive_delta", pd, ep)["logits"]
@@ -103,14 +104,14 @@ def test_rho_one_is_the_first_order_delta_model_forward_and_gradient(seed):
 
 def test_rho_one_keeps_Z_exactly_zero_on_every_token():
     rs = onp.random.RandomState(3)
-    _, pc = _perturbed_start(3, rs)
+    _, pc = _nonzero_gate_fixture(3, rs)
     out = MM.rollout("gp_two_sided", pc, _ep(9100))
     assert float(onp.max(onp.asarray(out["aux_norm"]))) <= EXACT64
 
 
 def test_documented_map_from_a_saved_delta_tree():
     rs = onp.random.RandomState(4)
-    pd, _ = _perturbed_start(4, rs)
+    pd, _ = _nonzero_gate_fixture(4, rs)
     pd = dict(pd, raw_eta=jnp.asarray([0.37]))            # a "trained" eta
     pc = MM.delta_to_two_sided(pd)
     for k in pd:
@@ -125,9 +126,9 @@ def test_documented_map_from_a_saved_delta_tree():
 
 
 # ====================================== 2. the new direction at the start ===
-def test_raw_r_tangent_at_the_actual_start_matches_central_differences():
+def test_raw_r_tangent_at_a_nonzero_gate_fixture_matches_central_differences():
     rs = onp.random.RandomState(5)
-    _, pc = _perturbed_start(5, rs)
+    _, pc = _nonzero_gate_fixture(5, rs)
     f = _loss("gp_two_sided", _ep(9300))
 
     def fr(r):
@@ -141,6 +142,55 @@ def test_raw_r_tangent_at_the_actual_start_matches_central_differences():
     for r in (-1e-3, 1e-3):
         g = float(jax.grad(fr)(r))
         assert onp.isfinite(g) and g != 0.0, (r, g)
+
+
+def _actual_start(seed):
+    """The UNCHANGED initialized trees that training uses: zero gate
+    coordinates, calibrated eta, rho = 1, tau = 1 (review R1)."""
+    slots = CAL.configurations()["slots"]
+    pd = MM.init_params("adaptive_delta", seed,
+                        init_coeffs=slots["adaptive_delta/A"], dtype=F64)
+    pc = MM.init_params("gp_two_sided", seed,
+                        init_coeffs=slots["gp_two_sided/A"], dtype=F64)
+    return pd, pc
+
+
+def test_the_actual_initialized_tree_is_delta_and_its_tangents():
+    """At the actual start: gate zero, rho = 1, tau = 1. Nesting in value and
+    shared gradients; the raw_r tangent against central differences; the
+    raw_tau tangent vanishes. If |jvp| is below the declared float64
+    resolvability threshold the limitation is REPORTED (printed and asserted
+    as such), not treated as a dead parameter and not replaced by a fixture."""
+    pd, pc = _actual_start(300)
+    assert float(onp.max(onp.abs(onp.asarray(pc["gate_u"])))) == 0.0
+    assert float(pc["raw_r"][0]) == 0.0 and float(pc["raw_tau"][0]) == 0.0
+    ep = _ep(9150)
+    assert _rel(MM.rollout("gp_two_sided", pc, ep)["logits"],
+                MM.rollout("adaptive_delta", pd, ep)["logits"]) < NEST64
+    f = _loss("gp_two_sided", ep)
+    gd = jax.grad(_loss("adaptive_delta", ep))(pd)
+    gc = jax.grad(f)(pc)
+    G = math.sqrt(sum(float(onp.sum(onp.asarray(v) ** 2)) for v in gd.values()))
+    for k in gd:
+        d = float(onp.linalg.norm(onp.asarray(gc[k]) - onp.asarray(gd[k])))
+        n = float(onp.linalg.norm(onp.asarray(gd[k])))
+        assert d <= max(GRAD64 * n, 1e3 * onp.finfo(F64).eps * G), (k, d, n)
+    assert abs(float(gc["raw_tau"][0])) <= ZEROT64 * G
+
+    def fr(r):
+        return f(dict(pc, raw_r=jnp.asarray([r])))
+    jvp = float(jax.jvp(fr, (0.0,), (1.0,))[1])
+    fval = float(fr(0.0))
+    threshold = 100 * onp.finfo(F64).eps * max(abs(fval), 1.0) / min(FD_STEPS)
+    resolvable = abs(jvp) >= threshold
+    print(f"  actual start: raw_r jvp {jvp:.6e} (float64 resolvability "
+          f"{threshold:.1e}: {resolvable}), raw_tau grad "
+          f"{float(gc['raw_tau'][0]):.3e}")
+    assert onp.isfinite(jvp)
+    if resolvable:
+        for h in FD_STEPS:
+            fd = (float(fr(h)) - float(fr(-h))) / (2 * h)
+            assert abs(jvp - fd) / abs(fd) < FD64, (h, jvp, fd)
 
 
 # =============================== 3. mechanism on each side of rho = 1 =======
@@ -287,6 +337,53 @@ def test_a_real_update_with_an_outward_proposal_stays_certified():
     assert onp.isfinite(float(g["raw_r"][0]))
 
 
+def test_scalar_finite_but_generator_nonfinite_is_rejected():
+    """Review R2 counterexample: eta ~ 1e20, tau = 1, rho ~ 5e-19 in float32.
+    Every response scalar is finite and positive and rho < 1 is the auto-
+    accepted side, yet nu = eta/rho ~ 2e38 and the production generator entry
+    -nu w overflows at the permitted gate endpoint w = L = 2."""
+    p = dict(raw_eta=jnp.asarray([math.log(1e20)], onp.float32),
+             raw_tau=jnp.asarray([0.0], onp.float32),
+             raw_r=jnp.asarray([math.log(5e-19)], onp.float32))
+    rep = MD.domain_report(p)
+    assert rep["scalars_finite"] and rep["scalars_positive"], rep
+    assert rep["generator_finite"] is False and rep["passed"] is False, rep
+    assert onp.isfinite(rep["executed_nu"])
+
+
+def test_zero_or_nonfinite_executed_scalars_fail_without_raising():
+    for raw_eta in (-1e6, float("nan"), 1e6):
+        p = dict(raw_eta=jnp.asarray([raw_eta], onp.float32),
+                 raw_tau=jnp.asarray([0.0], onp.float32),
+                 raw_r=jnp.asarray([0.0], onp.float32))
+        rep = MD.domain_report(p)
+        assert rep["passed"] is False and "failed" in rep, rep
+
+
+def test_report_keeps_executed_and_certificate_values_separate():
+    p = dict(raw_eta=jnp.asarray([-0.1], onp.float32),
+             raw_tau=jnp.asarray([0.0], onp.float32),
+             raw_r=jnp.asarray([0.3], onp.float32))
+    rep = MD.domain_report(p)
+    assert "executed_gamma" in rep and "certificate_f64_gamma" in rep
+    assert "gamma" not in rep and "M" not in rep
+
+
+def test_a_nonfinite_measured_preflight_scalar_refuses_training():
+    from experiments.meta_delta import study as ST
+    ok = dict(loss=0.5, accuracy=0.4, grad_norm=1.0, update_norm=0.1,
+              w_norm=2.0, aux_norm=0.3)
+    assert ST.measured_scalar_failures(ok) == []
+    for field in ST.SCALAR_NAMES:
+        bad = dict(ok, **{field: float("inf")})
+        failed = ST.measured_scalar_failures(bad)
+        assert failed == [field]
+        d = ST.decide_after_preflight(
+            10.0, False, [f"gp_two_sided: non-finite measured preflight "
+                          f"scalars {failed}"], 500.0)
+        assert d is not None and d[0] == 4 and field in d[2]
+
+
 # ======================= 6. comparators: Eq. (17), attribution, literature ==
 def test_eq17_step_matches_a_literal_reference_and_its_amplitudes():
     rs = onp.random.RandomState(51)
@@ -308,9 +405,23 @@ def test_eq17_step_matches_a_literal_reference_and_its_amplitudes():
     unit = onp.outer(v, k)
     assert onp.allclose(hist[1], (1 + h / T) * eta * unit, atol=EQ17_64)
     assert onp.allclose(hist[2], (1 + 2 * h / T) * eta * unit, atol=EQ17_64)
-    # applicability finding: the increment is preserved through idle intervals
+    # D1: Delta W_{k+1} = Delta W_k - eta (1+h/T) R_k + eta R_{k-1}. The FIRST
+    # idle interval after the write changes the increment (R_{k-1} != 0) ...
+    d1, d2 = hist[1] - hist[0], hist[2] - hist[1]
+    R0 = 1.0 * onp.outer(hist[0] @ k - v, k)
+    assert onp.allclose(d2, d1 + eta * R0, atol=EQ17_64)
+    assert not onp.allclose(d2, d1, atol=1e-6)
+    # ... and it is preserved only after TWO consecutive zero-residual inputs
     for a, b, c in zip(hist[1:], hist[2:], hist[3:]):
         assert onp.allclose(c - b, b - a, atol=EQ17_64)
+    # (I - Df)[X] = eta w (X k) k^T: singular off the key, zero when w = 0
+    X = rs.randn(3, 4)
+    u = rs.randn(4); u -= (u @ k) * k
+    for w in (0.0, 1.0):
+        op = eta * w * onp.outer(X @ k, k)
+        assert onp.allclose(op @ u, 0.0, atol=EQ17_64)
+        if w == 0.0:
+            assert onp.allclose(op, 0.0)
 
 
 def test_eq17_calibration_matches_beta_star():
@@ -392,9 +503,17 @@ def test_screens_are_separate_and_need_complete_pairs():
                 momentum_delta=0.58)
     sc = ST.screen(rows(base))
     assert sc["literature_screen_passed"] is True
-    assert sc["ordinary_prospectivity_screen_passed"] is True
-    assert sc["T_Rdot_attribution_passed"] is False
-    assert sc["versus_delta_descriptive"]["passed"] is True
+    assert sc["matched_delta_departure_passed"] is True
+    assert sc["eq17_direct_fast_weight_comparison_passed"] is True
+    assert "applicability-limited" in sc["eq17_label"]
+    assert sc["heavy_ball_family_comparison_passed"] is False
+    assert "not causal" in sc["heavy_ball_label"]
+    # a literature win cannot hide a loss to the matched delta rule
+    lose_delta = dict(base, adaptive_delta=0.62)
+    sc2 = ST.screen(rows(lose_delta))
+    assert sc2["literature_screen_passed"] is True
+    assert sc2["matched_delta_departure_passed"] is False
+    assert len(sc2["matched_delta"]["paired_primary_differences"]) == 3
     r = [x for x in rows(base) if not (x["rule"] == "momentum_delta"
                                        and x["seed"] == ST.FINAL_SEEDS[0])]
     assert ST.screen(r)["literature_screen_passed"] is False

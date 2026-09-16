@@ -189,8 +189,14 @@ def validate_coefficients(rule, p):
     return None
 
 
-def coefficient_report(rule, p):
+def coefficient_report(rule, p, eps_np=None):
     out = dict(rule=rule)
+    if rule in MD.LITERATURE:
+        # the completed study's literature gate reporter, on validation inputs
+        from experiments.nested_memory.study import gate_report
+        out["gates"] = (gate_report(rule, p, eps_np) if eps_np is not None
+                        else None)
+        return out
     if "gate_u" in p:
         a = onp.asarray(AG.source_weight_table(
             p, jnp.asarray(AM.H32, dtype=p["key_raw"].dtype),
@@ -303,7 +309,7 @@ def run_one(slot, seed, val_np, updates, out, deadline, reserve_s, status, tag):
                    - val_hist[0]["revision_ce"]),
                params=MM.parameter_counts(rule, p), carry=MD.CARRY[rule],
                initialization=slot,
-               coefficients_final=coefficient_report(rule, p),
+               coefficients_final=coefficient_report(rule, p, val_np),
                projection_telemetry=tel, invalid=bad)
     return rec, p
 
@@ -334,7 +340,8 @@ def preflight(cfg, val_np, status):
                                              BATCH_PER_FAMILY))
             o = train_step(rule, p2, opt2, batch, lr)
             p2, opt2 = o[0], o[1]
-            _ = [float(x) for x in o[2:8]] + [int(o[8]["n_projected"])]
+            measured = dict(zip(SCALAR_NAMES, (float(x) for x in o[2:8])))
+            measured["n_projected"] = int(o[8]["n_projected"])
         step_s = (time.time() - t1) / 5.0
         retraced = train_step._cache_size() != n0
         t2 = time.time()
@@ -343,9 +350,12 @@ def preflight(cfg, val_np, status):
         t3 = time.time()
         m = evaluate(rule, p2, val_np)
         eval_s = time.time() - t3
-        acc_bad = (None if (all_finite(p2) and all_finite(opt2)
-                            and metrics_finite(m))
-                   else "non-finite preflight state or metrics")
+        bad_scalars = measured_scalar_failures(measured)
+        acc_bad = (f"non-finite measured preflight scalars {bad_scalars}"
+                   if bad_scalars else None)
+        acc_bad = acc_bad or (None if (all_finite(p2) and all_finite(opt2)
+                                       and metrics_finite(m))
+                              else "non-finite preflight state or metrics")
         acc_bad = acc_bad or validate_coefficients(rule, p2)
         if acc_bad:
             failures.append(f"{rule}: {acc_bad}")
@@ -359,6 +369,7 @@ def preflight(cfg, val_np, status):
         rows.append(dict(rule=rule, compile_s_incurred=compile_s,
                          eval_compile_s_incurred=eval_compile_s, **timing,
                          retraced=bool(retraced), acceptance_failure=acc_bad,
+                         measured_scalars=measured,
                          params=MM.parameter_counts(rule, p),
                          carry=MD.CARRY[rule]))
         print(f"[preflight] {rule:<22} compile {compile_s:5.1f}s step "
@@ -373,6 +384,16 @@ def preflight(cfg, val_np, status):
                                runs_projected=n_runs * len(MD.RULES))
     print(f"PREFLIGHT_PROJECTED_TOTAL_S={total:.1f}")
     return total, retraced_any, failures
+
+
+SCALAR_NAMES = ("loss", "accuracy", "grad_norm", "update_norm", "w_norm",
+                "aux_norm")
+
+
+def measured_scalar_failures(measured):
+    """Names of measured preflight scalars that are not finite (review R2)."""
+    return [k for k in SCALAR_NAMES
+            if k not in measured or not onp.isfinite(measured[k])]
 
 
 def decide_after_preflight(proj, retraced, failures, left_s):
@@ -441,24 +462,46 @@ def _compare(final_rows, cand, other):
 
 
 def screen(final_rows):
-    """THREE separate verdicts; none substitutes for another."""
+    """Separate development verdicts; none substitutes for another (D1).
+
+    * literature: Momentum DeltaNet AND Gated DeltaNet;
+    * matched delta: does departing from the exact delta boundary add value
+      over the simpler rule with the SAME source gate? Reported ALONGSIDE the
+      literature verdict, not as attribution to the prospective term;
+    * TSS Eq. (17) applied directly to the fast weight (applicability-limited;
+      not a reproduction of TSS experiments, no unrestricted "ordinary
+      prospectivity" verdict);
+    * heavy-ball family comparison: separately trained, gamma and M matched
+      at initialization only; not a causal term-removal attribution.
+    Every per-seed difference is kept whether or not a verdict passes.
+    """
     cand = "gp_two_sided"
     lit = [_compare(final_rows, cand, o) for o in MD.LITERATURE]
-    ordn = [_compare(final_rows, cand, o) for o in MD.ORDINARY_PROSPECTIVE]
-    attr = _compare(final_rows, cand, "heavy_ball_same_mass")
     delta = _compare(final_rows, cand, "adaptive_delta")
+    eq17 = [_compare(final_rows, cand, o) for o in MD.ORDINARY_PROSPECTIVE]
+    hb = _compare(final_rows, cand, "heavy_ball_same_mass")
     return dict(
         candidate=cand,
         literature=lit, literature_screen_passed=all(c["passed"] for c in lit),
-        ordinary_prospectivity=ordn,
-        ordinary_prospectivity_screen_passed=all(c["passed"] for c in ordn),
-        attribution_T_Rdot=attr,
-        T_Rdot_attribution_passed=attr["passed"],
-        versus_delta_descriptive=delta,
-        note=("Literature, ordinary-prospectivity and T Rdot attribution are "
-              "separate verdicts. A gain over delta alone is reported but "
-              "attributes nothing to T Rdot. Development screen only; not "
-              "significance and not SOTA."))
+        matched_delta=delta,
+        matched_delta_departure_passed=delta["passed"],
+        eq17_direct_fast_weight=eq17,
+        eq17_direct_fast_weight_comparison_passed=all(c["passed"]
+                                                      for c in eq17),
+        eq17_label=("TSS Eq. (17) applied directly to the fast weight; "
+                    "applicability-limited: (I - Df) is singular off the "
+                    "current key and zero on idle intervals"),
+        heavy_ball_family=hb,
+        heavy_ball_family_comparison_passed=hb["passed"],
+        heavy_ball_label=("separately trained family comparison; gamma and M "
+                          "matched at initialization only; not causal "
+                          "attribution to T Rdot"),
+        note=("Development screen only; not significance and not SOTA. The "
+              "fixed-quadratic residual-velocity identity is a separate "
+              "analytical mechanism statement, not established by these "
+              "accuracy differences."),
+        amendment=("pre-execution amendment after review of 535fb02: matched "
+                   "delta verdict added; comparator labels narrowed"))
 
 
 # ------------------------------------------------------------------ main ---
@@ -477,6 +520,11 @@ def main():
     backend = jax.default_backend()
     if backend != "gpu" and not args.allow_cpu:
         raise SystemExit(f"REFUSING: backend is {backend!r}, not 'gpu'.")
+    # review R1: the TRAINING process itself must run the declared production
+    # setting; a separate probe does not establish this process's config
+    if jax.config.read("jax_enable_x64") or jnp.zeros(1).dtype != jnp.float32:
+        raise SystemExit("REFUSING: x64 is enabled; the declared production "
+                         "setting is float32 with x64 disabled.")
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     out = os.path.join(args.out_root, run_id)
     os.makedirs(out, exist_ok=True)
@@ -490,14 +538,16 @@ def main():
     cfg = CAL.configurations()
     val_np = TK.generate_batch(STREAM["dev_validation"], VAL_PER_FAMILY)
     eval_val_np = TK.generate_batch(STREAM["eval_validation"], VAL_PER_FAMILY)
-    held_np = TK.generate_batch(STREAM["heldout"], HELDOUT_PER_FAMILY)
     status = dict(run_id=run_id, out=out, backend=backend, dev_seed=DEV_SEED,
                   final_seeds=list(FINAL_SEEDS), updates=UPDATES,
                   streams=STREAM, arms={r: MD.DISPLAY[r] for r in MD.RULES},
                   calibration=cfg,
                   task=dict(structure=TK.structure_check(val_np),
-                            dev_validation_digest=TK.episode_digest(val_np),
-                            heldout_digest=TK.episode_digest(held_np)),
+                            dev_validation_digest=TK.episode_digest(val_np)),
+                  production_dtype=dict(x64=False, float_dtype="float32"),
+                  heldout_policy=("held-out episodes are GENERATED and hashed "
+                                  "only at final evaluation, after all final "
+                                  "runs finish; stream seed unchanged"),
                   development=[], final=[], incomplete=[])
     write(os.path.join(out, "status.json"), status)
 
@@ -546,6 +596,8 @@ def main():
             status["final"] = final_rows
             write(os.path.join(out, "status.json"), status)
 
+    held_np = TK.generate_batch(STREAM["heldout"], HELDOUT_PER_FAMILY)
+    status["task"]["heldout_digest"] = TK.episode_digest(held_np)
     for rec in final_rows:
         rec["heldout"] = evaluate(rec["rule"], finals[(rec["rule"],
                                                       rec["seed"])], held_np)
@@ -556,8 +608,10 @@ def main():
     status["screen"] = screen(final_rows)
     sc = status["screen"]
     print(f"[screen] LITERATURE: {sc['literature_screen_passed']}  "
-          f"ORDINARY-PROSPECTIVITY: {sc['ordinary_prospectivity_screen_passed']}"
-          f"  T Rdot ATTRIBUTION: {sc['T_Rdot_attribution_passed']}")
+          f"MATCHED DELTA: {sc['matched_delta_departure_passed']}")
+    print(f"[screen] Eq.(17) direct fast weight (applicability-limited): "
+          f"{sc['eq17_direct_fast_weight_comparison_passed']}  heavy-ball "
+          f"family comparison: {sc['heavy_ball_family_comparison_passed']}")
     status["complete"] = True
     return finish(0, "PASS")
 
