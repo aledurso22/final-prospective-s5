@@ -44,6 +44,71 @@ fails = []
 eps32 = float(onp.finfo(onp.float32).eps)
 rs = onp.random.RandomState(7)
 TRAJ32, FD32, REL32 = 2e-5, (1e-2, 3e-3), 2e-2
+
+
+# ---- finite-before-resolution guards (review F1, f13295c) ----------------
+def all_finite(*arrs):
+    return all(bool(onp.all(onp.isfinite(onp.asarray(a, onp.float64))))
+               for a in arrs)
+
+
+def update_worst(worst, err):
+    """Aggregate an error WITHOUT letting a NaN be discarded by max():
+    a non-finite error makes the aggregate +inf, which fails any tolerance."""
+    if not onp.isfinite(err):
+        return float("inf")
+    return max(worst, err)
+
+
+def tangent_decision(label, jvp, fval, perturbed, rel_tol=None):
+    """Decide a directional-derivative check in the declared order:
+    (1) every loss, perturbed loss, JVP, FD and error must be FINITE, else a
+        failure - non-finite arithmetic is never "not resolvable";
+    (2) only a FINITE derivative below the resolvability threshold receives
+        the reported limitation;
+    (3) otherwise each declared step must meet the relative tolerance.
+    `perturbed` maps h -> (f(x + h), f(x - h)). Returns (failures, limited)."""
+    rel_tol = REL32 if rel_tol is None else rel_tol
+    out = []
+    fds = {h: (fp - fm) / (2 * h) for h, (fp, fm) in perturbed.items()}
+    errs = {h: abs(jvp - fd) / max(abs(fd), 1e-30) for h, fd in fds.items()}
+    if not all_finite(jvp, fval, [v for pair in perturbed.values()
+                                  for v in pair], list(fds.values()),
+                      list(errs.values())):
+        return [f"{label}: non-finite loss, JVP, perturbed loss, FD or error "
+                f"(jvp={jvp}, f={fval}, perturbed={perturbed})"], False
+    thr = 100 * eps32 * max(abs(fval), 1.0) / min(perturbed)
+    for h, e in errs.items():                # printed in EVERY finite case
+        print(f"  {label} jvp {jvp:.5e} fd(h={h}) {fds[h]:.5e} rel {e:.2e} "
+              f"(threshold {thr:.2e})")
+    if abs(jvp) < thr:
+        return [], True
+    for h, e in errs.items():
+        if not e < rel_tol:
+            out.append(f"{label} h={h}: rel {e:.2e}")
+    return out, False
+
+
+# lightweight rejection regressions for the guards themselves
+if update_worst(1e-9, float("nan")) < TRAJ32:
+    fails.append("guard regression: a NaN trajectory error was not rejected")
+_f, _lim = tangent_decision("guard regression", float("nan"), 1.0,
+                            {1e-2: (1.0, 1.0), 3e-3: (1.0, 1.0)})
+if not _f or _lim:
+    fails.append("guard regression: a NaN JVP was labelled a limitation")
+_f, _lim = tangent_decision("guard regression", 1e-12, 1.0,
+                            {1e-2: (1.0, float("inf")), 3e-3: (1.0, 1.0)})
+if not _f or _lim:
+    fails.append("guard regression: a non-finite perturbed loss passed")
+# a FINITE derivative below the threshold is a reported limitation, not a
+# failure (dispatch-1 correction); f = 1 gives threshold ~4e-3 at h = 3e-3
+_f, _lim = tangent_decision("guard regression", 1e-6, 1.0,
+                            {1e-2: (1.0 + 1e-8, 1.0 - 1e-8),
+                             3e-3: (1.0 + 3e-9, 1.0 - 3e-9)})
+if _f or not _lim:
+    fails.append("guard regression: a finite below-threshold derivative was "
+                 f"not reported as a limitation (failures {_f})")
+
 slot = CAL.configurations()["slots"]["adaptive_delta/A"]
 # ---- STRESS fixture: nonzero random gate (not the trained start)
 pd = MM.init_params("adaptive_delta", 11, init_coeffs=slot)
@@ -90,14 +155,15 @@ f = loss("gp_two_sided")
 fr = lambda r: f(dict(pc, raw_r=jnp.asarray([r], jnp.float32)))  # noqa: E731
 jvp = float(jax.jvp(fr, (jnp.float32(0.0),), (jnp.float32(1.0),))[1])
 fval = float(fr(jnp.float32(0.0)))
-if not abs(jvp) >= 100 * eps32 * max(abs(fval), 1.0) / 3e-3:
-    fails.append(f"raw_r tangent not resolvable: jvp {jvp:.3e}")
-for h in (1e-2, 3e-3):
-    fd = (float(fr(jnp.float32(h))) - float(fr(jnp.float32(-h)))) / (2 * h)
-    e = abs(jvp - fd) / max(abs(fd), 1e-30)
-    print(f"  raw_r jvp {jvp:.5e} fd(h={h}) {fd:.5e} rel {e:.2e}")
-    if not e < 2e-2:
-        fails.append(f"raw_r tangent h={h}: rel {e:.2e}")
+# dispatch-1 correction: the SAME finite-before-resolution rule as every other
+# tangent block; both declared perturbations, unchanged tolerance/threshold
+pert_s = {h: (float(fr(jnp.float32(h))), float(fr(jnp.float32(-h))))
+          for h in FD32}
+f_, lim_ = tangent_decision("STRESS raw_r", jvp, fval, pert_s)
+fails.extend(f_)
+if lim_:
+    print("  LIMITATION: stress-fixture raw_r derivative is FINITE and below "
+          "float32 resolvability; errors printed above; not a failure")
 gtau = abs(float(gc["raw_tau"][0])); gr = abs(float(gc["raw_r"][0]))
 print(f"  start |dL/draw_r| {gr:.3e} |dL/draw_tau| {gtau:.3e}")
 if not (gr > 0 and gtau <= 1e-3 * gr):
@@ -130,59 +196,6 @@ for dx in (1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 3e-7, 1.5e-7):
             fails.append(f"edge x-1={dx} jitter {jitter}: {rep}")
 print(f"  projection edge x -> 1+: {n_edge} points checked")
 
-
-# ---- finite-before-resolution guards (review F1, f13295c) ----------------
-def all_finite(*arrs):
-    return all(bool(onp.all(onp.isfinite(onp.asarray(a, onp.float64))))
-               for a in arrs)
-
-
-def update_worst(worst, err):
-    """Aggregate an error WITHOUT letting a NaN be discarded by max():
-    a non-finite error makes the aggregate +inf, which fails any tolerance."""
-    if not onp.isfinite(err):
-        return float("inf")
-    return max(worst, err)
-
-
-def tangent_decision(label, jvp, fval, perturbed, rel_tol=None):
-    """Decide a directional-derivative check in the declared order:
-    (1) every loss, perturbed loss, JVP, FD and error must be FINITE, else a
-        failure - non-finite arithmetic is never "not resolvable";
-    (2) only a FINITE derivative below the resolvability threshold receives
-        the reported limitation;
-    (3) otherwise each declared step must meet the relative tolerance.
-    `perturbed` maps h -> (f(x + h), f(x - h)). Returns (failures, limited)."""
-    rel_tol = REL32 if rel_tol is None else rel_tol
-    out = []
-    fds = {h: (fp - fm) / (2 * h) for h, (fp, fm) in perturbed.items()}
-    errs = {h: abs(jvp - fd) / max(abs(fd), 1e-30) for h, fd in fds.items()}
-    if not all_finite(jvp, fval, [v for pair in perturbed.values()
-                                  for v in pair], list(fds.values()),
-                      list(errs.values())):
-        return [f"{label}: non-finite loss, JVP, perturbed loss, FD or error "
-                f"(jvp={jvp}, f={fval}, perturbed={perturbed})"], False
-    thr = 100 * eps32 * max(abs(fval), 1.0) / min(perturbed)
-    if abs(jvp) < thr:
-        return [], True
-    for h, e in errs.items():
-        print(f"  {label} fd(h={h}) {fds[h]:.5e} rel {e:.2e}")
-        if not e < rel_tol:
-            out.append(f"{label} h={h}: rel {e:.2e}")
-    return out, False
-
-
-# lightweight rejection regressions for the guards themselves
-if update_worst(1e-9, float("nan")) < TRAJ32:
-    fails.append("guard regression: a NaN trajectory error was not rejected")
-_f, _lim = tangent_decision("guard regression", float("nan"), 1.0,
-                            {1e-2: (1.0, 1.0), 3e-3: (1.0, 1.0)})
-if not _f or _lim:
-    fails.append("guard regression: a NaN JVP was labelled a limitation")
-_f, _lim = tangent_decision("guard regression", 1e-12, 1.0,
-                            {1e-2: (1.0, float("inf")), 3e-3: (1.0, 1.0)})
-if not _f or _lim:
-    fails.append("guard regression: a non-finite perturbed loss passed")
 
 # ---- ACTUAL START (review R1): unchanged initialized tree ----------------
 slots = CAL.configurations()["slots"]

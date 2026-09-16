@@ -1,8 +1,8 @@
 # Generalized prospective memory around the delta boundary — report
 
 **Status: dispatch 1 at `2a86cc9` FAILED at the focused checks (1 of 33).
-No calibration stage, preflight or training ran. Logs preserved. No retry and
-no protocol change; awaiting a decision.**
+No calibration stage, preflight or training ran. Logs preserved. No retry. The
+narrow probe correction was cleared; one relaunch is authorized.**
 
 Check scope, stated precisely: the actual initialized tree is checked for
 value/shared-gradient nesting AND tangents in float64; in the float32 probe it
@@ -83,7 +83,21 @@ equations, nesting, domain or trajectories was observed.
 | projection | 400 float32 points plus 49 edge points (`x → 1⁺`) certified in float64 | — |
 | float64 suite | all 32 other tests passed: nesting on three seeds, storage in the wider sector, delta non-expansion, residual-velocity identity, Eq. (17) including the first-idle increment, generator-overflow and zero-a0 regressions, preflight refusal, screens | — |
 
-### Narrow fix proposed, not applied
+### Narrow fix — cleared and applied (commit below), before relaunch
+
+* **Stress-fixture tangent.** It now goes through the same
+  `tangent_decision` as every other block, with both perturbations, the
+  unchanged tolerance and threshold, and strict rejection of non-finite
+  values.
+* **Helper order.** The helper and its dependencies are defined before first
+  use.
+* **Printing.** Measured errors are printed in every finite case, including a
+  reported limitation.
+* **Regression.** A lightweight regression confirms that a finite
+  below-threshold derivative yields a limitation, while the existing
+  NaN-JVP and non-finite-perturbed-loss regressions still fail.
+
+### Original proposal text
 
 Route the stress-fixture tangent through the same `tangent_decision`, so a
 finite derivative below the threshold is reported as a limitation. That is
