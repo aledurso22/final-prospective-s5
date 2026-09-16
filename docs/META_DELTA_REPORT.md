@@ -1,10 +1,13 @@
 # Generalized prospective memory around the delta boundary — report
 
-**Status: dispatch 2 at `5dc4b07` — operational PASS (273 s of 600).
-Verdicts: literature FAILED, matched delta PASSED, TSS Eq. (17) direct
-fast weight (applicability-limited) FAILED, heavy-ball family comparison
-PASSED. Per-seed values pending the read-only digest. Dispatch 1 below is
-preserved.**
+**Status: dispatch 2 at `5dc4b07` completed — operational PASS (273 s of
+600). Matched-delta screen PASSED; heavy-ball family comparison PASSED;
+literature screen FAILED; TSS Eq. (17) direct-fast-weight comparison
+(applicability-limited) FAILED. The candidate had the highest mean primary
+accuracy of all six arms. Every failed screen failed on its retention or
+recall safeguard, not on primary accuracy. The learned candidate settled at
+rho ~ 0.15, on the PASSIVE side M < gamma T, not in the wider sector.
+Dispatch 1 below is preserved.**
 
 Previous status line (dispatch 1): **dispatch 1 at `2a86cc9` FAILED at the focused checks (1 of 33).
 No calibration stage, preflight or training ran. Logs preserved. No retry. The
@@ -147,6 +150,217 @@ Operational PASS is not a performance claim. Per-seed primary, retention,
 recall, categories, selection and learned coefficients are pending
 `python -m experiments.meta_delta.summary <run_dir>`.
 
-## Results
+## Results — dispatch 2 (`5dc4b07`)
 
-*(per-seed values pending the digest)*
+All values below were read from the saved
+`/Users/durso/s5-runs/meta-delta/20260916-222310/status.json` with the
+read-only digest `experiments.meta_delta.summary`. No training or numerical
+rerun was done.
+
+**Source of the digest output.** The digest that produced this output is the
+version at `b3c8d50`. The later `1258e8b` version additionally prints every
+arm's validation gain from update 0 to 200 and each screen condition as a
+separate boolean. Every condition below is derived from the printed exact
+differences. Gains from update 0 to 200 are therefore available for the
+candidate only (§6).
+
+### 1. Held-out results (512 sequences per family; seeds 301 / 302 / 303)
+
+| Arm | Seed | Primary | Revision untouched retention | Recall | Revision CE |
+|---|---|---|---|---|---|
+| **Generalized, two-sided** | 301 | 0.5834 | 0.4729 | 0.6290 | 1.2282 |
+| | 302 | 0.5981 | 0.4978 | 0.6422 | 1.2091 |
+| | 303 | 0.5831 | 0.4700 | 0.6388 | 1.2343 |
+| | **mean** | **0.5882** | **0.4802** | **0.6367** | **1.2239** |
+| First-order delta | 301 | 0.5468 | 0.4822 | 0.6176 | 1.4272 |
+| | 302 | 0.5548 | 0.5024 | 0.6285 | 1.4081 |
+| | 303 | 0.5457 | 0.4763 | 0.6223 | 1.4361 |
+| | **mean** | **0.5491** | **0.4870** | **0.6228** | **1.4238** |
+| Heavy ball, same mass | 301 | 0.5439 | 0.4846 | 0.6237 | 1.4238 |
+| | 302 | 0.5518 | 0.5039 | 0.6350 | 1.4071 |
+| | 303 | 0.5459 | 0.4812 | 0.6251 | 1.4348 |
+| | **mean** | **0.5472** | **0.4899** | **0.6279** | **1.4219** |
+| TSS Eq. (17), direct fast weight | 301 | 0.5182 | 0.6467 | 0.7428 | 1.3670 |
+| | 302 | 0.5248 | 0.6606 | 0.7572 | 1.3482 |
+| | 303 | 0.5201 | 0.6514 | 0.7584 | 1.3751 |
+| | **mean** | **0.5210** | **0.6529** | **0.7528** | **1.3635** |
+| Gated DeltaNet | 301 | 0.5468 | 0.4893 | 0.6272 | 1.4143 |
+| | 302 | 0.5565 | 0.5144 | 0.6338 | 1.3996 |
+| | 303 | 0.5482 | 0.4836 | 0.6273 | 1.4280 |
+| | **mean** | **0.5505** | **0.4958** | **0.6294** | **1.4140** |
+| Momentum DeltaNet | 301 | 0.4910 | 0.7500 | 0.8038 | 1.5199 |
+| | 302 | 0.5569 | 0.6558 | 0.7616 | 1.3007 |
+| | 303 | 0.5422 | 0.6448 | 0.7562 | 1.3557 |
+| | **mean** | **0.5300** | **0.6835** | **0.7739** | **1.3921** |
+
+### 2. Screens: exact differences and each condition
+
+Differences are candidate minus comparator. A screen passes only if all three
+conditions hold, over all three pairs:
+* **mean primary difference ≥ +0.01** (one point);
+* **every paired primary difference > 0**;
+* **retention difference ≥ −0.01 AND recall difference ≥ −0.01**.
+
+| Comparison | Mean primary | Paired primary 301 / 302 / 303 | Retention | Recall | ≥ +1 pt | All > 0 | Retention ≥ −1 pt | Recall ≥ −1 pt | **Verdict** |
+|---|---|---|---|---|---|---|---|---|---|
+| **Matched delta** | **+0.0391** | +0.0366 / +0.0433 / +0.0375 | −0.0068 | +0.0139 | yes | yes | yes | yes | **PASSED** |
+| **Heavy-ball family** | **+0.0410** | +0.0394 / +0.0464 / +0.0372 | −0.0097 | +0.0087 | yes | yes | yes (by 0.0003) | yes | **PASSED** |
+| **Gated DeltaNet** (literature) | **+0.0377** | +0.0366 / +0.0416 / +0.0349 | **−0.0155** | +0.0072 | yes | yes | **no** | yes | **FAILED** |
+| **Momentum DeltaNet** (literature, primary) | **+0.0582** | +0.0924 / +0.0413 / +0.0409 | **−0.2033** | **−0.1372** | yes | yes | **no** | **no** | **FAILED** |
+| **TSS Eq. (17)**, direct fast weight | **+0.0672** | +0.0652 / +0.0734 / +0.0630 | **−0.1727** | **−0.1161** | yes | yes | **no** | **no** | **FAILED** |
+
+**Literature screen: FAILED.**
+* Against **Gated DeltaNet**, the candidate met both primary conditions,
+  +3.8 points mean and positive in every seed. Recall held at +0.7. It failed
+  only because retention was **−1.55 points**, beyond the −1-point
+  safeguard.
+* Against **Momentum DeltaNet**, it met both primary conditions, +5.8 points
+  mean and positive in every seed. It failed on both safeguards: retention
+  **−20.3** and recall **−13.7 points**.
+
+**A failed screen here does not mean lower mean accuracy.** The candidate's
+mean primary exceeded every comparator. What it gives up is retention of
+untouched associations, and against Momentum and TSS also overall recall.
+
+**TSS Eq. (17) applied directly to the fast weight: FAILED** on the same two
+safeguards, despite +6.7 points primary. This remains **applicability-limited**:
+with `f = W − ηR`, `(I − Df)` is singular off the current key and zero when
+idle, so TSS Eq. (15) does not apply. This is a well-defined discrete
+comparison, not a reproduction of TSS's experiments and not a verdict on
+ordinary prospectivity.
+
+**Matched delta: PASSED.** Leaving the exact delta boundary improved primary
+accuracy by +3.9 points, positive in all three seeds, within both safeguards.
+This is the pre-registered question of whether departing from delta adds
+value, answered positively for this pilot. It is not attribution to the
+prospective term.
+
+**Heavy-ball family: PASSED**, by +4.1 points primary, positive in all seeds,
+with retention only 0.0003 inside its safeguard. This is a comparison of
+**separately trained families**, with `γ` and `M` matched at initialization
+only. It is **not** causal attribution to `T Ṙ`. The residual-velocity
+identity remains a separate analytical statement.
+
+### 3. Query categories (held-out accuracy, mean over seeds)
+
+| Arm | Recall: immediate | middle untouched | late selected | late untouched | Revision: immediate | middle untouched | late selected | late untouched |
+|---|---|---|---|---|---|---|---|---|
+| Generalized, two-sided | **1.0000** | 0.5907 | 0.6436 | 0.3125 | **1.0000** | 0.6436 | 0.3924 | 0.3169 |
+| First-order delta | 0.9924 | 0.6237 | 0.5802 | 0.2949 | 0.8516 | 0.6738 | 0.3708 | 0.3001 |
+| Heavy ball, same mass | 0.9922 | 0.6273 | 0.5902 | 0.3021 | 0.8345 | 0.6756 | 0.3745 | 0.3042 |
+| TSS Eq. (17), direct | 0.9782 | 0.7607 | 0.8185 | 0.4538 | 0.3221 | 0.8114 | 0.4562 | 0.4945 |
+| Gated DeltaNet | 0.9915 | 0.6300 | 0.5938 | 0.3024 | 0.8346 | 0.6839 | 0.3758 | 0.3076 |
+| Momentum DeltaNet | 0.9629 | 0.7720 | **0.8634** | **0.4972** | 0.3447 | **0.8288** | 0.4084 | **0.5382** |
+
+These are descriptive observations, not tested hypotheses:
+* The candidate reaches **1.000 immediate revision**, against 0.83–0.85 for
+  delta, heavy ball and Gated, and 0.32–0.34 for TSS and Momentum. It also
+  leads the delta-like arms on late selected recall (0.644 vs 0.580–0.594)
+  and late selected revision (0.392 vs 0.371–0.376).
+* It trails the delta-like arms slightly on middle untouched associations.
+* Momentum and TSS retain untouched associations far better, 0.81–0.83
+  middle-revision, and give up immediate revision.
+* The primary gains therefore come mainly from immediate and late selected
+  queries. The safeguard failures come from untouched retention.
+
+### 4. Development and selection (seed 300, update-200 validation)
+
+| Arm | A (lr 0.003): primary / revCE / retention / recall | B (lr 0.01): primary / revCE / retention / recall | Selected |
+|---|---|---|---|
+| Generalized, two-sided | 0.4688 / 1.5336 / 0.3013 / 0.4956 | **0.5781** / 1.2440 / 0.4678 / 0.6379 | B |
+| First-order delta | 0.4487 / 1.6670 / 0.2842 / 0.4680 | **0.5479** / 1.4327 / 0.4824 / 0.6216 | B |
+| Heavy ball, same mass | 0.4551 / 1.6959 / 0.2964 / 0.4739 | **0.5449** / 1.4276 / 0.4878 / 0.6304 | B |
+| TSS Eq. (17), direct | 0.4565 / 1.6808 / 0.4458 / 0.5610 | **0.5186** / 1.3685 / 0.6470 / 0.7480 | B |
+| Gated DeltaNet | 0.4478 / 1.6623 / 0.2842 / 0.4707 | **0.5464** / 1.4240 / 0.4907 / 0.6316 | B |
+| Momentum DeltaNet | 0.5195 / 1.3635 / 0.5791 / 0.7063 | **0.5427** / 1.3311 / 0.6523 / 0.7468 | B |
+
+All six families selected the lr = 0.01 slot, on the same learning-rate axis
+for every family.
+
+### 5. Learned coefficients of the candidate, and domain
+
+| Seed | η | τ | ρ | γ = 1/η | M | T | Side of `M = γT` | Certificate `dL/γ²` | Projection events | Minimum log margin to bound |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 301 | 0.6079 | 1.2113 | **0.1495** | 1.6449 | 1.9924 | 8.1022 | **passive, `M < γT`** | −8.38 | 0 | 0.652 |
+| 302 | 0.6315 | 1.2315 | **0.1501** | 1.5836 | 1.9501 | 8.2033 | **passive, `M < γT`** | −8.81 | 0 | 0.656 |
+| 303 | 0.6377 | 1.2327 | **0.1498** | 1.5682 | 1.9331 | 8.2286 | **passive, `M < γT`** | −8.92 | 0 | 0.656 |
+
+Initialization: `η₀ = 0.93145`, `τ₀ = 1`, `ρ₀ = 1`, so `T₀ = 1`. The initial
+bound was `ρ_max = 2.1589`. Candidate source-weight gate [min / median / max]:
+0.740 / 1.025 / 1.281, 0.745 / 0.996 / 1.308, and 0.722 / 0.967 / 1.273.
+
+**The candidate moved from `ρ = 1` to `ρ ≈ 0.15` in every seed,** into the
+previously certified **passive sector**. `T` rose from 1 to about 8.2. It
+**never entered the wider `M > γT` sector.**
+* `d = M − γT < 0`, so the wider-sector certificate is inactive.
+* There were zero projection events and a log margin of about 0.65.
+
+**The matched-delta success therefore did not use the wider-sector
+extension.** This run provides no evidence either way about the value of
+`ρ > 1`; it only shows that the extension was available and not selected by
+training.
+
+Its trained-coefficient seed variation is small (ρ 0.1495–0.1501). This is not
+statistical evidence. Note that the completed adaptive-memory study's
+sigmoid-restricted candidate, which could not reach `ρ = 1`, was trained only
+at lr 0.003 and did not win. Different initialization and parameterization
+make that comparison informal.
+
+**Other arms' learned coefficients.** The digest labels these `raw_*` but
+prints `exp(raw)`:
+* First-order delta: `η` 0.2773 / 0.2702 / 0.2794.
+* Heavy ball: `η` 0.2490 / 0.2435 / 0.2540, `τ` 0.2794 / 0.2782 / 0.2795.
+* TSS Eq. (17): `η` 0.1314 / 0.1303 / 0.1326, `T` 19.80 / 19.93 / 19.67,
+  starting from `η₀ = 0.5050`, `T₀ = 10`.
+* Delta-like arms' gate medians: 0.97–1.00.
+
+**Literature gates.**
+* Gated DeltaNet's `α` stayed near 1 (median 0.9997–0.99998).
+* Momentum DeltaNet again showed **inconsistent regimes across seeds**. Its
+  `α` median was 0.988 in seed 301, which had the weakest primary (0.491) and
+  strongest retention (0.750). It was 0.055 in seed 302 and 1.0e-4 in seed
+  303.
+
+### 6. Initialization-to-final validation gain
+
+* **Candidate** (update 0 → 200, evaluation validation): primary
+  **+0.1501 / +0.1404 / +0.1404**; revision CE **−0.6671 / −0.6792 / −0.6573**.
+* **Other arms:** not in the executed digest version's output (see the source
+  note above). They are stored in `status.json`, and `1258e8b`'s digest prints
+  them; they are not reported here rather than estimated.
+
+### 7. Cost
+
+| Arm | Parameters | Carry (real) | Preflight step | Preflight eval (256 per family) |
+|---|---|---|---|---|
+| Generalized, two-sided | 433 | 128 | 13.89 ms | 14.1 ms |
+| First-order delta | 431 | 64 | 11.93 ms | 13.2 ms |
+| Heavy ball, same mass | 432 | 128 | 14.15 ms | 14.6 ms |
+| TSS Eq. (17), direct | 432 | 128 | 12.70 ms | 15.0 ms |
+| Gated DeltaNet | 480 | 64 | 12.18 ms | 13.3 ms |
+| Momentum DeltaNet | 569 | 128 | 13.39 ms | 13.9 ms |
+
+Each candidate final run took about 2.7–2.8 s. The study phase took 129 s; the
+whole dispatch took **273 s of 600**.
+
+### 8. What this run supports
+
+* **Operationally:** 33/33 checks passed, preflight fit, the batch completed,
+  and every candidate checkpoint was certified.
+* **Matched delta (PASSED):** departing from the exact delta boundary improved
+  held-out primary accuracy by 3.9 points in all three seeds, within the
+  retention and recall safeguards. The departure went into the **passive**
+  sector, not the wider one.
+* **Heavy-ball family (PASSED):** +4.1 points, as a separately trained family
+  comparison, not a causal attribution to `T Ṙ`.
+* **Literature (FAILED):** higher mean primary accuracy than Gated (+3.8) and
+  Momentum (+5.8) in every seed, but larger losses in untouched retention:
+  −1.55 against Gated, −20.3 against Momentum. Against Momentum it also lost
+  −13.7 in recall. This is not a win over the literature rules under the
+  declared criterion.
+* **TSS Eq. (17) direct fast weight (FAILED, applicability-limited):** +6.7
+  primary, with −17.3 retention and −11.6 recall.
+* **Scope:** one small task, a 200-update development pilot, three seeds.
+  Not significance, not a published benchmark, not SOTA. No criterion,
+  selection or configuration is changed in response, and no follow-up run is
+  launched.
