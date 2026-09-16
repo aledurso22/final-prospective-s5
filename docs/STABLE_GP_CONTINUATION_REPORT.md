@@ -154,6 +154,36 @@ the test compares accumulated trajectories instead of single steps from
 identical states. It would not be a disagreement in the equation. This is a
 hypothesis until the traceback confirms which step and what magnitude.
 
+### Fixture corrections after dispatch 1 (test code only)
+
+No model, equation, arm, tolerance, performance criterion or cap changed.
+Nothing has been rerun.
+
+1. **Probe dtypes.** `stable_gp_float32_probe.py` now builds every network,
+   including the separate r-only fixture, from `production_kwargs`: pole
+   initializers explicitly float32, `V`/`Vinv` complex64. The shared neutral
+   helper is unchanged. The dtype assertion now covers the params and batch
+   statistics of **all three arms and the r-only fixture**, not only C's
+   params.
+2. **Eq. (17) rollout test.** It shared one previous-drive buffer between the
+   two independently evolving trajectories. Each now keeps its own
+   `f_{k-1}`, and the generalized path its own `s_{k-1}`. The rollout check
+   is **kept**, with TSS64 = 1e-12 unchanged, and now reports the worst
+   discrepancy and its step.
+3. **New one-step identity** `test_generalized_step_equals_eq17_on_identical_inputs`:
+   200 random identical `(s_k, s_{k-1}, f_k, f_{k-1}, h, T)`, M = gamma = 0,
+   same tolerance. It separates an algebraic disagreement from accumulated
+   trajectory rounding.
+
+**Diagnosis status.** The shared-history bug is real, but it only takes effect
+after the two paths have already diverged by rounding, since both start from
+identical states. It is therefore probably **not** the whole explanation. If
+the one-step check passes and the rollout still exceeds 1e-12, the evidence
+points to accumulated rounding under a strict absolute rollout tolerance. That
+discrepancy will be reported with its measured magnitude before any
+measurement amendment is proposed. The traceback from dispatch 1's `checks.log`
+is still needed to confirm the original failing step and magnitude.
+
 ### Timing observed
 
 The focused checks took 263.5 s, more than planned. That leaves about 890 s

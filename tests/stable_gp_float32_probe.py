@@ -120,8 +120,34 @@ print(f"  [1] projection: {n_checked} executed float32 modes checked in "
 
 
 # ---------------------------------------------------------------- 2 ---------
+def production_kwargs(P, H, **overrides):
+    """Initializer arrays EXPLICITLY in production dtypes (dispatch-1 fix).
+
+    `tests/response_reference.ssm_kwargs` supplies NumPy float64 pole arrays
+    and complex128 V/Vinv. S5SSM stores the pole initializers unchanged as
+    parameters, so the first dispatch's probe ran with float64 Lambda leaves
+    even with x64 off. The shared neutral helper is left untouched; the probe
+    casts here: poles float32, eigenvector matrices complex64.
+    """
+    kw = dict(_ssm_kwargs(P, H), **overrides)
+    kw["Lambda_re_init"] = onp.asarray(kw["Lambda_re_init"], onp.float32)
+    kw["Lambda_im_init"] = onp.asarray(kw["Lambda_im_init"], onp.float32)
+    kw["V"] = onp.asarray(kw["V"], onp.complex64)
+    kw["Vinv"] = onp.asarray(kw["Vinv"], onp.complex64)
+    return kw
+
+
+def assert_float32_leaves(tag, variables):
+    """Dtype assertion for EVERY arm's params and batch statistics."""
+    for coll in ("params", "batch_stats"):
+        for k, v in flatten_dict(variables.get(coll, {})).items():
+            if onp.asarray(v).dtype != onp.float32:
+                fails.append(f"{tag} {coll} leaf {'/'.join(k)} is "
+                             f"{onp.asarray(v).dtype}, not float32")
+
+
 def net(arm, P=4, H=6, L=24):
-    m = RawatClassifier(ssm=init_substrate_ssm(arm, **_ssm_kwargs(P, H)),
+    m = RawatClassifier(ssm=init_substrate_ssm(arm, **production_kwargs(P, H)),
                         d_model=H, n_layers=2, d_output=3, readout_width=5,
                         mlp_hidden=7, training=False)
     x = jnp.asarray(onp.random.RandomState(1).randn(L, 2).astype(onp.float32))
@@ -147,9 +173,8 @@ rs = onp.random.RandomState(7)
 ma, va, x = net("alpha_p_s5")
 mb, vb, _ = net("rawat_learned_input")
 mc, vc, _ = net("sgp_learned_input")
-for k, v in flatten_dict(vc["params"]).items():
-    if v.dtype != onp.float32:
-        fails.append(f"C leaf {'/'.join(k)} is {v.dtype}, not float32")
+for tag, vv in (("A", va), ("B", vb), ("C", vc)):
+    assert_float32_leaves(tag, vv)
 w = jnp.asarray(rs.randn(3).astype(onp.float32))
 q = rs.uniform(-1, 1, 4).astype(onp.float32)
 t = rs.uniform(-1, 1, 4).astype(onp.float32)
@@ -217,12 +242,13 @@ if not (rho_w == 1.0 and rho_w < rmax_w
 
 # ---------------------------------------------------------------- R2 --------
 FD32_STEPS, FD32_REL = (1e-2, 3e-3), 2e-2
-kw = dict(_ssm_kwargs(4, 6), dt_min=0.1, dt_max=1.0)
+kw = production_kwargs(4, 6, dt_min=0.1, dt_max=1.0)
 m0 = RawatClassifier(ssm=init_substrate_ssm("sgp_learned_input", **kw),
                      d_model=6, n_layers=2, d_output=3, readout_width=5,
                      mlp_hidden=7, training=False)
 x0 = jnp.asarray(onp.random.RandomState(8).randn(24, 2).astype(onp.float32))
 v0 = m0.init(jax.random.PRNGKey(3), x0, jnp.ones(24))
+assert_float32_leaves("R2 r-only fixture (C)", v0)
 rs0 = onp.random.RandomState(27)
 w0 = jnp.asarray(rs0.randn(3).astype(onp.float32))
 f0 = lambda p: jnp.sum(w0 * m0.apply(                              # noqa: E731

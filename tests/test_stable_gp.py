@@ -924,24 +924,60 @@ def test_the_screen_requires_both_baselines_every_stream_and_lower_CE():
 # =========================================================================
 #  6. Actual TSS Eq. (17) and its generalized discrete descendant
 # =========================================================================
+def test_generalized_step_equals_eq17_on_identical_inputs():
+    """ONE step from IDENTICAL (s_k, s_{k-1}, f_k, f_{k-1}): at M = gamma = 0
+    the generalized update and Eq. (17) must agree to TSS64. This isolates the
+    algebraic identity from any accumulated trajectory rounding, so a failure
+    here would be an equation-level disagreement."""
+    rs = onp.random.RandomState(30)
+    worst = 0.0
+    for _ in range(200):
+        n = 5
+        s, s_prev = rs.randn(n), rs.randn(n)
+        f, f_prev = onp.tanh(rs.randn(n)), onp.tanh(rs.randn(n))
+        h, T = rs.uniform(0.05, 1.0), rs.uniform(0.5, 5.0)
+        a = SG.tss_eq17_step(s, f, f_prev, h, T)
+        b = SG.generalized_discrete_step(s, s_prev, f, f_prev, h, 0.0, 0.0, T)
+        worst = max(worst, float(onp.max(onp.abs(a - b))))
+    print(f"  one-step Eq.(17) identity, worst abs {worst:.3e}")
+    assert worst < TSS64, worst
+
+
 def test_generalized_discrete_equation_recovers_TSS_eq17_exactly():
-    """M = gamma = 0 gives Eq. (17), including the previous-drive convention,
-    on a NONLINEAR drive f_k = tanh(W s_k + x_k)."""
+    """M = gamma = 0 gives Eq. (17) along a ROLLOUT on a NONLINEAR drive
+    f_k = tanh(W s_k + x_k), including the previous-drive convention.
+
+    Dispatch-1 fix: the first version shared ONE previous-drive buffer between
+    the two independently evolving trajectories, so the generalized path read
+    the Eq. (17) path's f_{k-1}. Each trajectory now keeps its OWN previous
+    drive (and the generalized path its own previous state). Tolerance TSS64
+    is unchanged; any remaining discrepancy is reported with its step and
+    magnitude, not resolved by this edit.
+    """
     rs = onp.random.RandomState(31)
     n, K, h, T = 5, 40, 0.3, 2.0
     W = rs.randn(n, n) * 0.6
     xs = rs.randn(K, n)
-    s_a = s_b = rs.randn(n)
-    s_prev = s_b.copy()
-    f_prev = onp.tanh(W @ s_a + xs[0])            # declared startup convention
+    s0 = rs.randn(n)
+    s_a, s_b = s0.copy(), s0.copy()
+    s_prev_b = s0.copy()
+    f_prev_a = onp.tanh(W @ s_a + xs[0])          # declared startup convention
+    f_prev_b = onp.tanh(W @ s_b + xs[0])
+    worst, worst_k = 0.0, -1
     for k in range(K):
-        f = onp.tanh(W @ s_a + xs[k])
-        s_a_next = SG.tss_eq17_step(s_a, f, f_prev, h, T)
-        fb = onp.tanh(W @ s_b + xs[k])
-        s_b_next = SG.generalized_discrete_step(s_b, s_prev, fb, f_prev, h,
-                                                0.0, 0.0, T)
-        assert onp.max(onp.abs(s_a_next - s_b_next)) < TSS64, k
-        s_prev, s_a, s_b, f_prev = s_b, s_a_next, s_b_next, f
+        f_a = onp.tanh(W @ s_a + xs[k])
+        f_b = onp.tanh(W @ s_b + xs[k])
+        s_a_next = SG.tss_eq17_step(s_a, f_a, f_prev_a, h, T)
+        s_b_next = SG.generalized_discrete_step(s_b, s_prev_b, f_b, f_prev_b,
+                                                h, 0.0, 0.0, T)
+        d = float(onp.max(onp.abs(s_a_next - s_b_next)))
+        if d > worst:
+            worst, worst_k = d, k
+        s_a, f_prev_a = s_a_next, f_a
+        s_prev_b, s_b, f_prev_b = s_b, s_b_next, f_b
+    print(f"  rollout Eq.(17) identity over {K} steps, worst abs {worst:.3e} "
+          f"at step {worst_k}")
+    assert worst < TSS64, (worst, worst_k)
 
 
 def test_the_other_exact_rows_of_the_contract():
