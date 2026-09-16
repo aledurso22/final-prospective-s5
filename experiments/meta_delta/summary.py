@@ -70,19 +70,41 @@ def main(run_dir):
     sc = st.get("screen", {})
 
     def block(title, c):
+        dm, dr, dc = (c["mean_primary_difference"], c["retention_difference"],
+                      c["recall_difference"])
         print(f"\n--- {title}: passed={c['passed']} ---")
-        print(f"  mean primary diff {f(c['mean_primary_difference'])}  "
-              f"paired {c['paired_primary_differences']}  all positive "
-              f"{c['positive_in_all_seeds']}")
-        print(f"  retention diff {f(c['retention_difference'])}  recall diff "
-              f"{f(c['recall_difference'])}  safeguard "
-              f"{c['retention_safeguard_met']}")
+        print(f"  mean primary diff {dm!r}  condition >= +0.01: "
+              f"{dm is not None and dm >= 0.01}")
+        print(f"  paired primary {c['paired_primary_differences']}  "
+              f"condition all > 0: {c['positive_in_all_seeds']}  complete "
+              f"pairs: {c['complete_paired_seeds']}")
+        print(f"  retention diff {dr!r} (>= -0.01: "
+              f"{dr is not None and dr >= -0.01})  recall diff {dc!r} "
+              f"(>= -0.01: {dc is not None and dc >= -0.01})")
     for c in sc.get("literature", []):
         block(f"LITERATURE vs {c['against']}", c)
     block("MATCHED DELTA", sc["matched_delta"])
     for c in sc.get("eq17_direct_fast_weight", []):
         block("TSS Eq.(17) direct fast weight (applicability-limited)", c)
     block("HEAVY-BALL family (not causal attribution)", sc["heavy_ball_family"])
+
+    print("\n--- validation gain (update 0 -> 200), final runs, and cost ---")
+    for a in ARMS:
+        for s in seeds:
+            r = by[(a, s)]
+            v0, v1 = r["validation"][0], r["validation"][-1]
+            print(f"  {a:<22} {s} primary {v0['primary']:.4f} -> "
+                  f"{v1['primary']:.4f} (gain {r['training_gain']['primary']:+.4f})"
+                  f"  revCE {v0['revision_ce']:.4f} -> {v1['revision_ce']:.4f}"
+                  f"  retention {v0['retention']:.4f} -> {v1['retention']:.4f}"
+                  f"  recall {v0['recall']:.4f} -> {v1['recall']:.4f}"
+                  f"  params {r['params']['total']} carry {r['carry']} "
+                  f"wall {r['wall_s']:.1f}s lr {r['lr']} config {r['config']}")
+    pf = st.get("preflight", {})
+    for row in pf.get("rows", []):
+        print(f"  preflight {row['rule']:<22} step {row['step_s']*1e3:.2f}ms "
+              f"eval {row['eval_s']*1e3:.1f}ms compile "
+              f"{row['compile_s_incurred']:.1f}s")
 
     print("\n--- learned coefficients (final seeds) ---")
     for a in ARMS:
