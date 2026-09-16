@@ -70,10 +70,16 @@ if [ "$rc" -ne 0 ]; then finish FAILED 4 "backend is not gpu (raw exit $rc)"; fi
 LEFT=$(( $(remaining) - RESERVE_S ))
 [ "$LEFT" -gt 30 ] || finish INCOMPLETE 3 "no time for the focused checks"
 rc=0
+# every measured numerical error is recorded, pass or fail: pytest shows
+# captured stdout only for FAILING tests, so passing margins were invisible
+export ADAPTIVE_CHECK_RECORD="$LOG_DIR/measured_errors.tsv"
+: > "$ADAPTIVE_CHECK_RECORD"
 timeout --kill-after=10 --signal=TERM "${LEFT}s" \
   "$PY" -u -m pytest tests/test_adaptive_memory.py -q --durations=10 \
   > "$LOG_DIR/checks.log" 2>&1 || rc=$?
 echo "--- focused checks ---"; tail -30 "$LOG_DIR/checks.log"
+echo "--- measured numerical errors (all cases, pass or fail) ---"
+sort -k1,1 -k3,3gr "$ADAPTIVE_CHECK_RECORD" 2>/dev/null | head -40 || true
 echo "checks raw exit: $rc  (elapsed $(( $(date +%s) - START ))s)"
 if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
   finish INCOMPLETE 3 "focused checks hit the deadline"

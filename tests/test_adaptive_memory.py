@@ -54,6 +54,27 @@ from experiments.nested_memory import dynamics as ND               # noqa: E402
 from experiments.nested_memory import model as NM                  # noqa: E402
 from experiments.nested_memory import task as TK                   # noqa: E402
 
+def _record(kind, name, value, tol):
+    """Append a measured numerical error to the run's record, if one is set.
+
+    pytest captures stdout and shows it only for FAILING tests, so the numbers
+    from passing cases were invisible in the first dispatch - which is exactly
+    why one case's margin could not be explained afterwards. The review asked
+    for quantitative errors to be RECORDED; this writes every measurement,
+    pass or fail, to a file the launcher prints.
+    """
+    print(f"  {kind} {name:<24} {value:.3e}  (tol {tol:.1e})")
+    path = os.environ.get("ADAPTIVE_CHECK_RECORD")
+    if not path:
+        return
+    try:
+        with open(path, "a") as fh:
+            fh.write(f"{kind}\t{name}\t{value:.6e}\t{tol:.1e}\t"
+                     f"{'ok' if value < tol else 'FAIL'}\n")
+    except OSError:
+        pass
+
+
 EXACT64, TRAJ32, GRAD64, NEAR64 = 1e-9, 2e-5, 1e-6, 1e-9
 GRAD32, NEAR32, IDENT64, REPRO64 = 2e-2, 3e-3, 1e-10, 1e-10
 STREAM32, CAL_TOL, NU_TOL = 2e-5, 1e-10, 1e-8
@@ -183,7 +204,7 @@ def test_the_exact_step_holds_over_a_64_token_float32_trajectory(case):
         assert W32.dtype == onp.float32 and Z32.dtype == onp.float32
         worst = max(worst, onp.abs(W32 - W64).max()
                     / max(1.0, onp.abs(W64).max()))
-    print(f"  {kind} 64-token float32 vs float64 dense: {worst:.3e}")
+    _record("traj_f32", f"{kind}_{case}", worst, TRAJ32)
     assert worst < TRAJ32, (kind, worst)
 
 
@@ -227,7 +248,7 @@ def test_expm2_matches_scipy_in_float64_with_recorded_error(name, G):
     got = onp.asarray(AD.expm2(jnp.asarray(G)))
     assert onp.all(onp.isfinite(got)), (name, got)
     err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
-    print(f"  expm2 f64 {name:<22} rel {err:.3e}")
+    _record("expm2_f64", name, err, EXACT64)
     assert err < EXACT64, (name, err, got, ref)
 
 
@@ -241,7 +262,9 @@ def test_expm2_does_not_overflow_in_float32(name, G):
     assert got.dtype == onp.float32
     assert onp.all(onp.isfinite(got)), (name, "overflow", got)
     err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
-    print(f"  expm2 f32 {name:<22} rel {err:.3e}")
+    _record("expm2_f32", name, err, TRAJ32)
+    # the dominant eigenvalue must come from the product relation, not from
+    # the cancelling sum s + a; a regression here is a numerics defect
     assert err < TRAJ32, (name, err)
 
 
@@ -256,8 +279,7 @@ def test_expm2_is_accurate_on_both_sides_of_the_actual_series_switch(dt):
         assert got.dtype == dt
         err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
         tol = EXACT64 if dt is onp.float64 else TRAJ32
-        print(f"  switch {onp.dtype(dt).name} {name:<20} m={m:+.3e} "
-              f"rel {err:.3e}")
+        _record(f"switch_{onp.dtype(dt).name}", f"{name}_m{m:+.2e}", err, tol)
         assert err < tol, (dt, name, m, err)
 
 
@@ -323,7 +345,7 @@ def test_expm2_on_the_stable_shifted_family_matches_scipy(m):
     assert onp.all(onp.isfinite(ref)), (m, "the fixture must be representable")
     got = onp.asarray(AD.expm2(jnp.asarray(G)))
     err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
-    print(f"  shifted m={m:+.1e} rel {err:.3e}")
+    _record("shifted_f64", f"m{m:+.1e}", err, EXACT64)
     assert err < EXACT64, (m, err)
 
 
@@ -1056,7 +1078,7 @@ def test_the_TSS_step_holds_over_a_64_token_float32_trajectory(case):
         assert W32.dtype == onp.float32 and P32.dtype == onp.float32
         worst = max(worst, onp.abs(W32 - W64).max()
                     / max(1.0, onp.abs(W64).max()))
-    print(f"  TSS {c} 64-token float32: {worst:.3e}")
+    _record("traj_f32", f"tss_{case}", worst, TRAJ32)
     assert worst < TRAJ32, (c, worst)
 
 

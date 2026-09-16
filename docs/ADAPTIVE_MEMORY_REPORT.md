@@ -127,6 +127,70 @@ fourteen development slots, the calibration algorithm and target, the training
 schedule, the named streams, the two screens, and the frozen tolerances and
 finite-difference steps.
 
+## Dispatch 1 — `580913d`: FAILED at the checks, no training
+
+| | |
+|---|---|
+| host | `pgi15-gpu3`, RTX 3090, SLURM 66010, jax 0.11.0, backend `gpu` |
+| commit | `580913df691464c236353889a877f25ba026599b` |
+| status | `ADAPTIVE_STATUS=FAILED`, `ADAPTIVE_EXIT=4` — focused checks did not pass |
+| result | **1 failed, 189 passed in 200.6 s**; 204 s of 600 elapsed. No calibration, no preflight, **no training**. |
+| logs | `/Users/durso/s5-runs/adaptive-memory/logs/20260916-150404/` (preserved) |
+| artifacts | `/Users/durso/s5-runs/adaptive-memory/20260916-150404/` |
+
+The single failure:
+
+```
+test_expm2_does_not_overflow_in_float32[stiff_prospective-G7]
+  expm2 f32 stiff_prospective      rel 1.049e-04
+  assert 1.049e-04 < 2e-05
+```
+
+This is the guard working as intended. It is a genuine float32 accuracy defect
+in the production exponential, not a bad tolerance, and it was caught before
+any training ran.
+
+### Cause
+
+`stiff_prospective` is the prospective generator at `ν = e⁹ ≈ 8103`,
+`τ = ρ = 3/4`, `w = 1`. Its eigenvalues are `−0.99996` and `−8103.42`. The
+revised `expm2` folds the trace inside the hyperbolic functions and forms the
+eigenvalues as `s ± a` with `s = −4052.209` and `a = 4051.209`. The near-zero
+eigenvalue is therefore a **catastrophic cancellation**: two quantities of
+magnitude ~4052 producing ~1, which discards `log₂(4052) ≈ 12` of float32's 24
+bits and leaves a relative error of ~`2⁻¹²  = 2.4e−4` in `e^{s+a}`.
+
+On the `O(0.368)` entry that predicts an absolute error of **8.9e−5**. The
+cluster measured **1.049e−4**. The diagnosis is arithmetic, and the R4 fix
+removed the *overflow* hazard without removing this *cancellation* hazard.
+
+### Correction
+
+The standard stable-quadratic-root remedy, applied to the real-eigenvalue
+branch only: form the **large-magnitude** eigenvalue by adding same-sign terms
+(`λ_far = s + sign(s)·a`, never a cancellation), then recover the near-zero one
+from the exact product relation `λ₊λ₋ = det(hG)`, which never subtracts.
+`|λ_far| = |s| + a ≥ a > 0` in that branch, so the division is safe, and it
+remains safe in the inactive branch where the guarded `s` is 0 and `a` is 1.
+
+Predicted post-fix error for this case: ~1e−6, comfortably inside the
+unchanged `TRAJ32 = 2e−5`. **No tolerance was relaxed, no case removed, no
+coefficient clamped and no equation, arm, seed, schedule or cap changed.** The
+formulation is identical in exact arithmetic.
+
+### An open point I could not settle from the log
+
+`grid_top_prospective` (`ν = e¹²`, *more* extreme, with the same eigenvalue
+structure and ~16 bits lost) **passed**. My error model says it should have
+failed by a wider margin than the case that did fail, so the model is
+incomplete somewhere. I have not invented an explanation for it.
+
+Because pytest shows captured stdout only for failing tests, the passing
+cases' measured errors were invisible in this dispatch — which is precisely
+why the question is open. The checks now append **every** measured error, pass
+or fail, to `measured_errors.tsv` in the log directory, and the launcher
+prints it. The next dispatch settles this from data rather than from argument.
+
 ## Results
 
 *(empty — to be filled from cluster output)*

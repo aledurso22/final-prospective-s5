@@ -103,12 +103,15 @@ def expm2(G, h=H):
     The trace factor is therefore folded INSIDE the hyperbolic functions,
     giving the eigenvalues `s +- a` of `hG` directly:
 
-        m >  switch:  C = (e^{s+a} + e^{s-a})/2 ,  S = (e^{s+a} - e^{s-a})/(2a)
+        m >  switch:  C = (e^{L+} + e^{L-})/2 ,  S = (e^{L+} - e^{L-})/(2a)
         m < -switch:  C = e^{s} cos(b) ,           S = e^{s} sin(b)/b
         |m| <= switch: the series in `m`, times `e^{s}`
 
-    and `exp(hG) = C I + h S N`. For a stable generator `s + a <= 0`, so every
-    exponent above is non-positive and nothing overflows. Every one of our
+    and `exp(hG) = C I + h S N`, where `L+- = s +- a` are the eigenvalues of
+    `hG`. For a stable generator `s + a <= 0`, so every exponent above is
+    non-positive and nothing overflows. The near-zero eigenvalue is obtained
+    from `L+ L- = det(hG)` rather than from `s + a`, because that sum is a
+    catastrophic cancellation whenever the eigenvalues are widely separated. Every one of our
     generators has `t <= 0`: prospective `-nu w - 1/tau`, inertial `-1/tau`,
     TSS `-T w/M`, and the idle limits of each.
 
@@ -137,7 +140,26 @@ def expm2(G, h=H):
     # the trace is guarded too, so a huge `s` in an INACTIVE branch cannot
     # produce an Inf that `where` would later multiply by a zero cotangent
     s_pos = jnp.where(big_pos, s, jnp.zeros_like(s))
-    ep, em = jnp.exp(s_pos + a), jnp.exp(s_pos - a)
+    # `s + a` is a CANCELLATION when the eigenvalues are widely separated: it
+    # forms the near-zero eigenvalue as a sum of two large opposite-sign
+    # quantities. For the prospective generator at nu = e^9 that cancels
+    # ~4052 down to ~1, discarding 12 of float32's 24 bits and leaving a
+    # relative error of ~2.4e-4 in e^{s+a} - which the cluster measured as
+    # 1.05e-4 on the whole matrix.
+    #
+    # Same remedy as the stable quadratic formula: form the LARGE-magnitude
+    # eigenvalue by adding same-sign terms, then recover the near-zero one
+    # from the exact product relation `lam_+ lam_- = det(hG)`, which never
+    # subtracts. `|lam_far| = |s| + a >= a > 0` in this branch, so the
+    # division is safe, and it stays safe in the inactive branch where
+    # `s_pos = 0` and `a = 1`.
+    det_h = (h * h) * (g11 * g22 - g12 * g21)
+    sgn = jnp.where(s_pos >= 0, one, -one)
+    lam_far = s_pos + sgn * a
+    lam_near = det_h / lam_far
+    lam_hi = jnp.where(sgn > 0, lam_far, lam_near)          # = s + a
+    lam_lo = jnp.where(sgn > 0, lam_near, lam_far)          # = s - a
+    ep, em = jnp.exp(lam_hi), jnp.exp(lam_lo)
     C_real, S_real = 0.5 * (ep + em), 0.5 * (ep - em) / a
 
     # complex-conjugate poles: cos and sin are bounded, so e^{s} is safe
