@@ -18,7 +18,8 @@
 # orphaned descendants as a child subreaper. GNU `timeout` is no longer used:
 # it stops supervising once its direct child is reaped.
 #
-# Requires: DEADLINE, LOG_DIR, SOURCE_DIR, PY. Optional: PM_SUPERVISOR.
+# Requires: DEADLINE, LOG_DIR, SOURCE_DIR, PY. Optional: PM_SUPERVISOR,
+# PM_DIGEST_MODULE (digest entry point), pm_extra_verify (extra integrity).
 
 PM_GRACE_S=5
 PM_VERIFY_END=20
@@ -86,7 +87,7 @@ pm_digest() {
   term_at=$(( DEADLINE - PM_DIGEST_END ))
   [ $(( term_at - $(date +%s) )) -gt "$PM_DIGEST_MAX" ] && \
     term_at=$(( $(date +%s) + PM_DIGEST_MAX ))
-  pm_bounded "$term_at" 1 "$PY" -u -m experiments.prospective_momentum.summary \
+  pm_bounded "$term_at" 1 "$PY" -u -m "${PM_DIGEST_MODULE:-experiments.prospective_momentum.summary}" \
     "$run_dir" > "$LOG_DIR/digest.txt" 2>&1
   case "$PM_OUTCOME" in
     completed) if [ "$PM_RC" = "0" ]; then PM_DIGEST="complete"
@@ -125,6 +126,9 @@ pm_terminal() {
 pm_finish() {
   local run_dir=$1 stage=$2 s_outcome=$3 s_rc=$4
   pm_verify_source
+  # a study may add its own integrity verification (it can only WORSEN
+  # PM_INTEGRITY_RC); undefined for every earlier study
+  if declare -F pm_extra_verify > /dev/null; then pm_extra_verify "$run_dir"; fi
   pm_digest "$run_dir"
   pm_terminal "$run_dir" "$stage" "$s_outcome" "$s_rc"
   echo "PROSPECTIVE_MOMENTUM_STATUS=$PM_LABEL"

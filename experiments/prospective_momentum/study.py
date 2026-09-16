@@ -179,10 +179,14 @@ def eval_batch(rule, p, eps):
 SCALAR_NAMES = MS.SCALAR_NAMES
 
 
-def host_step(rule, p, opt, seed, u, lr, hist):
+def host_step(rule, p, opt, seed, u, lr, hist, stream=None):
     """ONE shared host step, used by training AND by the preflight timing, so
     the measured cost includes every host synchronization of a real update."""
-    eps = to_jax(TK.generate_batch(train_stream_seed(seed, u),
+    # `stream` (default: this study's continuation stream) lets the
+    # independent-source replication reuse this exact step on its own named
+    # streams; the completed study's behaviour is unchanged.
+    stream = train_stream_seed if stream is None else stream
+    eps = to_jax(TK.generate_batch(stream(seed, u),
                                    BATCH_PER_FAMILY))
     o = train_step(rule, p, opt, eps, lr)
     p, opt, tel = o[0], o[1], o[8]
@@ -365,7 +369,8 @@ def summarize_history(hist, rule):
 
 # --------------------------------------------------------------- one run ---
 def run_one(rule, tag, lr_value, seed, source_p, val_np, updates, out,
-            deadline, reserve_s, status, stage):
+            deadline, reserve_s, status, stage, stream=None,
+            source_label=None):
     lr = jnp.asarray(lr_value, dtype=jnp.float32)
     p = dict(source_p)                        # a restart from the source
     opt = TX.init(p)                          # optimizer state reset
@@ -388,7 +393,8 @@ def run_one(rule, tag, lr_value, seed, source_p, val_np, updates, out,
                 f"{stage}:{rule}/{tag}/seed{seed} stopped at update {u} of "
                 f"{updates}")
             return None
-        p, opt, last = host_step(rule, p, opt, seed, u, lr, hist)
+        p, opt, last = host_step(rule, p, opt, seed, u, lr, hist,
+                                 stream=stream)
         if u % 50 == 0 or u == updates - 1:
             curve.append(dict(update=u, **last))
     final = val_hist[-1]["full"]
@@ -405,7 +411,9 @@ def run_one(rule, tag, lr_value, seed, source_p, val_np, updates, out,
     save_tree(os.path.join(out, "params", stem + ".msgpack"), p)
     save_tree(os.path.join(out, "params", stem + "_opt.msgpack"), opt)
     rec = dict(tag=stage, rule=rule, display=PD.DISPLAY[rule], config=tag,
-               lr=lr_value, seed=seed, source=SRC.stem(SRC.SOURCE_RULE[rule]),
+               lr=lr_value, seed=seed,
+               source=(source_label if source_label is not None
+                       else SRC.stem(SRC.SOURCE_RULE[rule])),
                wall_s=time.time() - t0, curve=curve,
                validation=[{k: v for k, v in h.items() if k != "full"}
                            for h in val_hist],
@@ -584,7 +592,7 @@ def select(dev_rows, status):
 
 
 # ---------------------------------------------------------------- screens ---
-def compare(final_rows, cand, other):
+def compare(final_rows, cand, other, seeds=None):
     def per_seed(rule, key):
         return {r["seed"]: r["heldout"][key] for r in final_rows
                 if r["rule"] == rule}
@@ -593,8 +601,9 @@ def compare(final_rows, cand, other):
         return float(onp.mean(list(per_seed(rule, key).values())))
     a, b = per_seed(cand, "primary"), per_seed(other, "primary")
     paired = {s: a[s] - b[s] for s in sorted(a) if s in b}
-    complete = (set(paired) == set(FINAL_SEEDS)
-                and len(a) == len(FINAL_SEEDS) and len(b) == len(FINAL_SEEDS))
+    seeds = FINAL_SEEDS if seeds is None else tuple(seeds)
+    complete = (set(paired) == set(seeds)
+                and len(a) == len(seeds) and len(b) == len(seeds))
     dm = (mean(cand, "primary") - mean(other, "primary")) if complete else None
     d_ret = (mean(cand, "retention_revision_untouched")
              - mean(other, "retention_revision_untouched")) if complete else None
@@ -610,7 +619,7 @@ def compare(final_rows, cand, other):
                 passed=bool(complete and dm >= 0.01 and positive and safe))
 
 
-def screen(final_rows):
+def screen(final_rows, seeds=None):
     """Separate verdicts; none substitutes for another.
 
     * literature: the candidate against BOTH Momentum DeltaNet and Gated
@@ -621,10 +630,10 @@ def screen(final_rows):
       substitutes for the literature screen.
     No favourable category substitutes for the primary metric."""
     cand = "prospective_momentum"
-    lit = [compare(final_rows, cand, o) for o in PD.LITERATURE]
-    gain = compare(final_rows, cand, "gain_momentum")
-    old = compare(final_rows, cand, "gp_two_sided")
-    tss = compare(final_rows, cand, "tss_eq17")
+    lit = [compare(final_rows, cand, o, seeds) for o in PD.LITERATURE]
+    gain = compare(final_rows, cand, "gain_momentum", seeds)
+    old = compare(final_rows, cand, "gp_two_sided", seeds)
+    tss = compare(final_rows, cand, "tss_eq17", seeds)
     return dict(
         candidate=cand,
         rule=("mean primary difference >= +1 pp; all three paired primary "
