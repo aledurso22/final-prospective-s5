@@ -175,6 +175,20 @@ Nothing has been rerun.
    same tolerance. It separates an algebraic disagreement from accumulated
    trajectory rounding.
 
+**Original traceback** (dispatch 1 `checks.log`, now read):
+
+```
+AssertionError: 28
+assert 1.0464962230116726e-12 < 1e-12
+|s_a_next - s_b_next| per component at step 28:
+  [1.29e-13, 8.22e-13, 9.00e-13, 9.41e-13, 1.05e-12]
+states agree to all printed digits:
+  [-0.5300063, 0.11986434, -0.1773974, 0.12958315, 0.90649948]
+```
+
+Steps 0 to 27 passed, so the discrepancy crossed the 1e-12 tolerance at step
+28 of 40, by 4.6 %. This is a measurement, not a cause.
+
 **Diagnosis status: UNRESOLVED.** The cause of dispatch 1's Eq. (17) failure
 is not established. The shared previous-drive defect may by itself explain the
 threshold crossing, as may accumulated rounding, or both. No cause is recorded
