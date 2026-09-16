@@ -1,7 +1,7 @@
 # Stable generalized prospective continuation — report
 
-**Status: implemented, amended per static review of `97cedfa` (R0–R4),
-awaiting static review of the correction. Not executed.**
+**Status: implemented, amended per static reviews of `97cedfa` (R0–R4) and
+`e2c5b2f` (F1–F2), awaiting static confirmation. Not executed.**
 
 No check, restore, calibration or training for this study has run anywhere.
 Local work was limited to editing, `ast` syntax checks, and static audits of
@@ -71,6 +71,18 @@ protocol §13.
 | **R2** | Missing `r`-only check at the start; the shared-leaf comparison omitted `q`; purely relative identity undefined on null-direction leaves; update gate conflated rounding with routing | Implementation | `r`-only JVP vs FD at the start in both dtypes, and `dt ≈ 0`. Pair-specific shared leaves plus input gradients. Mixed absolute/relative criterion with published fixtures, including the training-mode encoder-bias null direction. Routing identity with copied gradients; independent first updates reported only |
 | **R3** | Preflight timed a resident batch, not the training host path; epoch records were lost on a stop | Implementation | Shared `step_loop` timed as executed; validation, acceptance/persistence and final serialization/diagnostics timed separately; every epoch persisted immediately |
 | **R4** | Validation used float64 reconstructions that could hide executed overflow or underflow; B's `T_in` unchecked; acceptance checked only losses | Implementation | Executed-dtype products and generator entries checked first; formula and executed-generator eigenvalues assessed separately; B covered; per-epoch finiteness of parameters, optimizer state, normalization state and scalars; executed coefficients recorded |
+
+### Static review of `e2c5b2f` — dispositions (protocol §14)
+
+| | Finding | Disposition |
+|---|---|---|
+| **F1** | The domain validator hand-built the generator instead of using the executed one; `S` finiteness was not required; real modes were classified by `rho_max` finiteness | `executed_generator` uses the production `mass_block_generator` with the forward pass's clip, clock and coefficients; eigenvalues are taken from it; the formula diagnostic is kept separately; finite `S` is required; classification is by `omega == 0`; float32 fixture checks bitwise equality with the module's `coefficients()["A"]` |
+| **F2** | Preflight ran acceptance on zeroed metrics and discarded the verdict | Actual measured metrics are accepted and persisted; timing must be finite and nonnegative; `decide_after_preflight` returns FAILED for invalid state and INCOMPLETE for retrace or over-budget; `execute_screen` enforces it before `run_one`; stub fixture proves the stop and a positive control |
+| Cleanup | Stale `T = 5 exp(t)` docstring; "frozen-extra" wording | Corrected to `T = 10 exp(t)` and copied-gradient routing |
+
+Scope recorded: the float32 FD constants are production smoke checks, and the
+mixed gradient criterion is reported as "within the mixed tolerance", given its
+float32 per-leaf absolute floor of about `1.19e-4 G_ref`.
 
 The equation, three arms, source checkpoint, schedule, performance criteria and
 1200 s cap are unchanged.

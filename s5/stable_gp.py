@@ -213,6 +213,28 @@ def project_stable_domain(params):
     return unflatten_dict(out), tel
 
 
+def executed_generator(lv):
+    """The PRODUCTION block generator for one layer (review F1).
+
+    Built with exactly the forward pass's own construction: S5SSM's
+    `clip(Lambda_re, None, -1e-4) + 1j Lambda_im`, SubstrateSSM's
+    `Delta = step_rescale * exp(log_step[:, 0])` with step_rescale = 1.0, the
+    clock-absorbed pole `a = Lambda Delta`, and `mass_block_generator` with
+    gamma = ones_like(rho), rho = exp(r), T = 10 exp(t). A dummy input matrix
+    stands in for b because only A is needed; no matrix exponential is formed.
+    Returns (A, j_re, j_im, rho, T) in the executed dtypes.
+    """
+    from .gp_fixed import mass_block_generator
+    Lambda = jnp.clip(lv["Lambda_re"], None, POLE_CLIP) + 1j * lv["Lambda_im"]
+    Delta = 1.0 * jnp.exp(lv["log_step"][:, 0])
+    a_code = Lambda * Delta
+    rho = jnp.exp(lv[LEAF_RHO])
+    T = RECURRENT_T_REFERENCE * jnp.exp(lv[LEAF_T])
+    b_dummy = jnp.ones((a_code.shape[0], 1), dtype=a_code.dtype)
+    A, _ = mass_block_generator(a_code, b_dummy, T, jnp.ones_like(rho), rho)
+    return A, -a_code.real, -a_code.imag, rho, T
+
+
 def executed_domain_report(params):
     """Validate the EXECUTED arithmetic, then assess it in float64 (review R4).
 
@@ -246,16 +268,11 @@ def executed_domain_report(params):
                          passed=good))
     for prefix, lv in c_layers.items():
         dt = lv[LEAF_RHO].dtype
-        rho_e = jnp.exp(lv[LEAF_RHO])
-        T_e = RECURRENT_T_REFERENCE * jnp.exp(lv[LEAF_T])
+        # F1: the production generator itself, never a hand reconstruction
+        A_j, a_e, w_e, rho_e, T_e = executed_generator(lv)
+        A_e = onp.asarray(A_j)
         M_e = rho_e * T_e
         T_in_e = INPUT_T_REFERENCE * jnp.exp(lv[LEAF_T_IN])
-        a_e, w_e = modal_j(lv["Lambda_re"], lv["Lambda_im"], lv["log_step"])
-        j_e = a_e + 1j * w_e
-        A_e = onp.asarray(jnp.stack([
-            jnp.stack([-j_e / rho_e, -((1.0 - rho_e) / rho_e) + 0j], -1),
-            jnp.stack([-j_e / (rho_e * T_e), -(1.0 / (rho_e * T_e)) + 0j], -1),
-        ], -2))
         rho, T, M, T_in = (onp.asarray(v) for v in (rho_e, T_e, M_e, T_in_e))
         a, omega = onp.asarray(a_e), onp.asarray(w_e)
 
@@ -271,14 +288,19 @@ def executed_domain_report(params):
             rmax = rho_max_float64(a64, w64, T64)
             ev = (onp.linalg.eigvals(A_e.astype(onp.complex128))
                   if executed_ok else onp.full((rho.size, 2), onp.nan))
-        formula_ok = bool(executed_ok and onp.all(S > 0)
-                          and onp.all(rho64 < rmax))
+        # S must be FINITE before S > 0 is accepted (R4/F1)
+        cplx = omega != 0          # classification by omega, not by rho_max
+        formula_ok = bool(executed_ok and onp.all(onp.isfinite(S))
+                          and onp.all(S > 0)
+                          and onp.all(~cplx | (rho64 < rmax)))
         max_re = onp.max(ev.real, axis=-1)
         eig_ok = bool(executed_ok and onp.all(onp.isfinite(max_re))
                       and onp.all(max_re < 0))
-        cplx = onp.isfinite(rmax)
-        rel = onp.where(cplx, (rmax - rho64) / onp.where(cplx, rmax, 1.0),
-                        onp.inf)
+        with onp.errstate(all="ignore"):
+            rel = onp.where(cplx & onp.isfinite(rmax),
+                            (rmax - rho64) / onp.where(onp.isfinite(rmax),
+                                                       rmax, 1.0),
+                            onp.nan)
         ok_layer = executed_ok and formula_ok and eig_ok
         ok = ok and ok_layer
         rows.append(dict(
@@ -288,9 +310,12 @@ def executed_domain_report(params):
             rho=_stats(rho), T=_stats(T), M=_stats(M), T_in=_stats(T_in),
             n_passive_rho_le_1=int(onp.sum(rho <= 1.0)),
             min_S=float(onp.min(S)) if executed_ok else None,
-            min_relative_margin_complex=(float(onp.min(rel[cplx]))
-                                         if (executed_ok and cplx.any())
-                                         else None),
+            min_relative_margin_complex=(
+                float(onp.nanmin(rel[cplx]))
+                if (executed_ok and cplx.any()
+                    and onp.isfinite(rel[cplx]).any()) else None),
+            n_complex_with_nonfinite_rho_max_report=int(
+                onp.sum(cplx & ~onp.isfinite(rmax))),
             max_real_part_executed_generator=(float(onp.max(max_re))
                                               if eig_ok or executed_ok
                                               else None),
@@ -298,7 +323,8 @@ def executed_domain_report(params):
             formula_stable=formula_ok, executed_generator_stable=eig_ok,
             passed=ok_layer))
     return dict(layers=rows, passed=ok,
-                scope=("executed-dtype arithmetic checked first; the formula "
+                scope=("PRODUCTION generator (mass_block_generator) and "
+                       "executed-dtype arithmetic checked first; the formula "
                        "diagnostic and the executed-generator eigenvalues are "
                        "assessed separately in float64; passive subdomain is "
                        "rho <= 1"))

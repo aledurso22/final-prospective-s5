@@ -10,7 +10,7 @@ PREDECLARED TOLERANCES (frozen before any execution):
     COEF64   1e-10   relative: production two-tap block vs independent reference
     IDENT64  1e-9    relative: arm identities (logits, layer outputs)
     GRAD64   1e-8    relative per leaf: shared-parameter and input gradients
-    UPD64    1e-8    max |u_x - u_ref| / lr: first update, added leaves frozen
+    UPD64    1e-8    max |u_x - u_ref| / lr: copied-gradient routing identity
     FD64     1e-6    relative: JVP vs central differences at BOTH h = 1e-5, 1e-6
     ZEROT64  1e-9    |dL/dt| relative to |dL/dq| at rho = 1
     STREAM64 1e-10   relative: chunked carries and resets vs one call
@@ -433,7 +433,7 @@ def test_streaming_carries_and_resets_clear_BOTH_state_and_delayed_input(arm):
 
 
 # =========================================================================
-#  4. Full network: logits, gradients, a real tangent, frozen-extra updates
+#  4. Full network: logits, gradients, a real tangent, copied-gradient routing
 # =========================================================================
 def _net(arm, P=4, H=6, L=20, seed=0, dt=onp.float64):
     from s5.rawat_model import RawatClassifier
@@ -796,6 +796,67 @@ def test_R4_validation_detects_executed_overflow_a_float64_product_hides():
     rb = SG.executed_domain_report(btree)
     assert rb["passed"] is False and rb["layers"][0]["kind"] == \
         "input_horizon_only"
+
+
+# =========================================================================
+#  4c. Review F1-F2
+# =========================================================================
+def test_F1_validator_generator_is_the_modules_executed_generator():
+    """The validator's generator must be the bound module's own
+    `coefficients()["A"]`, bitwise, in production float32 with nonzero r, t."""
+    rs = onp.random.RandomState(41)
+    ssm = init_substrate_ssm("sgp_learned_input", **_ssm_kwargs(4, 6))()
+    x = np.asarray(onp.random.RandomState(0).randn(12, 6), onp.float32)
+    params = _cast(ssm.init(jax.random.PRNGKey(0), x)["params"], onp.float32)
+    params = _set(params, SG.LEAF_T, lambda i, v: rs.uniform(-1, 1, 4))
+    params = _set(params, SG.LEAF_RHO, lambda i, v: rs.uniform(-0.8, 0.3, 4))
+    params = _set(params, SG.LEAF_T_IN, lambda i, v: rs.uniform(-1, 1, 4))
+    A_mod = onp.asarray(ssm.apply({"params": params},
+                                  method=lambda m: m.coefficients()["A"]))
+    A_val, a_re, a_im, rho, T = SG.executed_generator(params)
+    assert A_mod.dtype == onp.asarray(A_val).dtype
+    assert onp.array_equal(A_mod, onp.asarray(A_val))
+    rep_ = SG.executed_domain_report({"layer": params})
+    assert rep_["layers"][0]["kind"] == "stable_generalized"
+    assert "PRODUCTION generator" in rep_["scope"]
+
+
+def test_F2_invalid_preflight_cannot_reach_run_one(tmp_path, monkeypatch):
+    """A stubbed invalid acceptance, a non-finite projection, a retrace and an
+    over-budget projection must all stop BEFORE run_one; a valid, fitting
+    projection must reach it (positive control)."""
+    import time
+    from experiments.gp import stable_gp_study as ST
+
+    class Reached(Exception):
+        pass
+
+    def boom(*a, **k):
+        raise Reached()
+    monkeypatch.setattr(ST, "run_one", boom)
+
+    def stub(result):
+        return lambda *a, **k: result
+
+    cases = [((10.0, False, ["A_rawat: preflight acceptance failed "
+                             "{'scalars_finite': False}"]), (4, "FAILED")),
+             ((float("nan"), False, []), (4, "FAILED")),
+             ((-1.0, False, []), (4, "FAILED")),
+             ((10.0, True, []), (3, "INCOMPLETE")),
+             ((1e9, False, []), (3, "INCOMPLETE"))]
+    for pre, want in cases:
+        status = dict(incomplete=[], results=[])
+        got = ST.execute_screen(None, None, None, 1, str(tmp_path),
+                                time.time() + 600, 40, status, {},
+                                preflight_fn=stub(pre))
+        assert got == want, (pre, got)
+        if want[0] == 4:
+            assert status.get("failed")
+    status = dict(incomplete=[], results=[])
+    with pytest.raises(Reached):
+        ST.execute_screen(None, None, None, 1, str(tmp_path),
+                          time.time() + 600, 40, status, {},
+                          preflight_fn=stub((10.0, False, [])))
 
 
 # =========================================================================

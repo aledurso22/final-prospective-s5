@@ -8,8 +8,8 @@ identities at the study's OWN declared gate tolerances.
      updates to poles/clock/T, and P != H; every projected point must pass the
      float64 evaluation of its EXECUTED float32 coefficients.
   2. Full-network B(q=0) vs A and C(r=0, q, t) vs B(q): logits, shared
-     gradients and first updates with added leaves frozen, at LOGIT_REL_TOL,
-     GRAD_REL_TOL and UPDATE_MAX_TOL from the study.
+     gradients within the mixed absolute/relative tolerance, and the
+     copied-gradient optimizer-routing identity, at the study's declared gates.
   3. The T derivative is available away from rho = 1.
 
 AMENDED BEFORE EXECUTION (review of 97cedfa):

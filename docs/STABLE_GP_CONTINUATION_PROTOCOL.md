@@ -1,8 +1,8 @@
 # Stable generalized prospective continuation — frozen protocol
 
 **Frozen before any execution. Amended before any execution by the static
-review of `97cedfa` — see §13, which supersedes the corresponding passages
-below.** Nothing in this study has run anywhere — no
+review of `97cedfa` — see §13 — and of `e2c5b2f` — see §14. Those sections
+supersede the corresponding passages below.** Nothing in this study has run anywhere — no
 check, calibration, restore or training, on the cluster or locally. Local work
 was limited to editing, `ast` syntax checks and static symbol/signature audits.
 
@@ -179,7 +179,7 @@ module headers.
 | Streaming carries and resets clear state **and** delayed input, for B and C | f64 | 1e-10 rel |
 | Full network nesting A < B < C: logits, input and every shared gradient | f64 | 1e-9 / 1e-8 |
 | Nonzero (q, r, t) tangent vs central differences at h = 1e-5 **and** 1e-6; T derivative nonzero away from rho = 1 | f64 | 1e-6 rel |
-| First common update with added leaves **frozen** agrees; optimizer labels | f64 | 1e-8 of lr |
+| Copied-gradient optimizer-routing identity (extra leaves frozen); optimizer labels (§13 R2) | f64 | 1e-8 of lr |
 | Real update drives r outward, projection restores the domain, gradient still finite | f64 | domain |
 | Checkpoint round trip reproduces logits | f64 | bitwise |
 | Source selection applies the original rule; screen requires both baselines, every stream, lower CE, complete pairs | host | exact |
@@ -214,7 +214,7 @@ module headers.
   and batch-statistics digests must be identical across arms.
 * **Before any arm trains**, all on production float32 on the GPU:
 
-| Pair | Logits (256 validation probes, rel) | Common gradients (per leaf, rel) | First common update, added leaves frozen (max / lr) |
+| Pair | Logits (256 validation probes, rel) | Shared gradients (mixed abs/rel, §13 R2) | Copied-gradient routing (max / lr) |
 |---|---|---|---|
 | B(q=0) vs A | ≤ 5e-4 | ≤ 2e-3 | ≤ 2e-3 |
 | C(r=0) vs B | ≤ 5e-4 | ≤ 2e-3 | ≤ 2e-3 |
@@ -304,8 +304,8 @@ to end; the tail beyond the window is not bounded.
 
 **Checked, on execution:** the domain against executed eigenvalues, the
 projection, the float32 interior, the exact nesting in value and gradient, the
-transfer factorization, streaming and resets, the tangent, frozen-extra
-updates, the Eq. (17) recovery, the source reproduction and the identity gate.
+transfer factorization, streaming and resets, the tangent, copied-gradient
+routing, the Eq. (17) recovery, the source reproduction and the identity gate.
 
 **Analytical only:** stability for the constant diagonal core. This does **not**
 extend to the nonlinear network, to coefficients that change between
@@ -493,3 +493,69 @@ optimum, or that held-out accuracy improves. No new observations or future
 information enter the network. Larger general SSMs can represent such rational
 responses, so an equal-capacity control remains necessary for any attribution
 claim.
+
+
+## 14. Pre-execution amendments — static review of `e2c5b2f`
+
+Source: `STABLE_GP_REVIEW_e2c5b2f_2026_09_16.md`. Recorded **before** any
+execution. The equations, initialization (`T = 10 exp(t)`, `T_in = 5 exp(q)`,
+`rho = exp(r)`), arms, every tolerance, the schedule, the success criteria and
+the 1200 s cap are unchanged.
+
+**Accepted scope statements**, recorded as the review phrases them:
+
+* The float32 finite-difference constants (steps `1e-2` and `3e-3`, 2 %
+  relative at both, resolvability, `1e-3` null-tangent threshold) are
+  **production smoke checks**. They do not certify that accuracy for every
+  trained parameter or trajectory. They stay unchanged, and a failure is
+  reported, not tuned.
+* The mixed gradient criterion's float32 absolute floor is about
+  `1.19e-4 G_ref` **per leaf**. A leaf below that scale can carry a large
+  relative error and still pass. Results are therefore reported as **"within
+  the mixed tolerance"**, never as "every leaf agrees to 0.2 %". All per-leaf
+  records are kept. The stricter float64 `q`-gradient identity and the
+  separate `r`-direction checks remain essential.
+
+### F1 — the validator uses the production generator
+
+* `stable_gp.executed_generator` builds `A` with the forward pass's own
+  construction: `clip(Lambda_re, None, -1e-4) + 1j Lambda_im`,
+  `Delta = 1.0 * exp(log_step[:, 0])`, `a = Lambda Delta`, then
+  `mass_block_generator(a, b_dummy, T, ones_like(rho), rho)`, with
+  `rho = exp(r)` and `T = 10 exp(t)`. A dummy `b` is used and no matrix
+  exponential is formed. `executed_domain_report` takes its eigenvalues from
+  this generator; the hand-built reconstruction is removed.
+* The independent formula diagnostic (`S`, `rho_max`) is kept as a separate
+  check.
+* `S` must be **finite** before `S > 0` is accepted.
+* Complex vs real is classified by `omega == 0`, not by whether the reported
+  `rho_max` is finite. A complex mode whose `rho_max` report is non-finite is
+  counted and reported, not relabelled real.
+* **Fixture:** in production float32 with nonzero `r`, `t` and `q`, the
+  validator's generator is **bitwise equal** to the bound module's
+  `coefficients()["A"]`. This checks consistent extraction; it does not replace
+  the independent reference checks.
+
+### F2 — preflight acceptance is enforced
+
+* Preflight now passes the **actual** measured step metrics (training loss,
+  accuracy, last gradient norm) and the **actual** timed validation result to
+  `epoch_acceptance`. The verdict, checks and domain report are persisted in
+  the per-arm preflight record.
+* Measured timing quantities must be finite and nonnegative.
+* `decide_after_preflight`:
+  * any acceptance or timing failure, or a non-finite or negative projection,
+    is **FAILED (4)**;
+  * a retrace, or a valid but over-budget projection, is **INCOMPLETE (3)**;
+  * otherwise the nine runs start.
+* `execute_screen` enforces that decision before `run_one` can be reached.
+* **Fixture:** stubbed invalid acceptance, NaN projection, negative projection,
+  retrace and over-budget cases all stop before `run_one`. A valid, fitting
+  projection reaches it, as a positive control. No training fixture or dispatch
+  is added.
+
+### Reporting cleanup
+
+The runner's module docstring now states `T = 10 exp(t)`. Test, probe and
+protocol descriptions of first-update checks now say **copied-gradient
+routing**.

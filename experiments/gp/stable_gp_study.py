@@ -10,7 +10,8 @@ Three arms continue from ONE saved, validation-selected Rawat checkpoint:
                             T_in = 5 exp(q), q = 0 at the start
     C  sgp_learned_input    the SAME learned input horizon PLUS the stable
                             generalized recurrence, rho = exp(r) and
-                            T = 5 exp(t), r = t = 0 at the start
+                            T = 10 exp(t), r = t = 0 at the start
+                            (recurrent reference 10, review R0)
 
 This is a WEIGHT WARM-START, not an exact resume: optimizer state is reset in
 every arm and a new ten-epoch cosine schedule starts. Seeds 201/202/203 are
@@ -800,13 +801,13 @@ def preflight(start, tx, data, steps_per_epoch, status, out):
       * steps through `step_loop`, the same host path as training, after a
         warm-up that absorbs compilation (incurred, not projected);
       * a validation pass, scaled from PREFLIGHT_VAL_BATCHES full batches;
-      * per-epoch acceptance: finiteness of params/optimizer/normalization
-        state and the executed-domain report;
+      * per-epoch acceptance on the ACTUAL measured preflight state and
+        metrics (review F2): its verdict is ENFORCED, not only timed;
       * per-epoch persistence of the run record;
       * final serialization and response diagnostics.
     """
     (Xtr, Ytr), (Xva, Yva) = data["train"], data["val"]
-    rows, total, retraced = [], 0.0, False
+    rows, total, retraced, failures = [], 0.0, False, []
     n_val_batches = -(-Xva.shape[0] // BATCH)
     for arm in ARMS:
         p, bs = start[arm]
@@ -828,16 +829,21 @@ def preflight(start, tx, data, steps_per_epoch, status, out):
         RB.evaluate_split(q, b2, build(arm, False), Xva[:BATCH * 2],
                           Yva[:BATCH * 2], BATCH)            # warm
         t2 = time.time()
-        RB.evaluate_split(q, b2, build(arm, False),
-                          Xva[:BATCH * PREFLIGHT_VAL_BATCHES],
-                          Yva[:BATCH * PREFLIGHT_VAL_BATCHES], BATCH)
+        val = RB.evaluate_split(q, b2, build(arm, False),
+                                Xva[:BATCH * PREFLIGHT_VAL_BATCHES],
+                                Yva[:BATCH * PREFLIGHT_VAL_BATCHES], BATCH)
         val_s = (time.time() - t2) / PREFLIGHT_VAL_BATCHES * n_val_batches
         t3 = time.time()
-        rec = dict(train_loss=0.0, train_acc=0.0, last_grad_norm=0.0,
-                   val_accuracy=0.0, val_cross_entropy=0.0)
-        epoch_acceptance(arm, q, o2, b2, rec)
+        # F2: the ACTUAL measured step metrics and validation result
+        rec = dict(train_loss=st["train_loss"], train_acc=st["train_acc"],
+                   last_grad_norm=st["last_grad_norm"],
+                   val_accuracy=val["accuracy"],
+                   val_cross_entropy=val["cross_entropy"],
+                   val_n_preflight=val["n"])
+        acc_ok, checks, dom = epoch_acceptance(arm, q, o2, b2, rec)
         write(os.path.join(out, "preflight", f"persist_{arm}.json"),
-              dict(epochs=[rec] * EPOCHS, telemetry=tel))
+              dict(epochs=[rec] * EPOCHS, telemetry=tel,
+                   acceptance=checks, domain=dom))
         epoch_host_s = time.time() - t3
         t4 = time.time()
         save_tree(os.path.join(out, "preflight", f"final_{arm}.msgpack"),
@@ -850,11 +856,21 @@ def preflight(start, tx, data, steps_per_epoch, status, out):
                    + final_s)
         arm_total = len(SEEDS) * per_run
         total += arm_total
+        timing = dict(host_path_step_s=step_s, val_pass_s=val_s,
+                      epoch_acceptance_and_persist_s=epoch_host_s,
+                      final_serialize_diagnostics_s=final_s,
+                      per_run_s=per_run, arm_total_s=arm_total)
+        timing_ok = all(onp.isfinite(v) and v >= 0 for v in timing.values())
+        if not acc_ok:
+            failures.append(f"{arm}: preflight acceptance failed {checks}")
+        if not timing_ok:
+            failures.append(f"{arm}: non-finite or negative measured timing "
+                            f"{timing}")
         rows.append(dict(arm=arm, warmup_s_incurred=warm_s,
-                         host_path_step_s=step_s, timed_steps=st["steps"],
-                         val_pass_s=val_s, epoch_acceptance_and_persist_s=
-                         epoch_host_s, final_serialize_diagnostics_s=final_s,
-                         per_run_s=per_run, arm_total_s=arm_total,
+                         timed_steps=st["steps"], **timing,
+                         measured_metrics=rec, acceptance=checks,
+                         acceptance_passed=acc_ok, domain=dom,
+                         timing_finite_nonnegative=timing_ok,
                          retraced=arm_retraced))
         print(f"[preflight] {arm:22s} warm {warm_s:6.1f}s  step "
               f"{step_s * 1e3:6.2f}ms  epoch {steps_per_epoch * step_s:6.1f}s  "
@@ -862,13 +878,78 @@ def preflight(start, tx, data, steps_per_epoch, status, out):
               f"{final_s:4.1f}s  x{len(SEEDS)} = {arm_total:6.1f}s")
     status["preflight"] = dict(
         rows=rows, projected_remaining_s=total, retraced_any=retraced,
+        failures=failures,
         scope=("9 runs x 10 epochs x steps through the SAME host path as "
                "training (data access, transfer, RNG split, projection "
                "telemetry, synchronization), the per-epoch validation pass, "
                "acceptance and persistence, and final serialization and "
                "diagnostics. Warm-up compilation is incurred, not projected."))
     print(f"PREFLIGHT_PROJECTED_REMAINING_S={total:.1f}")
-    return total, retraced
+    return total, retraced, failures
+
+
+def decide_after_preflight(proj, retraced, failures, left_s):
+    """Pure decision (review F2). Invalid numerical state is FAILED (4); a valid
+    but untrustworthy or over-budget projection is INCOMPLETE (3); None means
+    the nine runs may start."""
+    if failures:
+        return 4, "FAILED", f"preflight acceptance/timing failed: {failures}"
+    if proj is None or not onp.isfinite(proj) or proj < 0:
+        return 4, "FAILED", f"non-finite or negative projection {proj!r}"
+    if retraced:
+        return 3, "INCOMPLETE", ("retrace during preflight step timing; "
+                                 "projection untrustworthy, not started")
+    if proj > left_s:
+        return 3, "INCOMPLETE", (f"projected {proj:.0f}s > remaining "
+                                 f"{left_s:.0f}s; the screen was NOT started. "
+                                 f"No arm, seed or epoch was reduced.")
+    return None
+
+
+def execute_screen(start, tx, data, steps_per_epoch, out, deadline, reserve_s,
+                   status, epoch0, preflight_fn=None):
+    """Preflight, the ENFORCED decision, then the nine runs and the screen.
+    Returns (exit code, label). No run starts unless the decision is None."""
+    preflight_fn = preflight if preflight_fn is None else preflight_fn
+    proj, retraced, failures = preflight_fn(start, tx, data, steps_per_epoch,
+                                            status, out)
+    write(os.path.join(out, "status.json"), status)
+    left_s = deadline - time.time() - reserve_s
+    d = decide_after_preflight(proj, retraced, failures, left_s)
+    if d is not None:
+        code, label, why = d
+        if code == 4:
+            status["failed"] = why
+        else:
+            status["incomplete"].append(why)
+        print(f"[!] {why}")
+        return code, label
+    rows = []
+    for seed in SEEDS:
+        for arm in ARMS:
+            r = run_one(arm, seed, start, tx, data, steps_per_epoch, out,
+                        deadline, reserve_s, status, epoch0)
+            if r == "FAILED":
+                status["results"] = rows
+                return 4, "FAILED"
+            if r is None:
+                status["results"] = rows
+                return 3, "INCOMPLETE"
+            rows.append(r)
+            status["results"] = rows
+            write(os.path.join(out, "results.json"), rows)
+            write(os.path.join(out, "status.json"), status)
+    status["screen"] = screen(rows)
+    sc = status["screen"]
+    for k, c in sc["comparisons"].items():
+        per = "  ".join(f"{p['seed']}:{p['acc_pp']:+.2f}pp"
+                        for p in c["per_seed"])
+        print(f"[screen] {k}: mean {c['mean_acc_pp']:+.3f} pp  {per}"
+              + (f"  mean dCE {c['mean_ce_diff']:+.5f}  passed={c['passed']}"
+                 if "passed" in c else ""))
+    print(f"[screen] DEVELOPMENT SUCCESS: {sc['development_success']}")
+    status["complete"] = True
+    return 0, "PASS"
 
 
 # ---------------------------------------------------------------- screen ---
@@ -1040,48 +1121,10 @@ def main():
                                    for a in ARMS))
     write(os.path.join(out, "status.json"), status)
 
-    # ---- preflight on the complete declared screen
-    proj, retraced = preflight(start, tx, data, steps_per_epoch, status, out)
-    write(os.path.join(out, "status.json"), status)
-    if retraced:
-        status["incomplete"].append("retrace during preflight step timing; "
-                                    "projection untrustworthy, not started")
-        return finish(3, "INCOMPLETE")
-    if proj > left():
-        status["incomplete"].append(
-            f"projected {proj:.0f}s > remaining {left():.0f}s; the screen was "
-            f"NOT started. No arm, seed or epoch was reduced.")
-        print(f"[!] {status['incomplete'][-1]}")
-        return finish(3, "INCOMPLETE")
-
-    # ---- nine runs, grouped by stream so a budget stop leaves whole pairs
-    rows = []
-    for seed in SEEDS:
-        for arm in ARMS:
-            r = run_one(arm, seed, start, tx, data, steps_per_epoch, out,
-                        deadline, args.reserve_s, status, epoch0)
-            if r == "FAILED":
-                status["results"] = rows
-                return finish(4, "FAILED")
-            if r is None:
-                status["results"] = rows
-                return finish(3, "INCOMPLETE")
-            rows.append(r)
-            status["results"] = rows
-            write(os.path.join(out, "results.json"), rows)
-            write(os.path.join(out, "status.json"), status)
-
-    status["screen"] = screen(rows)
-    sc = status["screen"]
-    for k, c in sc["comparisons"].items():
-        per = "  ".join(f"{p['seed']}:{p['acc_pp']:+.2f}pp" for p in c["per_seed"])
-        print(f"[screen] {k}: mean {c['mean_acc_pp']:+.3f} pp  {per}"
-              + (f"  mean dCE {c['mean_ce_diff']:+.5f}  passed={c['passed']}"
-                 if "passed" in c else ""))
-    print(f"[screen] DEVELOPMENT SUCCESS: {sc['development_success']}")
-    status["complete"] = True
-    return finish(0, "PASS")
-
+    # ---- preflight (enforced), then the nine runs and the screen
+    code, label = execute_screen(start, tx, data, steps_per_epoch, out,
+                                 deadline, args.reserve_s, status, epoch0)
+    return finish(code, label)
 
 if __name__ == "__main__":
     sys.exit(main())
