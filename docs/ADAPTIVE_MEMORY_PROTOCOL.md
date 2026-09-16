@@ -168,16 +168,28 @@ and Gated DeltaNet:
 
 * mean revision macro accuracy at least **+1 point** over each;
 * **positive paired primary difference in all three final seeds** against each;
-* no greater than 1-point mean regression in revision-family untouched
-  retention **or** overall recall-family accuracy against either.
+* **neither** mean difference below **−1 point** — revision-family untouched
+  retention **and** overall recall-family accuracy must *both* be `≥ −0.01`
+  against each comparator.
 
 **Ordinary-prospectivity extension screen** — the identical three conditions
 against the TSS reference and the ideal equilibrium reference.
 
-**Attribution**, separate from both: credit the prospective derivative only if
-arm 1 also exceeds the equally source-gated adaptive inertial control on
-primary accuracy in **all three paired final seeds** without a >1-point mean
-regression on either retention check. Arm 3 is reported too; if it matches the
+The retention condition is a conjunction. The coordinator's original
+"no regression … **or** …" wording was ambiguous and has been resolved
+explicitly before execution: a candidate with positive primary differences but
+−20 points of retention and unchanged recall **fails**. The one-point threshold
+itself is unchanged. All three declared paired seeds must be present before any
+comparative verdict is produced; a missing pair fails rather than passing
+through an empty `all()`.
+
+**Attribution**, computed and reported **independently of both screens**:
+credit the prospective derivative if arm 1 exceeds the equally source-gated
+adaptive inertial control on primary accuracy in **all three paired final
+seeds** without a >1-point mean regression on either retention check. This
+flag is *not* conditioned on passing the literature screen — an ablation
+advantage stays interpretable even when a stronger literature method wins, and
+it does **not** imply competitive performance or unique causation. Arm 3 is reported too; if it matches the
 outcome, a simpler write-control account remains viable.
 
 Arms 1, 2 and 4 are **independently calibrated and trained**. Their differences
@@ -207,6 +219,7 @@ result; a needed repair is recorded in this file rather than silently applied.
 | `STREAM32` | `2e−5` | chunked carry vs an unsplit sequence; batched vs per-example |
 | `CAL` | `1e−10` | calibration observable; `1e−8` on recovering `ν = 4/3` |
 | FD steps | float64 `(1e−5, 1e−6)`; float32 `(1e−2, 3e−3)` | both enforced, each separately |
+| `expm2` switch | `(8!·eps)^{1/4}` — ≈`0.26` float32, ≈`1.7e−3` float64 | series/closed-form threshold on `m = μh²`, derived from the dtype, not tuned |
 
 **Initial-condition convention.** Every derivative check holds the initial
 carry parameter-independent. `Z₀` and `P₀ = −γZ₀` (and `P₀ = τ_m(W₀−A₀)` for
@@ -231,10 +244,18 @@ and training does not start.
    and idle motion.
 4. The `ρ = 1` boundary with `Z₀ = 0` equals the first-order delta rule —
    an explicit boundary evaluation, not an unreachable sigmoid parameter.
-5. `expm2` accuracy and **finite derivatives at the confluent root** `μ = 0`
-   and on the complex-pole branch `μ < 0`.
-6. JVP vs central differences for the response scalars, gate and embeddings,
-   both dtypes, both steps, for both TSS timescale configurations.
+5. `expm2` **quantitative** error against `scipy.linalg.expm` for ordinary,
+   confluent, oscillatory and **stiff-stable** generators, in both dtypes,
+   including `diag(−200,−1)` where the unscaled form overflows float32 for a
+   finite answer; both sides of the **actual dtype-dependent series switch**;
+   directional derivatives against central differences of that independent
+   reference across the switch, at the confluent root and on the complex-pole
+   branch; and no NaN from any inactive branch.
+6. JVP vs central differences for the response scalars, both dtypes, both
+   steps, for both TSS timescale configurations — and a directional check
+   through the **actual source-gate and key-embedding leaves** of a real
+   episode at a non-symmetric gate point, not a surrogate scalar source
+   multiplier.
 7. Streaming/chunked vs unsplit, batched vs per-example, causality, genuine
    dtypes, no weakly typed leaves. Identity tests do not rest on an all-zero
    fixture.
@@ -248,11 +269,23 @@ and training does not start.
     delta step at `β = 1`, held query state, autodiff vs the direct projection,
     and a **nonorthogonal interference example recorded without expecting
     perfect retention**.
-11. Calibration, contrast conventions (`HᵀH = I`, `1ᵀH = 0`), the
+11. Calibration is finite across the **whole** declared grid, scans
+    incrementally and stops at the first bracket, so an early bracket never
+    evaluates the hazardous tail; an impossible target raises the declared
+    obstruction. Derived physical coefficients — not only raw leaves — are
+    finite and positive, and the executed constraint is reported per arm.
+12. The input contract (`sanitize_episode`) is the identity on valid episodes
+    and makes an invented query value invariant for **all seven** arms,
+    including the two literature arms whose gates read the value id without
+    masking it by event. No arm reads `label`, `category` or `age`.
+13. Contrast conventions (`HᵀH = I`, `1ᵀH = 0`), the
     no-query-value-source restriction, parameter/carry counts, stream
     disjointness, checkpoint restore, evaluation parity across chunk sizes, and
     that the two literature arms are bit-identical to the completed study.
-12. The two screens are computed independently of each other.
+14. The two screens are computed independently of each other, the retention
+    conjunction is exercised by retention-only, recall-only and
+    both-within-bound fixtures, and a missing paired seed cannot produce a
+    verdict.
 
 ## 8. Budget and status discipline
 
@@ -287,3 +320,24 @@ implementation of BPTT and the learned gate. The fixed-objective overlap with
 inertial optimization under Hessian-driven damping (Alvarez–Attouch–Bolte–
 Redont 2002; Attouch–Chbani–Fadili–Riahi 2019) is acknowledged: the absence of
 a numerical Hessian is not itself a novelty claim.
+
+## 10. Dispositions — static review `IMPLEMENTATION_REVIEW_c12e20b.md`
+
+Reviewed 16 September 2026 at `c12e20b`. **No numerical execution had occurred
+at that commit, and none has occurred since**; every disposition below is a
+static correction, verified on the cluster by the checks listed in §7.
+
+| | Finding | Disposition |
+|---|---|---|
+| **R1** | Calibration evaluated the entire grid before bracketing, and the host exponential overflowed `cosh` at `ν = exp(12)`, making `configurations()` unreachable | **Fixed.** `_expm2_f64` now calls `scipy.linalg.expm` — already a check dependency and stable for this matrix — instead of a product of separately overflowing and underflowing factors. `solve_rate` scans **incrementally** in ascending order and stops at the first bracket, recording `grid_points_evaluated`. Grid, first-bracket policy, target and tolerance unchanged. A host arithmetic failure is now recorded as a failed check with its exception type, explicitly *not* as evidence that the physical initialization is impossible. |
+| **R2** | `safe = not (d_ret < −.01 and d_rec < −.01)` rejected only when **both** metrics regressed | **Fixed.** `safe = (d_ret >= −.01) and (d_rec >= −.01)`. Prose and executable rule updated together; the one-point threshold is unchanged. All three declared paired seeds are now required (`complete_paired_seeds`) so an empty or partial `all()` cannot yield a verdict. |
+| **R2b** | The ablation flag was conditioned on passing the literature screen | **Fixed.** `prospective_term_credited` is now `attribution[0]["exceeds"]` alone, with `attribution_is_independent_of_the_literature_screen` recorded. |
+| **R3** | The query-value test demanded invariance the pinned literature gates cannot provide, since they read the value id without masking it by event | **Fixed by specifying the input contract, not by changing the literature rule.** `model.sanitize_episode` masks the value field to writes once, at the common boundary, for all seven arms. It is the identity on valid episodes (asserted), so the pinned recurrence is untouched. The test now checks: the generator supplies no query value on valid data; the contract is the identity there; an invented query value is invariant for all seven arms; and no arm reads `label`, `category` or `age`. This was **never** evidence of label leakage in a valid episode. |
+| **R4** | `expm2` formed `cosh(√μ)` before the decaying trace factor, overflowing float32 for finite answers such as `diag(−200,−1)`; the unused branch and the series switch were unverified | **Fixed.** The trace is folded **inside** the hyperbolic functions, so the exponentials carry the eigenvalues `s ± a` of `hG` directly and nothing overflows for a stable generator. Three branches — real/separated, complex poles, and an `m³` series — each evaluated on `where`-guarded safe inputs so inactive branches yield neither NaN nor Inf. The switch is derived from the dtype as `(8!·eps)^{1/4}`, which is well conditioned on **both** sides. No coefficient clamp was introduced. |
+| **R5** | The "float32 trajectory" tests computed coefficients in float64; the TSS JVP covered only float64; the confluent check asserted only finiteness; the derivative path used a surrogate scalar | **Fixed.** `_gen`, `_step` and `_tss_step` build coefficients, generator, exponential, idle factor and carries in the requested dtype and assert each. Added: the float32 TSS JVP for both calibrated configurations at both declared steps; quantitative `expm2` errors against SciPy for stiff/oscillatory/confluent cases and both sides of the real switch; and a directional derivative through the **actual** `gate_u`, `gate_b` and `key_raw` leaves of a real episode at a non-symmetric gate point, in both dtypes. The pre-existing float32 `_probe` derivative coverage was preserved, not discarded. |
+| Reporting | Stale "25 runs / fifteen held-out" strings | **Fixed** in the launcher, the preflight docstring and the projection scope: 35 runs, 21 final evaluations. The loops themselves always counted seven arms. |
+| Reporting | Derived coefficients unchecked | **Fixed.** Finiteness and positivity are asserted on the derived `M, γ, T, η, κ` (and `τ_m, ε, M, T` for TSS), not only on raw leaves, and `coefficient_report` records the executed constraint per arm. |
+| Reporting | Reference framing | Unchanged and re-affirmed: both are **applications** of published laws to this associative-memory objective. The ideal projection is a completion rule for a rank-deficient constraint that **retains untouched directions** and is never called globally memoryless; TSS keeps its **undamped idle drift** and is never stabilized into the candidate's coefficient sector. Held-out handling is described as **deferred evaluation**; the deterministic stream is unchanged. |
+
+The seven arms, equations, calibration target, seeds, training length,
+tolerances and the 600-second cap are unchanged by every item above.

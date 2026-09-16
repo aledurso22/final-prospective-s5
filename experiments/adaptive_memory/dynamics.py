@@ -69,55 +69,97 @@ H = 1.0
 
 
 # ------------------------------------------- differentiable 2x2 expm -------
-def _expm2_scalars(mu):
-    """`cosh(sqrt(mu))` and `sinh(sqrt(mu))/sqrt(mu)`, both ENTIRE in `mu`.
+def _switch(dtype):
+    """Dtype-appropriate series/closed-form switch on `m = mu h^2`.
 
-    Written so the derivative is finite everywhere, including at a confluent
-    root `mu = 0` and in the inactive branch. Two traps are avoided
-    deliberately:
-
-    * `sqrt` at zero has an infinite derivative, so the small-|mu| branch
-      substitutes a CONSTANT into the closed form rather than zero - a
-      `where(small, 0, mu)` would give `inf * 0 = NaN` on the backward pass;
-    * negative `mu` (complex poles, which the inertial control can have) is
-      handled with the real trigonometric form rather than complex arithmetic.
-
-    Both functions are analytic in `mu`, so the series branch is exact to the
-    order kept and the two branches agree at the switch.
+    The series below keeps terms through `m^3`, so its truncation error is
+    about `m^4/8!`. Setting that equal to the machine epsilon gives
+    `|m| <= (8! eps)^(1/4)`: roughly 0.26 in float32 and 1.7e-3 in float64.
+    On the OTHER side of the switch the closed form subtracts two exponentials
+    and divides by `2a` with `a = sqrt(m)`, whose relative cancellation error
+    is about `eps/(2a)`: at the switch that is ~1e-7 in float32 and ~1e-15 in
+    float64. Both sides are therefore well conditioned AT the switch, which is
+    what makes a single threshold legitimate rather than merely convenient.
     """
-    small = jnp.abs(mu) < 1e-6
-    safe = jnp.where(small, jnp.ones_like(mu), mu)      # never 0 in this branch
-    a = jnp.sqrt(jnp.abs(safe))
-    ch = jnp.where(safe >= 0, jnp.cosh(a), jnp.cos(a))
-    sh = jnp.where(safe >= 0, jnp.sinh(a) / a, jnp.sin(a) / a)
-    ch_series = 1.0 + mu / 2.0 + mu * mu / 24.0
-    sh_series = 1.0 + mu / 6.0 + mu * mu / 120.0
-    return jnp.where(small, ch_series, ch), jnp.where(small, sh_series, sh)
+    return float((jnp.finfo(dtype).eps * 40320.0) ** 0.25)
 
 
 def expm2(G, h=H):
-    """`exp(h G)` for a 2x2 `G`, differentiable in every entry.
+    """`exp(h G)` for a 2x2 `G`, differentiable in every entry, overflow-safe.
 
-    Splits off the trace: with `N = G - (tr/2) I` traceless, `N^2 = mu I` where
-    `mu = disc/4 = ((g11-g22)^2 + 4 g12 g21)/4`, hence
+    With `t = tr G`, `N = G - (t/2) I` traceless and `N^2 = mu I` where
+    `mu = ((g11-g22)^2 + 4 g12 g21)/4`, the exponential is
 
-        exp(hG) = e^{h tr/2} [ cosh(h sqrt(mu)) I + h sinhc(h sqrt(mu)) N ].
+        exp(hG) = e^{s}[ ch(m) I + h shc(m) N ],
+        s = h t/2 ,  m = mu h^2 ,
+
+    with `ch` and `shc` entire in `m`. Written that way it OVERFLOWS for a
+    perfectly finite answer: `G = diag(-200, -1)` in float32 has true entries
+    `e^{-200}` and `e^{-1}`, but `cosh(99.5)` exceeds the float32 range and
+    multiplying afterwards by the tiny `e^{s}` cannot repair the intermediate
+    infinity. Admissible learned rates reach this regime and no coefficient
+    bound excludes it - so the fix is arithmetic, not a clamp.
+
+    The trace factor is therefore folded INSIDE the hyperbolic functions,
+    giving the eigenvalues `s +- a` of `hG` directly:
+
+        m >  switch:  C = (e^{s+a} + e^{s-a})/2 ,  S = (e^{s+a} - e^{s-a})/(2a)
+        m < -switch:  C = e^{s} cos(b) ,           S = e^{s} sin(b)/b
+        |m| <= switch: the series in `m`, times `e^{s}`
+
+    and `exp(hG) = C I + h S N`. For a stable generator `s + a <= 0`, so every
+    exponent above is non-positive and nothing overflows. Every one of our
+    generators has `t <= 0`: prospective `-nu w - 1/tau`, inertial `-1/tau`,
+    TSS `-T w/M`, and the idle limits of each.
+
+    Each branch is evaluated on `where`-guarded SAFE inputs, so the inactive
+    branches produce neither NaN nor Inf and cannot poison the backward pass
+    through `where`'s zero-weighted cotangent.
 
     No eigendecomposition, no branch cut, no host constant: every coefficient
     stays inside autodiff, which the learned response requires.
     """
     g11, g12 = G[..., 0, 0], G[..., 0, 1]
     g21, g22 = G[..., 1, 0], G[..., 1, 1]
-    tr = g11 + g22
-    mu = ((g11 - g22) ** 2 + 4.0 * g12 * g21) / 4.0
-    ch, sh = _expm2_scalars(mu * h * h)
-    pre = jnp.exp(h * tr / 2.0)
-    half = tr / 2.0
+    dtype = jnp.result_type(g11)
+    sw = _switch(dtype)
+    t = g11 + g22
+    s = h * t / 2.0
+    m = (((g11 - g22) ** 2 + 4.0 * g12 * g21) / 4.0) * h * h
+
+    big_pos = m > sw
+    big_neg = m < -sw
+    small = jnp.logical_not(jnp.logical_or(big_pos, big_neg))
+
+    one = jnp.ones_like(m)
+    # real, well-separated eigenvalues: fold e^{s} into each exponential
+    a = jnp.sqrt(jnp.where(big_pos, m, one))
+    # the trace is guarded too, so a huge `s` in an INACTIVE branch cannot
+    # produce an Inf that `where` would later multiply by a zero cotangent
+    s_pos = jnp.where(big_pos, s, jnp.zeros_like(s))
+    ep, em = jnp.exp(s_pos + a), jnp.exp(s_pos - a)
+    C_real, S_real = 0.5 * (ep + em), 0.5 * (ep - em) / a
+
+    # complex-conjugate poles: cos and sin are bounded, so e^{s} is safe
+    b = jnp.sqrt(jnp.where(big_neg, -m, one))
+    s_osc = jnp.where(big_pos, jnp.zeros_like(s), s)
+    es = jnp.exp(s_osc)
+    C_osc, S_osc = es * jnp.cos(b), es * jnp.sin(b) / b
+
+    # confluent / near-confluent: entire series in m, through m^3
+    ms = jnp.where(small, m, jnp.zeros_like(m))
+    C_ser = es * (1.0 + ms / 2.0 + ms * ms / 24.0 + ms * ms * ms / 720.0)
+    S_ser = es * (1.0 + ms / 6.0 + ms * ms / 120.0 + ms * ms * ms / 5040.0)
+
+    C = jnp.where(big_pos, C_real, jnp.where(big_neg, C_osc, C_ser))
+    S = jnp.where(big_pos, S_real, jnp.where(big_neg, S_osc, S_ser))
+
+    half = t / 2.0
     n11, n12, n21, n22 = g11 - half, g12, g21, g22 - half
-    f11 = pre * (ch + h * sh * n11)
-    f12 = pre * (h * sh * n12)
-    f21 = pre * (h * sh * n21)
-    f22 = pre * (ch + h * sh * n22)
+    f11 = C + h * S * n11
+    f12 = h * S * n12
+    f21 = h * S * n21
+    f22 = C + h * S * n22
     return jnp.stack([jnp.stack([f11, f12], axis=-1),
                       jnp.stack([f21, f22], axis=-1)], axis=-2)
 

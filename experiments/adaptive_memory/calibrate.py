@@ -37,6 +37,7 @@ TSS response root is globally unique.
 import math
 
 import numpy as onp
+from scipy.linalg import expm as _sp_expm
 
 GRID_LO, GRID_HI, GRID_N = -12.0, 12.0, 257
 TOL = 1e-10
@@ -45,24 +46,22 @@ H = 1.0
 
 
 def _expm2_f64(G, h=H):
-    """Closed-form 2x2 exponential in float64, for calibration only.
+    """Host 2x2 exponential in float64, for calibration only.
 
-    Calibration is a host-side root solve on a scalar observable, so it does
-    not need to be differentiable; the EXECUTED path uses the differentiable
-    `dynamics.expm2` and never this routine.
+    R1. The previous revision formed `cosh(sqrt(mu))` and multiplied it by a
+    separately decaying trace factor. At the declared grid's upper end the
+    prospective generator has `nu = exp(12)`, so the hyperbolic argument
+    exceeds 80,000 and `math.cosh` OVERFLOWS, even though the exponential of
+    that perfectly stable generator is finite and small. The bracket-selection
+    loop was unreachable.
+
+    SciPy is already a dependency of the focused checks, and its `expm` is
+    stable for this matrix, so the host routine simply calls it. Calibration
+    is a host-side root solve on a scalar observable and is never
+    differentiated; the EXECUTED path uses the differentiable `dynamics.expm2`
+    and never this routine.
     """
-    G = onp.asarray(G, dtype=onp.float64)
-    tr = G[0, 0] + G[1, 1]
-    mu = ((G[0, 0] - G[1, 1]) ** 2 + 4.0 * G[0, 1] * G[1, 0]) / 4.0
-    m = mu * h * h
-    if abs(m) < 1e-12:
-        ch, sh = 1.0 + m / 2.0, 1.0 + m / 6.0
-    elif m > 0:
-        r = math.sqrt(m); ch, sh = math.cosh(r), math.sinh(r) / r
-    else:
-        r = math.sqrt(-m); ch, sh = math.cos(r), math.sin(r) / r
-    N = G - (tr / 2.0) * onp.eye(2)
-    return math.exp(h * tr / 2.0) * (ch * onp.eye(2) + h * sh * N)
+    return _sp_expm(onp.asarray(G, dtype=onp.float64) * h)
 
 
 def prospective_G(nu, tau, rho, w=1.0):
@@ -135,39 +134,52 @@ def solve_rate(kind, tau, rho=None, target=None, tol=TOL, ratio=None):
                 f"tau={tau}, rho={rho}: initialization-design obstruction")
         return a - target
 
+    # R1: scan INCREMENTALLY in ascending order and stop on the first
+    # bracket, as the protocol intends. The previous revision evaluated every
+    # grid point first, so an early valid bracket still paid for a hazardous
+    # unused tail. The grid, the first-bracket policy, the target and the
+    # tolerance are unchanged.
     grid = onp.exp(onp.linspace(GRID_LO, GRID_HI, GRID_N))
-    vals = [f(g) for g in grid]
+    prev = f(grid[0])
+    evaluated = 1
+    if prev == 0.0:
+        return float(grid[0]), dict(kind=kind, tau=tau, rho=rho, ratio=ratio,
+                                    target=target, rate=float(grid[0]),
+                                    bracket=[float(grid[0])] * 2,
+                                    observable_error=0.0, iterations=0,
+                                    exact_grid_point=True,
+                                    grid_points_evaluated=evaluated)
     for i in range(GRID_N - 1):
-        if vals[i] == 0.0:
-            return float(grid[i]), dict(kind=kind, tau=tau, rho=rho,
-                                        ratio=ratio,
-                                        target=target, rate=float(grid[i]),
-                                        bracket=[float(grid[i])] * 2,
-                                        observable_error=0.0,
-                                        exact_grid_point=True, iterations=0)
-        if vals[i] <= 0.0 <= vals[i + 1]:
-            lo, hi = float(grid[i]), float(grid[i + 1])
-            flo = vals[i]
+        cur = f(grid[i + 1])
+        evaluated += 1
+        if cur == 0.0:
+            return float(grid[i + 1]), dict(
+                kind=kind, tau=tau, rho=rho, ratio=ratio, target=target,
+                rate=float(grid[i + 1]), bracket=[float(grid[i + 1])] * 2,
+                observable_error=0.0, exact_grid_point=True, iterations=0,
+                grid_points_evaluated=evaluated)
+        if prev <= 0.0 <= cur:
+            lo, hi, flo = float(grid[i]), float(grid[i + 1]), prev
             it = 0
             while it < 200:
                 mid = 0.5 * (lo + hi)
                 fm = f(mid)
                 if abs(fm) <= tol:
-                    return mid, dict(kind=kind, tau=tau, rho=rho,
-                                     ratio=ratio,
-                                     target=target, rate=mid,
-                                     bracket=[float(grid[i]),
-                                              float(grid[i + 1])],
-                                     observable_error=abs(fm),
-                                     exact_grid_point=False, iterations=it)
+                    return mid, dict(
+                        kind=kind, tau=tau, rho=rho, ratio=ratio,
+                        target=target, rate=mid,
+                        bracket=[float(grid[i]), float(grid[i + 1])],
+                        observable_error=abs(fm), exact_grid_point=False,
+                        iterations=it, grid_points_evaluated=evaluated)
                 if (flo <= 0.0) == (fm <= 0.0):
                     lo, flo = mid, fm
                 else:
                     hi = mid
                 it += 1
             raise FloatingPointError(
-                f"bisection did not reach {tol} for {kind} tau={tau}: "
-                f"initialization-design obstruction")
+                f"bisection did not reach {tol} for {kind} tau={tau}, "
+                f"ratio={ratio}: initialization-design obstruction")
+        prev = cur
     raise FloatingPointError(
         f"no sign-changing bracket on the declared grid for {kind} "
         f"tau={tau}, rho={rho}, ratio={ratio}: initialization-design "

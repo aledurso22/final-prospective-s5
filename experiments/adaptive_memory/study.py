@@ -298,7 +298,7 @@ def run_one(slot, seed, val_np, updates, out, deadline, reserve_s, status, tag):
 
 # ------------------------------------------------------------- preflight ---
 def preflight(cfg, val_np, status):
-    """Project the WHOLE declared batch: 25 runs, all evaluations, both splits.
+    """Project the WHOLE declared batch: 35 runs, all evaluations, both splits.
 
     Compilation already performed here is reported as incurred; every training
     and evaluation shape in the batch is identical to one compiled here, so no
@@ -367,7 +367,7 @@ def preflight(cfg, val_np, status):
         projected_remaining_s=total, retraced_any=retraced_any,
         runs_projected=n_runs_per_rule * len(AD.RULES),
         scope=("PROJECTED REMAINING work: 14 development + 21 final runs at "
-               f"{UPDATES} updates, three validation passes per run, fifteen "
+               f"{UPDATES} updates, three validation passes per run, 21 "
                "held-out passes and a host allowance. Compilation already "
                "performed here is reported separately as incurred; every "
                "shape in the batch is identical to one compiled here."))
@@ -442,10 +442,17 @@ def screen(final_rows, status):
         d_ret = mean(cand, "retention_revision_untouched") \
             - mean(other, "retention_revision_untouched")
         d_rec = mean(cand, "recall_overall") - mean(other, "recall_overall")
-        # "no greater than 1-point mean regression in untouched retention OR
-        # overall recall": the safeguard fails only if BOTH regress past a point
-        safe = not (d_ret < -0.01 and d_rec < -0.01)
-        ok = dm >= 0.01 and all(v > 0 for v in paired.values()) and safe
+        # R2. NEITHER metric may regress by more than one point. The earlier
+        # `not (d_ret < -0.01 and d_rec < -0.01)` rejected a candidate only
+        # when BOTH regressed, so -20 points of retention with unchanged
+        # recall would have passed. The coordinator has resolved the original
+        # "or" wording; the one-point threshold is unchanged.
+        safe = (d_ret >= -0.01) and (d_rec >= -0.01)
+        # every declared paired seed must be present: an empty or partial
+        # `all()` must never produce a comparative verdict
+        complete_pairs = (set(paired) == set(FINAL_SEEDS))
+        ok = (complete_pairs and dm >= 0.01
+              and all(v > 0 for v in paired.values()) and safe)
         return dict(
             against=other, display=AD.DISPLAY[other],
             mean_primary_candidate=mean(cand, "primary"),
@@ -454,7 +461,11 @@ def screen(final_rows, status):
             paired_primary_differences=paired,
             positive_in_all_seeds=bool(all(v > 0 for v in paired.values())),
             retention_difference=d_ret, recall_difference=d_rec,
-            retention_safeguard_met=bool(safe), passed=bool(ok))
+            retention_safeguard_met=bool(safe),
+            retention_within_one_point=bool(d_ret >= -0.01),
+            recall_within_one_point=bool(d_rec >= -0.01),
+            paired_seeds=sorted(paired), complete_paired_seeds=complete_pairs,
+            passed=bool(ok))
 
     lit = [compare(o) for o in ("momentum_delta", "gated_delta")]
     ordn = [compare(o) for o in AD.ORDINARY_PROSPECTIVE]
@@ -473,15 +484,23 @@ def screen(final_rows, status):
         d_ret = mean(cand, "retention_revision_untouched") \
             - mean(other, "retention_revision_untouched")
         d_rec = mean(cand, "recall_overall") - mean(other, "recall_overall")
+        complete_pairs = (set(paired) == set(FINAL_SEEDS))
         res["attribution"].append(dict(
             against=other, display=AD.DISPLAY[other],
             paired_primary_differences=paired,
             positive_in_all_seeds=bool(all(v > 0 for v in paired.values())),
             retention_difference=d_ret, recall_difference=d_rec,
-            exceeds=bool(all(v > 0 for v in paired.values())
+            complete_paired_seeds=complete_pairs,
+            exceeds=bool(complete_pairs
+                         and all(v > 0 for v in paired.values())
                          and d_ret >= -0.01 and d_rec >= -0.01)))
-    res["prospective_term_credited"] = bool(
-        res["literature_screen_passed"] and res["attribution"][0]["exceeds"])
+    # R2. Attribution is reported INDEPENDENTLY of the literature screen, as
+    # promised. An advantage over the equally source-gated inertial control
+    # stays interpretable even when a stronger literature method wins; it does
+    # NOT imply competitive performance and does not establish unique
+    # causation.
+    res["prospective_term_credited"] = bool(res["attribution"][0]["exceeds"])
+    res["attribution_is_independent_of_the_literature_screen"] = True
 
     res["per_arm_means"] = {
         r: dict(primary=mean(r, "primary"),
@@ -532,10 +551,23 @@ def main():
     # ---- calibration, before any data is touched -------------------------
     try:
         cfg = CAL.configurations()
-    except FloatingPointError as exc:
+    except (FloatingPointError, OverflowError, ValueError,
+            ArithmeticError) as exc:
+        # R1. An arithmetic failure in the host solve is recorded as a FAILED
+        # CHECK with its exception type, NOT as evidence that the physical
+        # initialization is impossible. The two are different findings and are
+        # labelled differently.
+        kind = ("initialization-design obstruction"
+                if isinstance(exc, FloatingPointError)
+                else "host arithmetic failure in the calibration solve")
         write(os.path.join(out, "status.json"),
-              dict(run_id=run_id, failed=f"calibration obstruction: {exc}"))
-        print(f"[FAIL] calibration obstruction: {exc}")
+              dict(run_id=run_id,
+                   failed=f"calibration: {kind}: {type(exc).__name__}: {exc}",
+                   failure_class=kind, exception=type(exc).__name__,
+                   note="a host arithmetic failure is a defect in the solver, "
+                        "not a demonstration that the declared initialization "
+                        "cannot exist"))
+        print(f"[FAIL] calibration {kind}: {type(exc).__name__}: {exc}")
         print(f"ADAPTIVE_STATUS=FAILED out={out}")
         return 4
     if not cfg["reference_recovery"]["passed"]:
@@ -582,7 +614,7 @@ def main():
         heldout_policy=(
             "held-out episodes are generated and hashed BEFORE training from "
             "their own named stream; their EVALUATION is DEFERRED until all "
-            "fifteen final runs finish. Deferred evaluation, not data created "
+            "all 21 final runs finish. Deferred evaluation, not data created "
             "after training."),
         selection_policy=(
             "two slots per family, one development seed, the same update "
@@ -624,7 +656,7 @@ def main():
         print(f"ADAPTIVE_STATUS=INCOMPLETE out={out}")
         return 3
 
-    # ---- stage 1: ten development runs -----------------------------------
+    # ---- stage 1: 14 development runs ------------------------------------
     dev_rows = []
     for rule in AD.RULES:
         for tag in ("A", "B"):
@@ -667,7 +699,7 @@ def main():
     for row in table:
         print(f"  {row['display']:<48} -> {row['chosen']}")
 
-    # ---- stage 2: fifteen final runs, freshly trained from scratch -------
+    # ---- stage 2: 21 final runs, freshly trained from scratch -----------
     final_rows, finals = [], {}
     for rule in AD.RULES:
         slot = cfg["slots"][f"{rule}/{sel[rule]}"]

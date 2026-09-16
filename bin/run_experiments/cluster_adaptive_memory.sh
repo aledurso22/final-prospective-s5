@@ -2,14 +2,14 @@
 # Adaptive associative-memory comparison: checks, calibration, selection, batch.
 #
 # ONE hard 600-second budget covers GPU startup, focused checks, calibration,
-# compilation, preflight, 10 development runs, 15 final runs, evaluation and a
+# compilation, preflight, 14 development runs, 21 final runs, evaluation and a
 # 30-second serialization reserve.
 #
-# 25 runs x 200 updates = 5,000 optimizer steps. The preflight MEASURES all
-# five arms and projects the WHOLE batch - both stages, every validation pass
-# and all fifteen held-out passes. If it does not fit, the batch is not
-# started and the measured obstruction is reported: no arm, slot, seed or
-# update count is reduced and the cap is never raised.
+# SEVEN arms. 35 runs x 200 updates = 7,000 optimizer steps. The preflight
+# MEASURES all seven arms and projects the WHOLE batch - both stages, every
+# validation pass and all 21 held-out evaluations. If it does not fit, the
+# batch is not started and the measured obstruction is reported: no arm, slot,
+# seed or update count is reduced and the cap is never raised.
 #
 #   ADAPTIVE_STATUS=PASS|INCOMPLETE|FAILED   ADAPTIVE_EXIT=0|3|4
 # A completed unfavourable comparison is execution PASS with the performance
@@ -82,7 +82,7 @@ if [ "$rc" -ne 0 ]; then finish FAILED 4 "focused checks did not pass"; fi
 
 # ---- 3. the study: calibration, preflight, then the batch only if it fits
 LEFT=$(( $(remaining) - RESERVE_S ))
-echo "remaining for the study: ${LEFT}s (calibration + preflight + 25 runs)"
+echo "remaining for the study: ${LEFT}s (calibration + preflight + 35 runs)"
 [ "$LEFT" -gt 60 ] || finish INCOMPLETE 3 "no time for the study"
 rc=0
 timeout --kill-after="${RESERVE_S}s" --signal=TERM "${LEFT}s" \

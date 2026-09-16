@@ -100,23 +100,36 @@ def _dense(W, Z, k, v, w, kind, coeff, h=1.0):
             onp.reshape(out[n:2 * n], (dv, dk), order="F"))
 
 
-def _gen(kind, coeff, w):
+def _gen(kind, coeff, w, dt=onp.float64):
+    """The generator, with EVERY coefficient in the requested dtype.
+
+    R5. The previous revision built default-dtype (float64, with x64 on)
+    coefficients and cast only the finished exponential, so the "float32
+    trajectory" test exercised float32 STATE arithmetic against float64
+    COEFFICIENTS. The coefficient inputs, the generator, the exponential and
+    the idle factor are now all genuinely the requested dtype, each asserted.
+    """
     if kind == "prospective":
-        return AD.prospective_generator(jnp.asarray(coeff["nu"]),
-                                        jnp.asarray(coeff["tau"]),
-                                        jnp.asarray(coeff["rho"]),
-                                        jnp.asarray(float(w)))
-    return AD.inertial_generator(jnp.asarray(coeff["eta"]),
-                                 jnp.asarray(coeff["tau"]),
-                                 jnp.asarray(float(w)))
+        G = AD.prospective_generator(jnp.asarray(coeff["nu"], dt),
+                                     jnp.asarray(coeff["tau"], dt),
+                                     jnp.asarray(coeff["rho"], dt),
+                                     jnp.asarray(float(w), dt))
+    else:
+        G = AD.inertial_generator(jnp.asarray(coeff["eta"], dt),
+                                  jnp.asarray(coeff["tau"], dt),
+                                  jnp.asarray(float(w), dt))
+    assert G.dtype == dt, (kind, G.dtype, dt)
+    return G
 
 
 def _step(kind, coeff, W, Z, k, v, w, dt=onp.float64):
-    F = AD.expm2(_gen(kind, coeff, w))
-    a0 = jnp.exp(-AD.H / jnp.asarray(coeff["tau"]))
+    G = _gen(kind, coeff, w, dt)
+    F = AD.expm2(G)
+    a0 = jnp.exp(-jnp.asarray(AD.H, dt) / jnp.asarray(coeff["tau"], dt))
+    assert F.dtype == dt and a0.dtype == dt, (kind, F.dtype, a0.dtype, dt)
     W2, Z2 = AD.two_state_step(jnp.asarray(W, dt), jnp.asarray(Z, dt),
-                               jnp.asarray(k, dt), jnp.asarray(v, dt),
-                               F.astype(dt), a0.astype(dt))
+                               jnp.asarray(k, dt), jnp.asarray(v, dt), F, a0)
+    assert W2.dtype == dt and Z2.dtype == dt, (kind, W2.dtype, dt)
     return onp.asarray(W2), onp.asarray(Z2)
 
 
@@ -175,22 +188,121 @@ def test_the_exact_step_holds_over_a_64_token_float32_trajectory(case):
 
 
 # ------------------------------- the 2x2 exponential ------------------------
-@pytest.mark.parametrize("mu", [0.0, 1e-14, -1e-14, 1e-7, -1e-7, 4.0, -4.0])
-def test_expm2_is_accurate_and_differentiable_through_the_confluent_root(mu):
-    """A square-root formula must not go singular or NaN at a repeated root.
+#: R4 witnesses. Ordinary, confluent, oscillatory and STIFF-STABLE generators,
+#: plus both sides of the actual float32 series switch. `diag(-200, -1)` is the
+#: coordinator's witness: the true entries are e^-200 and e^-1, but the
+#: unscaled form forms cosh(99.5), which exceeds the float32 range.
+EXPM_CASES = [
+    ("ordinary", [[-1.0, 2.0], [0.5, -3.0]]),
+    ("confluent", [[-2.0, 1.0], [0.0, -2.0]]),
+    ("confluent_exact", [[-2.0, 0.0], [0.0, -2.0]]),
+    ("oscillatory", [[-0.5, 1.0], [-4.0, -0.5]]),
+    ("oscillatory_fast", [[-0.1, 1.0], [-400.0, -0.1]]),
+    ("stiff_diag", [[-200.0, 0.0], [0.0, -1.0]]),
+    ("stiff_witness", [[-200.0, 1.0], [0.0, -1.0]]),
+    ("stiff_prospective", [[-onp.exp(9.0), -4.0 / 3.0],
+                           [-onp.exp(9.0) / 4.0, -4.0 / 3.0]]),
+    ("grid_top_prospective", [[-onp.exp(12.0), -4.0 / 3.0],
+                              [-onp.exp(12.0) / 4.0, -4.0 / 3.0]]),
+]
 
-    The generator is built so its discriminant is exactly `mu`; `mu = 0` is the
-    confluent case that a naive `sqrt` differentiates to infinity.
+
+def _switch_pair(dt):
+    """`m` just inside and just outside the declared switch, as a generator.
+
+    `[[0, 1], [m, 0]]` has trace 0 and discriminant/4 exactly `m`, so it puts
+    the switch itself under test rather than a nearby proxy.
     """
-    # G = [[0, 1], [mu, 0]] has trace 0 and discriminant/4 exactly mu, so
-    # mu = 0 is the confluent root and mu < 0 the complex-pole branch.
-    G = onp.array([[0.0, 1.0], [mu, 0.0]])
+    sw = AD._switch(dt)
+    return [("below_switch", 0.5 * sw), ("at_switch", sw),
+            ("above_switch", 2.0 * sw), ("below_switch_neg", -0.5 * sw),
+            ("above_switch_neg", -2.0 * sw)]
+
+
+@pytest.mark.parametrize("name,G", EXPM_CASES)
+def test_expm2_matches_scipy_in_float64_with_recorded_error(name, G):
+    """Quantitative error against an independent reference, not `isfinite`."""
+    G = onp.asarray(G, dtype=onp.float64)
     ref = sp_expm(G)
     got = onp.asarray(AD.expm2(jnp.asarray(G)))
-    assert onp.abs(got - ref).max() < 1e-12, (mu, onp.abs(got - ref).max())
-    g = jax.grad(lambda x: jnp.sum(AD.expm2(
-        jnp.array([[0.0, 1.0], [x, 0.0]]))))(float(mu))
-    assert onp.isfinite(g), (mu, g)
+    assert onp.all(onp.isfinite(got)), (name, got)
+    err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
+    print(f"  expm2 f64 {name:<22} rel {err:.3e}")
+    assert err < EXACT64, (name, err, got, ref)
+
+
+@pytest.mark.parametrize("name,G", EXPM_CASES)
+def test_expm2_does_not_overflow_in_float32(name, G):
+    """The coordinator's witness class: a finite answer must not pass through
+    an infinite intermediate. Reference computed in float64."""
+    G64 = onp.asarray(G, dtype=onp.float64)
+    ref = sp_expm(G64)
+    got = onp.asarray(AD.expm2(jnp.asarray(G64.astype(onp.float32))))
+    assert got.dtype == onp.float32
+    assert onp.all(onp.isfinite(got)), (name, "overflow", got)
+    err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
+    print(f"  expm2 f32 {name:<22} rel {err:.3e}")
+    assert err < TRAJ32, (name, err)
+
+
+@pytest.mark.parametrize("dt", [onp.float32, onp.float64])
+def test_expm2_is_accurate_on_both_sides_of_the_actual_series_switch(dt):
+    """The switch is dtype-dependent, so it is probed at its real location in
+    each dtype, on both sides and in both branches."""
+    for name, m in _switch_pair(dt):
+        G = onp.array([[0.0, 1.0], [m, 0.0]], dtype=onp.float64)
+        ref = sp_expm(G)
+        got = onp.asarray(AD.expm2(jnp.asarray(G.astype(dt))))
+        assert got.dtype == dt
+        err = onp.abs(got - ref).max() / max(1.0, onp.abs(ref).max())
+        tol = EXACT64 if dt is onp.float64 else TRAJ32
+        print(f"  switch {onp.dtype(dt).name} {name:<20} m={m:+.3e} "
+              f"rel {err:.3e}")
+        assert err < tol, (dt, name, m, err)
+
+
+@pytest.mark.parametrize("dt", [onp.float32, onp.float64])
+def test_expm2_derivatives_are_finite_and_correct_across_the_switch(dt):
+    """Finiteness alone does not establish accuracy: the derivative is checked
+    against central differences of an INDEPENDENT reference on both sides of
+    the switch, at the confluent root, and on the complex-pole branch."""
+    sw = AD._switch(dt)
+    probes = [0.0, 0.5 * sw, sw, 2.0 * sw, -0.5 * sw, -2.0 * sw, 1.0, -4.0,
+              4.0]
+    fd_h = FD64[0] if dt is onp.float64 else FD32[0]
+    tol = GRAD64 if dt is onp.float64 else GRAD32
+    for m in probes:
+        f = lambda x: jnp.sum(AD.expm2(                       # noqa: E731
+            jnp.stack([jnp.stack([jnp.asarray(0.0, dt), jnp.asarray(1.0, dt)]),
+                       jnp.stack([x, jnp.asarray(0.0, dt)])])))
+        g = float(jax.grad(f)(jnp.asarray(m, dt)))
+        assert onp.isfinite(g), (dt, m, g)
+
+        def ref(x):
+            return float(sp_expm(onp.array([[0.0, 1.0], [x, 0.0]],
+                                           dtype=onp.float64)).sum())
+        fd = (ref(m + fd_h) - ref(m - fd_h)) / (2.0 * fd_h)
+        rel = abs(g - fd) / max(abs(fd), 1e-3)
+        print(f"  d/dm {onp.dtype(dt).name} m={m:+.4e} auto={g:+.6e} "
+              f"ref={fd:+.6e} rel={rel:.2e}")
+        assert rel < tol, (dt, m, g, fd, rel)
+
+
+def test_expm2_has_no_nan_from_an_inactive_branch():
+    """Every branch is evaluated on where-guarded SAFE inputs, so an inactive
+    branch must not poison the backward pass through a zero cotangent."""
+    for m in (-1e6, -1.0, 0.0, 1.0, 1e6):
+        for entry in range(4):
+            def f(x):
+                g = [jnp.asarray(0.0), jnp.asarray(1.0),
+                     jnp.asarray(float(m)), jnp.asarray(0.0)]
+                g[entry] = x
+                G = jnp.stack([jnp.stack([g[0], g[1]]),
+                               jnp.stack([g[2], g[3]])])
+                return jnp.sum(AD.expm2(G))
+            base = [0.0, 1.0, float(m), 0.0][entry]
+            v = float(jax.grad(f)(jnp.asarray(base)))
+            assert onp.isfinite(v), (m, entry, v)
 
 
 # ------------------------- reduction to the completed study ----------------
@@ -526,24 +638,74 @@ def test_every_parameter_leaf_is_explicitly_typed():
         assert not weak, (rule, weak)
 
 
-def test_a_query_contributes_no_value_source_and_reads_only_Wq():
-    """Changing a query row's value field cannot change any logit: the query
-    has m = 0 and no value source, and the readout is W q alone."""
+def test_the_generator_supplies_no_query_value_on_valid_episodes():
+    """The valid input has no query value field at all. This is the no-leakage
+    property; it is a statement about the DATA, checked before any arm runs."""
+    for seed in (4404, 4408, 4409):
+        b = TK.generate_batch(seed, 2)
+        q = (b["event"] == TK.QUERY)
+        assert q.any()
+        assert onp.all(b["val_id"][q] < 0), "a query carries no value field"
+
+
+def test_the_input_contract_is_the_identity_on_valid_episodes():
+    """R3. `sanitize_episode` masks the value field to writes. On valid
+    episodes it changes nothing, for every arm - so it cannot alter the pinned
+    literature recurrence."""
+    cfg = CAL.configurations()["slots"]
+    b = TK.generate_batch(4404, 1)
+    ep = _ep(b, 0)
+    san = AM.sanitize_episode(ep)
+    assert onp.array_equal(onp.asarray(san["val_id"]),
+                           onp.asarray(ep["val_id"])), "identity on valid data"
+    for rule in AD.RULES:
+        p = AM.init_params(rule, 60, init_coeffs=cfg.get(f"{rule}/A", {}))
+        a = onp.asarray(AM.rollout(rule, p, ep)["logits"])
+        c = onp.asarray(AM.rollout(rule, p, san)["logits"])
+        assert onp.array_equal(a, c), rule
+
+
+def test_an_invented_query_value_cannot_reach_any_arm():
+    """R3. With the contract applied at the common boundary, an invented query
+    value is invariant for ALL seven arms - including the two literature arms,
+    whose forgetting/momentum gates read the value id and are NOT masked by
+    event inside their own pinned code. The earlier revision asserted this
+    invariance WITHOUT the contract, which the literature rule cannot satisfy
+    and which does not follow from `read only Wq`. The literature recurrence
+    was not changed to satisfy the test; the input contract was specified.
+    """
     cfg = CAL.configurations()["slots"]
     b = TK.generate_batch(4404, 1)
     ep = _ep(b, 0)
     qpos = onp.where(onp.asarray(ep["event"]) == TK.QUERY)[0]
     assert qpos.size > 0
-    alt = dict(ep)
-    vv = onp.asarray(ep["val_id"]).copy()
-    assert onp.all(vv[qpos] < 0), "a query already carries no value field"
-    vv[qpos] = 3
-    alt["val_id"] = jnp.asarray(vv)
+    for invented in (0, 3, 7):
+        alt = dict(ep)
+        vv = onp.asarray(ep["val_id"]).copy()
+        vv[qpos] = invented
+        alt["val_id"] = jnp.asarray(vv)
+        for rule in AD.RULES:
+            p = AM.init_params(rule, 60, init_coeffs=cfg.get(f"{rule}/A", {}))
+            a = onp.asarray(AM.rollout(rule, p, ep)["logits"])
+            c = onp.asarray(AM.rollout(rule, p, alt)["logits"])
+            assert onp.abs(a - c).max() < 1e-7, (rule, invented)
+
+
+def test_no_arm_reads_the_label_or_any_oracle_field():
+    """The rollout must be invariant to the separately stored oracle fields.
+    Scrambling `label`, `category` and `age` cannot move a logit."""
+    cfg = CAL.configurations()["slots"]
+    b = TK.generate_batch(4410, 1)
+    ep = _ep(b, 0)
+    rs = onp.random.RandomState(0)
+    poisoned = dict(ep)
+    for fld in ("label", "category", "age"):
+        poisoned[fld] = jnp.asarray(rs.randint(0, 8, size=b[fld][0].shape))
     for rule in AD.RULES:
         p = AM.init_params(rule, 60, init_coeffs=cfg.get(f"{rule}/A", {}))
         a = onp.asarray(AM.rollout(rule, p, ep)["logits"])
-        c = onp.asarray(AM.rollout(rule, p, alt)["logits"])
-        assert onp.abs(a - c).max() < 1e-7, rule
+        c = onp.asarray(AM.rollout(rule, p, poisoned)["logits"])
+        assert onp.array_equal(a, c), rule
 
 
 # ------------------------------- gate and counts ---------------------------
@@ -776,12 +938,17 @@ def _tss_dense_WA(W, A, k, v, w, tau_m, eps, h=1.0):
 
 
 def _tss_step(c, W, P, k, v, w, dt=onp.float64):
-    M = jnp.asarray(c["tau_m"] * c["epsilon"], dt)
-    T = jnp.asarray(c["tau_m"] + c["epsilon"], dt)
-    F = AD.expm2(AD.tss_generator(M, T, jnp.asarray(float(w), dt)))
-    W2, P2 = AD.tss_two_state_step(
-        jnp.asarray(W, dt), jnp.asarray(P, dt), jnp.asarray(k, dt),
-        jnp.asarray(v, dt), F.astype(dt), (AD.H / M).astype(dt))
+    """R5: coefficients, generator, exponential, b0 and carries all in `dt`."""
+    tau_m = jnp.asarray(c["tau_m"], dt); eps = jnp.asarray(c["epsilon"], dt)
+    M, T = tau_m * eps, tau_m + eps
+    G = AD.tss_generator(M, T, jnp.asarray(float(w), dt))
+    F = AD.expm2(G)
+    b0 = jnp.asarray(AD.H, dt) / M
+    assert G.dtype == dt and F.dtype == dt and b0.dtype == dt, (dt, F.dtype)
+    W2, P2 = AD.tss_two_state_step(jnp.asarray(W, dt), jnp.asarray(P, dt),
+                                   jnp.asarray(k, dt), jnp.asarray(v, dt),
+                                   F, b0)
+    assert W2.dtype == dt and P2.dtype == dt, (dt, W2.dtype)
     return onp.asarray(W2), onp.asarray(P2)
 
 
@@ -901,17 +1068,12 @@ def test_the_TSS_slots_are_calibrated_to_the_same_beta_star():
             assert rec["observable_error"] <= CAL_TOL, rec
 
 
-@pytest.mark.parametrize("tag", ["A", "B"])
-@pytest.mark.parametrize("di", range(3))
-def test_TSS_float64_jvp_matches_central_differences(tag, di):
-    """Exact parameter derivatives for BOTH declared timescale configurations,
-    at both declared float64 steps. The initial carry is fixed and
-    parameter-independent, as declared in the module docstring."""
+def _tss_probe(tag, dt):
+    """A nondegenerate differentiable scalar of a short TSS trajectory, with
+    every coefficient in `dt`. Fixed, parameter-independent initial carry."""
     s = CAL.configurations()["slots"][f"tss_prospective/{tag}"]
     r0 = onp.array([onp.log(s["tau_m"]),
-                    onp.log(s["ratio"] / (1 - s["ratio"])), 0.0])
-    rs = onp.random.RandomState(800 + di)
-    d = rs.randn(3); d /= onp.linalg.norm(d)
+                    onp.log(s["ratio"] / (1 - s["ratio"])), 0.0], dtype=dt)
     rs2 = onp.random.RandomState(21)
     dv = dk = 4
     ks = []
@@ -919,23 +1081,35 @@ def test_TSS_float64_jvp_matches_central_differences(tag, di):
         x = rs2.randn(dk); ks.append(x / onp.linalg.norm(x))
     vs = [rs2.randn(dv) for _ in range(6)]
     ws = [0.0 if t == 2 else float(0.3 + 1.4 * rs2.rand()) for t in range(6)]
-    qq = rs2.randn(dk); q = jnp.asarray(qq / onp.linalg.norm(qq))
-    proj = jnp.asarray(rs2.randn(dv))
+    qq = rs2.randn(dk); q = jnp.asarray(qq / onp.linalg.norm(qq), dt)
+    proj = jnp.asarray(rs2.randn(dv), dt)
 
     def f(r):
         tau_m = jnp.exp(r[0])
         eps = tau_m * jax.nn.sigmoid(r[1])
         M, T = tau_m * eps, tau_m + eps
-        W = jnp.zeros((dv, dk), onp.float64); P = jnp.zeros((dv, dk), onp.float64)
-        acc = jnp.zeros(())
+        W = jnp.zeros((dv, dk), dt); P = jnp.zeros((dv, dk), dt)
+        acc = jnp.zeros((), dt)
         for t in range(6):
-            wt = ws[t] * (1.0 + 0.1 * r[2])
+            wt = jnp.asarray(ws[t], dt) * (1.0 + 0.1 * r[2])
             F = AD.expm2(AD.tss_generator(M, T, wt))
-            W, P = AD.tss_two_state_step(W, P, jnp.asarray(ks[t]),
-                                         jnp.asarray(vs[t]), F, AD.H / M)
+            W, P = AD.tss_two_state_step(W, P, jnp.asarray(ks[t], dt),
+                                         jnp.asarray(vs[t], dt), F,
+                                         jnp.asarray(AD.H, dt) / M)
             acc = acc + jnp.dot(proj, W @ q)
         return acc
+    return f, r0
 
+
+@pytest.mark.parametrize("tag", ["A", "B"])
+@pytest.mark.parametrize("di", range(3))
+def test_TSS_float64_jvp_matches_central_differences(tag, di):
+    """Exact parameter derivatives for BOTH declared timescale configurations,
+    at both declared float64 steps. The initial carry is fixed and
+    parameter-independent, as declared in the module docstring."""
+    f, r0 = _tss_probe(tag, onp.float64)
+    rs = onp.random.RandomState(800 + di)
+    d = rs.randn(3); d /= onp.linalg.norm(d)
     jv = float(jax.jvp(f, (jnp.asarray(r0),), (jnp.asarray(d),))[1])
     assert onp.isfinite(jv)
     for h in FD64:
@@ -945,6 +1119,82 @@ def test_TSS_float64_jvp_matches_central_differences(tag, di):
             assert abs(jv - fd) < NEAR64, (tag, di, h, jv, fd)
         else:
             assert abs(jv - fd) / abs(fd) < GRAD64, (tag, di, h, jv, fd)
+
+
+@pytest.mark.parametrize("tag", ["A", "B"])
+def test_TSS_float32_jvp_at_both_declared_perturbations(tag):
+    """R5. The declared production-dtype counterpart, for BOTH calibrated
+    configurations, enforced separately at both declared float32 steps."""
+    f, r0 = _tss_probe(tag, onp.float32)
+    rs = onp.random.RandomState(810)
+    d = rs.randn(3).astype(onp.float32); d /= onp.linalg.norm(d)
+    jv = float(jax.jvp(f, (jnp.asarray(r0, onp.float32),),
+                       (jnp.asarray(d, onp.float32),))[1])
+    assert onp.isfinite(jv)
+    for h in FD32:
+        fd = float((f(jnp.asarray(r0 + onp.float32(h) * d, onp.float32))
+                    - f(jnp.asarray(r0 - onp.float32(h) * d, onp.float32)))
+                   / (2 * h))
+        a = abs(jv - fd)
+        rel = a / abs(fd) if abs(fd) > 1e-4 else None
+        print(f"  TSS f32 {tag} h={h:g} jvp={jv:.6g} fd={fd:.6g} abs={a:.3g}")
+        assert a < NEAR32 or (rel is not None and rel < GRAD32), \
+            (tag, h, jv, fd, a, rel)
+
+
+@pytest.mark.parametrize("rule", list(AM.GATED_RULES))
+@pytest.mark.parametrize("dt", [onp.float32, onp.float64])
+def test_directional_derivatives_through_the_real_gate_and_embeddings(rule, dt):
+    """R5. Through the ACTUAL source-gate and key-embedding leaves of a real
+    episode, not a surrogate scalar source multiplier. Nonzero gradients alone
+    do not establish that they are right, so the automatic directional
+    derivative is compared with central differences of the same loss.
+    """
+    import optax
+    slot = CAL.configurations()["slots"][f"{rule}/A"]
+    p0 = AM.init_params(rule, 91, init_coeffs=slot, dtype=dt)
+    b = TK.generate_batch(4321, 2)
+    ep = {k: jnp.asarray(b[k][0]) for k in ("key_id", "val_id", "event")}
+    lab = jnp.maximum(jnp.asarray(b["label"][0]), 0)
+    qm = jnp.asarray(b["event"][0] == TK.QUERY)
+    # a NONZERO gate is the interesting point: at u = b = 0 the sigmoid sits
+    # at its symmetric point and the check would be weaker than it looks
+    rs = onp.random.RandomState(92)
+    p0 = dict(p0, gate_u=jnp.asarray(0.4 * rs.randn(31), dt),
+              gate_b=jnp.asarray(0.4 * rs.randn(7), dt))
+    leaves = ("gate_u", "gate_b", "key_raw")
+    direction = {k: jnp.asarray(rs.randn(*onp.shape(p0[k])), dt)
+                 for k in leaves}
+    nrm = onp.sqrt(sum(float(jnp.sum(v ** 2)) for v in direction.values()))
+    direction = {k: v / nrm for k, v in direction.items()}
+
+    def loss(q):
+        o = AM.rollout(rule, q, ep)
+        ce = optax.softmax_cross_entropy(
+            o["logits"],
+            jax.nn.one_hot(lab, TK.N_VALUES, dtype=o["logits"].dtype))
+        return jnp.sum(ce * qm) / jnp.sum(qm)
+
+    def shifted(t):
+        return loss({k: (v + t * direction[k] if k in direction else v)
+                     for k, v in p0.items()})
+
+    jv = float(jax.jvp(shifted, (jnp.asarray(0.0, dt),),
+                       (jnp.asarray(1.0, dt),))[1])
+    assert onp.isfinite(jv)
+    steps = FD64 if dt is onp.float64 else FD32
+    tol = GRAD64 if dt is onp.float64 else GRAD32
+    near = NEAR64 if dt is onp.float64 else NEAR32
+    for h in steps:
+        fd = float((shifted(jnp.asarray(h, dt))
+                    - shifted(jnp.asarray(-h, dt))) / (2 * h))
+        a = abs(jv - fd)
+        rel = a / abs(fd) if abs(fd) > (1e-6 if dt is onp.float64 else 1e-4) \
+            else None
+        print(f"  gate/emb {rule} {onp.dtype(dt).name} h={h:g} "
+              f"jvp={jv:.6g} fd={fd:.6g} abs={a:.3g}")
+        assert a < near or (rel is not None and rel < tol), \
+            (rule, dt, h, jv, fd, a, rel)
 
 
 # ----------------------- reference 2: ideal equilibrium --------------------
@@ -1049,29 +1299,183 @@ def test_the_ideal_arm_rolls_out_as_a_full_strength_delta_memory():
     assert onp.abs(got - ref).max() < 1e-10, onp.abs(got - ref).max()
 
 
+def _screen_rows(primary, ret=None, rec=None):
+    """Synthetic held-out rows for exercising the declared screen rules."""
+    from experiments.adaptive_memory import study as ST
+    ret = ret or {}
+    rec = rec or {}
+    rows = []
+    for sd in ST.FINAL_SEEDS:
+        for rule, pr in primary.items():
+            rows.append(dict(rule=rule, seed=sd, heldout=dict(
+                primary=pr, retention_revision_untouched=ret.get(rule, 0.9),
+                recall_overall=rec.get(rule, 0.9), revision_ce=0.5)))
+    return rows
+
+
+BASE_PRIMARY = {"adaptive_prospective": 0.60, "momentum_delta": 0.70,
+                "gated_delta": 0.50, "tss_prospective": 0.40,
+                "ideal_projection": 0.45, "adaptive_inertial": 0.50,
+                "adaptive_delta": 0.50}
+
+
 def test_the_two_screens_are_reported_separately():
     """A win against ordinary prospectivity must not be able to substitute for
     a loss against the strongest memory comparator, or the reverse."""
     from experiments.adaptive_memory import study as ST
-
-    def row(rule, seed, primary, ret=0.9, rec=0.9, ce=0.5):
-        return dict(rule=rule, seed=seed, heldout=dict(
-            primary=primary, retention_revision_untouched=ret,
-            recall_overall=rec, revision_ce=ce))
-
-    rows = []
-    for s in ST.FINAL_SEEDS:
-        rows.append(row("adaptive_prospective", s, 0.60))
-        rows.append(row("momentum_delta", s, 0.70))     # candidate LOSES here
-        rows.append(row("gated_delta", s, 0.50))
-        rows.append(row("tss_prospective", s, 0.40))    # candidate WINS here
-        rows.append(row("ideal_projection", s, 0.45))
-        rows.append(row("adaptive_inertial", s, 0.50))
-        rows.append(row("adaptive_delta", s, 0.50))
-    res = ST.screen(rows, {})
-    assert res["literature_screen_passed"] is False
+    res = ST.screen(_screen_rows(BASE_PRIMARY), {})
+    assert res["literature_screen_passed"] is False     # loses to momentum
     assert res["ordinary_prospectivity_screen_passed"] is True
-    assert res["prospective_term_credited"] is False
     assert [c["against"] for c in res["ordinary_prospectivity"]] == \
         list(AD.ORDINARY_PROSPECTIVE)
     assert set(res["per_arm_means"]) == set(AD.RULES)
+
+
+def test_attribution_is_reported_independently_of_the_literature_screen():
+    """R2. The candidate LOSES to momentum but beats the equally gated
+    inertial control in every seed. The ablation comparison must still be
+    credited: it does not imply competitive performance, and gating it on the
+    literature screen would silently discard an interpretable result."""
+    from experiments.adaptive_memory import study as ST
+    res = ST.screen(_screen_rows(BASE_PRIMARY), {})
+    assert res["literature_screen_passed"] is False
+    assert res["attribution"][0]["against"] == "adaptive_inertial"
+    assert res["attribution"][0]["positive_in_all_seeds"] is True
+    assert res["prospective_term_credited"] is True
+    assert res["attribution_is_independent_of_the_literature_screen"] is True
+
+
+def test_a_large_loss_on_one_retention_metric_fails_the_screen():
+    """R2. The safeguard requires BOTH metric differences >= -1 point.
+
+    Three fixtures: retention-only failure, recall-only failure, and both
+    within the bound. The previous `not (A and B)` form passed the first two.
+    """
+    from experiments.adaptive_memory import study as ST
+    win = dict(BASE_PRIMARY, adaptive_prospective=0.90)   # +20 on primary
+
+    # (a) retention collapses by 20 points, recall unchanged -> MUST FAIL
+    res = ST.screen(_screen_rows(
+        win, ret={"adaptive_prospective": 0.70, "momentum_delta": 0.90}), {})
+    c = res["comparisons"][0]
+    assert c["meets_plus_one_point"] and c["positive_in_all_seeds"]
+    assert c["retention_within_one_point"] is False
+    assert c["recall_within_one_point"] is True
+    assert c["retention_safeguard_met"] is False and c["passed"] is False
+    assert res["literature_screen_passed"] is False
+
+    # (b) recall collapses, retention unchanged -> MUST FAIL
+    res = ST.screen(_screen_rows(
+        win, rec={"adaptive_prospective": 0.70, "momentum_delta": 0.90}), {})
+    c = res["comparisons"][0]
+    assert c["retention_within_one_point"] is True
+    assert c["recall_within_one_point"] is False
+    assert c["passed"] is False
+
+    # (c) both within the one-point bound -> passes
+    res = ST.screen(_screen_rows(
+        win, ret={"adaptive_prospective": 0.895, "momentum_delta": 0.90},
+        rec={"adaptive_prospective": 0.895, "momentum_delta": 0.90}), {})
+    assert all(c["passed"] for c in res["comparisons"])
+    assert res["literature_screen_passed"] is True
+
+
+def test_a_missing_paired_seed_cannot_produce_a_verdict():
+    """R2. An incomplete set of pairs must not slip through `all()`."""
+    from experiments.adaptive_memory import study as ST
+    win = dict(BASE_PRIMARY, adaptive_prospective=0.90)
+    rows = [r for r in _screen_rows(win)
+            if not (r["rule"] == "adaptive_prospective"
+                    and r["seed"] == ST.FINAL_SEEDS[-1])]
+    res = ST.screen(rows, {})
+    for c in res["comparisons"] + res["ordinary_prospectivity"]:
+        assert c["complete_paired_seeds"] is False
+        assert c["passed"] is False
+    assert res["literature_screen_passed"] is False
+    assert res["ordinary_prospectivity_screen_passed"] is False
+    assert res["prospective_term_credited"] is False
+
+
+# --------------------- R1: the calibration grid is safe --------------------
+def test_the_calibration_grid_tail_is_finite_and_not_evaluated_early():
+    """R1. The declared grid's upper end drove the previous host exponential
+    to overflow in `cosh`, so `configurations()` never reached the bracket
+    loop. Two independent guarantees are checked:
+
+    1. the host observable is FINITE across the whole declared grid, so an
+       arithmetic failure can never be mistaken for a physical obstruction;
+    2. the scan is incremental and stops at the first bracket, so a slot that
+       brackets early never pays for the hazardous tail at all.
+    """
+    grid = onp.exp(onp.linspace(CAL.GRID_LO, CAL.GRID_HI, CAL.GRID_N))
+    assert grid[-1] > 1.6e5, "the declared grid really does reach exp(12)"
+    for rate in (grid[0], grid[CAL.GRID_N // 2], grid[-1]):
+        a = CAL.amplitude(CAL.prospective_G(rate, 0.75, 0.75), 0.75)
+        assert onp.isfinite(a), ("prospective", rate, a)
+        a = CAL.amplitude(CAL.inertial_G(rate, 0.75), 0.75)
+        assert onp.isfinite(a), ("inertial", rate, a)
+        for ratio in (0.1, 0.5):
+            assert onp.isfinite(CAL.tss_amplitude(rate, ratio)), (rate, ratio)
+    for rec in CAL.configurations()["records"]:
+        assert rec["grid_points_evaluated"] <= CAL.GRID_N, rec
+        # the bracket really is the FIRST one: nothing beyond it was touched
+        hi = rec["bracket"][1]
+        idx = int(onp.argmin(onp.abs(grid - hi)))
+        assert rec["grid_points_evaluated"] == idx + 1, (rec, idx)
+
+
+def test_a_calibration_obstruction_is_an_explicit_record_not_a_crash():
+    """An impossible target must raise the declared obstruction, and must not
+    be reported as evidence that a physical initialization is impossible."""
+    with pytest.raises(FloatingPointError) as exc:
+        CAL.solve_rate("prospective", 0.75, rho=0.75, target=5.0)
+    assert "obstruction" in str(exc.value)
+
+
+# ------------- derived physical coefficients, not just raw leaves ----------
+@pytest.mark.parametrize("rule", list(AM.NEW_RULES))
+def test_derived_physical_coefficients_are_finite_and_positive(rule):
+    """A finite raw logarithm does not guarantee a finite exponential. The
+    EXECUTED constraint is checked on the derived coefficients themselves."""
+    cfg = CAL.configurations()["slots"]
+    for tag in ("A", "B"):
+        p = AM.init_params(rule, 93, init_coeffs=cfg[f"{rule}/{tag}"],
+                           dtype=onp.float64)
+        if rule == "adaptive_prospective":
+            c = AD.response(p)
+            vals = {k: float(onp.asarray(c[k]).ravel()[0]) for k in c}
+            assert all(onp.isfinite(v) for v in vals.values()), (rule, vals)
+            assert vals["M"] > 0 and vals["gamma"] > 0 and vals["T"] > 0
+            assert vals["eta"] > 0 and vals["kappa"] > 0
+            assert 0.0 < vals["M"] < vals["gamma"] * vals["T"], vals
+        elif rule == "adaptive_inertial":
+            c = AD.inertial_response(p)
+            assert float(c["eta"][0]) > 0 and float(c["tau"][0]) > 0
+        elif rule == "adaptive_delta":
+            assert float(onp.exp(onp.asarray(p["raw_eta"])[0])) > 0
+        elif rule == "tss_prospective":
+            c = AD.tss_response(p)
+            vals = {k: float(onp.asarray(c[k]).ravel()[0]) for k in c}
+            assert all(onp.isfinite(v) for v in vals.values()), (rule, vals)
+            assert vals["tau_m"] > 0 and 0 < vals["epsilon"] < vals["tau_m"]
+            assert vals["M"] > 0 and vals["T"] > 0 and vals["gamma"] == 0.0
+        else:
+            assert not any(k.startswith("raw_") for k in p)
+
+
+def test_the_study_reports_the_executed_constraint_for_every_arm():
+    from experiments.adaptive_memory import study as ST
+    cfg = CAL.configurations()["slots"]
+    for rule in AD.RULES:
+        p = AM.init_params(rule, 94, init_coeffs=cfg.get(f"{rule}/A", {}))
+        rep = ST.coefficient_report(rule, p, None)
+        assert rep["rule"] == rule
+        if rule == "adaptive_prospective":
+            assert rep["admissible_0_lt_M_lt_gamma_T"] is True
+        if rule == "tss_prospective":
+            assert rep["gamma"] == 0.0
+            assert rep["outside_the_generalized_sector"] is True
+            assert rep["adaptation_faster_than_membrane"] is True
+        if rule in AM.GATED_RULES:
+            assert 0.0 < rep["source_weight"]["min"] <= \
+                rep["source_weight"]["max"] < 2.0

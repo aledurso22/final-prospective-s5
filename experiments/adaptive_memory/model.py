@@ -120,6 +120,29 @@ def response_tables(rule, p, dtype):
     return dict(weights=None, coeff={})
 
 
+def sanitize_episode(ep):
+    """THE input contract, applied ONCE for every arm at the common boundary.
+
+    R3. The value field is defined only on writes. The task generator already
+    emits `val_id = -1` on every query and idle interval, so on VALID episodes
+    this is the identity - a check asserts exactly that. But the two
+    literature arms build their input-dependent forgetting/momentum gates from
+    the supplied value id WITHOUT masking it by event, so a hand-edited query
+    value would change their recurrence. That is not label leakage in a valid
+    episode, and it is not a defect in the pinned literature rule: it is an
+    unspecified input contract. Specifying it here, uniformly, is what makes
+    "a query carries no value source" true for all seven arms by
+    CONSTRUCTION, instead of an assertion that the literature arms cannot
+    satisfy.
+
+    The literature recurrence itself is untouched.
+    """
+    out = dict(ep)
+    out["val_id"] = jnp.where(ep["event"] == WRITE, ep["val_id"],
+                              jnp.full_like(ep["val_id"], -1))
+    return out
+
+
 def rollout(rule, p, ep, dtype=None, carry0=None):
     """One episode. Returns query logits and diagnostics.
 
@@ -129,6 +152,7 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
     """
     if dtype is None:
         dtype = p["key_raw"].dtype
+    ep = sanitize_episode(ep)
     key_id, val_id, event = ep["key_id"], ep["val_id"], ep["event"]
     if rule in ("gated_delta", "momentum_delta"):
         out = NM.rollout(rule, p, ep, NM.constants_for(rule, dtype=dtype),
