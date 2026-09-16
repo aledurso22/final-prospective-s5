@@ -123,17 +123,18 @@ IN FORCE:             L = log1p(z) ,  r <= max(0, L - 32 eps (1 + |L|))   comple
 * It is computed from the **updated** `Lambda_re`, `Lambda_im`, `log_step` and
   `log_T_rec` of the **complete** layer, with the forward pass's clip and
   clock. Only `r` is moved.
-* It is evaluated in log arithmetic:
-  `logaddexp(0, log1p(-eps) + logaddexp(log(Ta), log a + 2 log c - log T - log omega^2))`.
-  The `omega^2 = 0` division is **masked before** evaluation, and real modes
+* It is evaluated in log arithmetic (§13 R1):
+  `L = logaddexp(0, logaddexp(log(Ta), log a + 2 log c - log T - 2 log|omega|))`.
+  The `omega = 0` division is **masked before** evaluation, and real modes
   get `+inf`.
 * Optimizer state is untouched. Telemetry records proposal events, maximum
   proposed overshoot and the minimum post-projection log margin.
 * There is no forward clip, no fixed leaf-name interval and no bound on `q` or
   `t`.
 
-**Executed validation**, `executed_domain_report`: `rho`, `T` and `M` are formed
-in the executed dtype as the forward pass forms them. `S` and `rho < rho_max`
+**Executed validation**, `executed_domain_report` (amended by §13 R4):
+`rho`, `T`, `M`, `T_in` and the generator entries are formed and checked in the
+executed dtype as the forward pass forms them. `S` and `rho < rho_max`
 are then evaluated in **float64** from those executed values, so a float32
 rounding across the boundary is detected rather than reproduced. A non-finite
 or non-positive mass or horizon fails. This runs on C's starting point, after

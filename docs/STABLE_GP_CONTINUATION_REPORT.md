@@ -17,7 +17,7 @@ until a cluster run fills it, favourable or not.
 | Branch | `stable-generalized-prospective-s5` |
 | Parent | `89a05ca` (`learned-response-timescale`) |
 | Worktree | `/private/tmp/wt/sgp` |
-| Implementation commit | *(recorded at commit)* |
+| Implementation commits | `97cedfa` (initial), R0–R4 correction on top (see git log) |
 | Executed commit | *(recorded from the launcher)* |
 | Source checkpoint | *(derived and hashed by the runner from `$PROSPECTIVE_RUNS/stage2`)* |
 | Command | `bash bin/run_experiments/cluster_stable_gp.sh` |
@@ -46,18 +46,17 @@ its `rho <= 0.9999` bound and its deferred runner are unchanged and not run.
    gradients). In float32 it is gated at 5e-4 logits, 2e-3 gradients and 2e-3
    of `lr` for first updates. Those production-gate tolerances are a judgement
    call and are stated in the protocol with their justification.
-2. **Update comparison metric.** It is the maximum entrywise difference in units
-   of `lr`, not a per-leaf relative norm. Adam's first step normalizes each
-   entry to about `±lr`, so a relative norm would turn float noise in near-zero
-   gradients into a spurious failure.
+2. **Update comparison metric** (superseded in scope by R2). The gated update
+   check is now a routing identity on COPIED gradients, still measured as the
+   maximum entrywise difference in units of `lr`. Independently computed first
+   updates are reported only.
 3. **Projection scope.** Only `r` is projected, and its bound is recomputed from
    the updated poles, clock and `T`. `q` and `t` are unconstrained, and their
    non-finiteness is caught by the per-epoch executed-domain validation and the
    finiteness checks.
 4. **float32 probe coverage.** Nearly real modes go down to `|Im lambda| = 1.2e-4`,
-   with `z` up to about 6e12, plus exactly real modes. The float32 rounding of
-   the bound shrinks the `32 eps` interior as `z` grows, so the covered range is
-   stated explicitly. Trained checkpoints are validated per epoch regardless of
+   with `z` up to about 6e12, plus exactly real modes, and (R1) the small-`z`
+   rounding witness. The covered range is stated explicitly. Trained checkpoints are validated per epoch regardless of
    whether they fall in that range.
 
 ## Static review of `97cedfa` — dispositions
