@@ -1,7 +1,7 @@
 # Stable generalized prospective continuation — report
 
-**Status: implemented, amended per static reviews of `97cedfa` (R0–R4) and
-`e2c5b2f` (F1–F2), awaiting static confirmation. Not executed.**
+**Status: dispatch 1 at `c94ab1f` FAILED at the focused checks (2 of 38), no
+training. Logs preserved. Awaiting diagnosis and authorization; no retry.**
 
 No check, restore, calibration or training for this study has run anywhere.
 Local work was limited to editing, `ast` syntax checks, and static audits of
@@ -98,9 +98,72 @@ The equation, three arms, source checkpoint, schedule, performance criteria and
 * **First execution.** This is the first execution of all new code, inside the
   cap. Static audits do not substitute for the cluster checks.
 
+## Dispatch 1 — `c94ab1f`: FAILED at the focused checks, no training
+
+| | |
+|---|---|
+| host | `pgi15-gpu3`, RTX 3090, SLURM 66044, jax 0.11.0, backend `gpu` |
+| started | 2026-09-16T17:56:52Z |
+| status | `STABLE_GP_STATUS=FAILED`, `STABLE_GP_EXIT=4`: focused checks did not pass |
+| checks | **2 failed, 36 passed in 263.5 s**; 269 s of 1200 elapsed |
+| not reached | source restore, identity gate, epoch 0, preflight, training |
+| logs | `/Users/durso/s5-runs/stable-gp/logs/20260916-195652/` (preserved) |
+| artifacts | `/Users/durso/s5-runs/stable-gp/20260916-195652/` |
+
+**Operationally FAILED. There is no performance result.** No retry and no
+protocol change was made.
+
+### Failure 1 — `test_production_float32_probe_in_its_own_process`
+
+The probe's own dtype assertion fired:
+
+```
+C leaf encoder/layers_{0,1}/seq/Lambda_{re,im} is float64, not float32
+```
+
+**Static cause.** The probe builds its small network from
+`tests/response_reference.ssm_kwargs`, whose `Lambda_re_init` and
+`Lambda_im_init` are NumPy float64 arrays. `S5SSM` stores them unchanged as
+parameters, so the fixture's poles were float64 even with x64 off. The
+production path builds them from `make_DPLR_HiPPO` through
+`rawat_benchmark.ssm_kwargs`, and the saved Stage 2 checkpoint restored as
+float32 in the earlier diagnostic. So this is a **fixture dtype defect, and
+the assertion was right to reject it**.
+
+**Consequence for the probe's printed numbers.** Sections [1] (projection:
+1280 executed float32 modes, worst relative margin 3.73e-6) and [R1] (witness
+returns the `rho = 1` fallback) used explicitly float32 arrays and are valid
+float32 measurements. Sections [2], [3] and [R2] used this network, so their
+numbers came from **mixed float64 poles and float32 other leaves**, and are
+**not** production float32 certifications:
+
+* identity logits 0 and 5.0e-7;
+* r-only derivative relative error 4.7e-6 and 9.6e-6;
+* `dL/dt` exactly 0 at the start.
+
+### Failure 2 — `test_generalized_discrete_equation_recovers_TSS_eq17_exactly`
+
+The traceback is not in the console tail and must be read from `checks.log`
+before any diagnosis is recorded as fact.
+
+**Static suspicion, unverified.** The test propagates the Eq. (17) and
+generalized trajectories *separately* for 40 steps under an absolute
+tolerance of 1e-12. Algebraically identical updates round differently, and a
+second-order nonlinear recursion can amplify that. If so, the defect is that
+the test compares accumulated trajectories instead of single steps from
+identical states. It would not be a disagreement in the equation. This is a
+hypothesis until the traceback confirms which step and what magnitude.
+
+### Timing observed
+
+The focused checks took 263.5 s, more than planned. That leaves about 890 s
+for restore, the gate, compilation, preflight and nine runs, against roughly
+810 s of estimated training. This is recorded as a budget risk only; preflight
+would have measured it.
+
 ## Results
 
-*(empty — to be filled from cluster output)*
+*(empty — no training has run)*
 
 ### Checks
 ### Source checkpoint and reproduction
