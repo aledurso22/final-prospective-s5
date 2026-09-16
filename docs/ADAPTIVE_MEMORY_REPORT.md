@@ -1,9 +1,11 @@
 # Adaptive associative-memory comparison — report
 
-**Status: prepared, not yet executed.** No numerical check, calibration or
-training run for this study has been executed anywhere — not on the cluster and
-not locally. Every result section below is empty and will be filled from actual
-cluster output, favourable or not.
+**Status: executed. `ADAPTIVE_STATUS=PASS` (dispatch 2, `f096242`), all 14
+development and 21 final runs complete, held-out opened. Both performance
+screens FAILED. The prospective term is credited against the inertial control
+only.** Per-seed held-out values and categories are pending the read-only digest
+(`experiments/adaptive_memory/summary.py`); the numbers below are exactly those
+printed by the run.
 
 ## Provenance
 
@@ -19,8 +21,7 @@ cluster output, favourable or not.
 | Launcher | `bin/run_experiments/cluster_adaptive_memory.sh` |
 | Reviewed commit | `c12e20b` — static review `IMPLEMENTATION_REVIEW_c12e20b.md`, fix-before-launch |
 | Reviewed commit | `9ca0de6` — follow-up review `IMPLEMENTATION_REVIEW_9ca0de6.md`, F1/F2 |
-| Launch commit | *(this commit — R1–R5 and F1/F2 corrected)* |
-| Executed commit | *(to be recorded from the launcher's `git rev-parse HEAD`)* |
+| Executed commit | **`f09624215eab4096d27fe4795dc7686188e49221`** (dispatch 2) |
 
 Coordinator sources, all dated 16 September 2026:
 `ADAPTIVE_MEMORY_CODING_BRIEF.md`, `ADAPTIVE_MEMORY_PROTOCOL.md`,
@@ -212,59 +213,170 @@ Every measured numerical error is still appended, pass or fail, to
 records the **new** formula's margins; it cannot and is not meant to explain
 the old formula's intermediates.
 
-## Results
+## Dispatch 2 — `f096242`: PASS
 
-*(empty — to be filled from cluster output)*
+| | |
+|---|---|
+| host | `pgi15-gpu3`, RTX 3090, SLURM 66010, jax 0.11.0, backend `gpu` |
+| started | 2026-09-16T13:38:03Z |
+| status | `ADAPTIVE_STATUS=PASS`, `ADAPTIVE_EXIT=0`, **283 s of 600** |
+| checks | **190 passed** in 164.5 s; every measured numerical error inside tolerance |
+| preflight | incurred compilation 31.8 s, projected remaining 85.8 s, no retrace reported |
+| study | 114 s wall; 14/14 development, 21/21 final, held-out opened |
+| artifacts | `/Users/durso/s5-runs/adaptive-memory/20260916-153803/` |
+| logs | `/Users/durso/s5-runs/adaptive-memory/logs/20260916-153803/` |
 
-### Calibration
+After the launcher had returned exit 0 and printed its status, the user's
+interactive SLURM step (`66010.1`) was terminated (`srun ... Killed`). That
+followed the run and is not a run failure; the artifacts were written before
+exit.
 
-| Slot | Solved rate | Bracket | Observable error | Realized β |
-|---|---|---|---|---|
-| | | | | |
+### Numerical checks (recorded errors, largest per class)
 
-`ν = 4/3` recovery for slot 1A: *(pending, tolerance 1e−8)*
+| class | worst case | error | tolerance |
+|---|---|---|---|
+| `expm2` float32 | oscillatory_fast | 6.37e−8 | 2e−5 |
+| `expm2` float32, previously failing | stiff_prospective | 1.85e−8 | 2e−5 |
+| `expm2` float32 | grid_top_prospective | 5.04e−8 | 2e−5 |
+| `expm2` float64 | grid_top_prospective | 4.90e−13 | 1e−9 |
+| shifted family float64 | m = −1e6 | 4.61e−13 | 1e−9 |
+| series switch float32 | at switch, m = +0.263 | 8.20e−8 | 2e−5 |
+| series switch float64 | above switch, m = +3.46e−3 | 1.11e−15 | 1e−9 |
+| 64-token float32 trajectory | TSS case 3 | 8.35e−7 | 2e−5 |
 
-### Checks
-
-*(pass/fail counts and any failures, verbatim from `checks.log`)*
+The failing case of dispatch 1 fell from 1.049e−4 to 1.85e−8 after the
+cancellation fix. The launcher printed only the first 40 sorted records, which
+include only some trajectory classes; the complete record is
+`measured_errors.tsv`.
 
 ### Preflight and cost
 
-| Arm | Compile (incurred) | Step | Eval | Projected arm |
-|---|---|---|---|---|
-| | | | | |
-
-Incurred compilation: *(pending)*  Projected remaining: *(pending)*
-Whether the batch fit: *(pending)*
-
-### Development stage and selection
-
-| Family | A primary | A rev-CE | B primary | B rev-CE | Selected |
-|---|---|---|---|---|---|
-| | | | | | |
-
-### Final seeds — held-out
-
-| Arm | seed 201 | 202 | 203 | mean primary | retention | recall |
+| Arm | Compile (incurred) | Step | Eval | Projected arm | Params | Carry |
 |---|---|---|---|---|---|---|
-| | | | | | | |
+| Generalized prospective | 4.9 s (+1.1) | 6.35 ms | 14.1 ms | 6.6 s | 433 | 128 |
+| Inertial control | 4.7 s (+1.0) | 6.17 ms | 13.2 ms | 6.5 s | 432 | 128 |
+| First-order delta | 2.9 s (+0.7) | 4.85 ms | 13.7 ms | 5.1 s | 431 | 64 |
+| TSS prospective | 4.6 s (+1.1) | 6.08 ms | 13.3 ms | 6.4 s | 432 | 128 |
+| Ideal equilibrium | 2.4 s (+0.6) | 4.33 ms | 11.3 ms | 4.6 s | 392 | 64 |
+| Gated DeltaNet | 3.0 s (+0.8) | 5.13 ms | 12.0 ms | 5.4 s | 480 | 64 |
+| Momentum DeltaNet | 3.4 s (+0.8) | 5.94 ms | 13.1 ms | 6.2 s | 569 | 128 |
 
-Per-category results for all four categories and both families, initialization
-and update-100/update-200 validation, training gain reported separately from
-endpoint accuracy, learned response coefficients, gate distributions,
-`η = νρ` and `κ = τν(1−ρ)`, state/auxiliary norms, gradient/update norms:
-*(pending — see `status.json`, `development.json`, `final.json`)*
+All counts match the declared values.
+
+### Selection (development seed 200)
+
+| Family | Selected |
+|---|---|
+| Generalized prospective | **A** (τ = 0.75) |
+| Inertial control | **A** (τ = 0.75) |
+| First-order delta | **B** (lr 0.01) |
+| TSS prospective | **A** (ε/τ_m = 0.1) |
+| Ideal equilibrium | **B** (lr 0.01) |
+| Gated DeltaNet | **B** (lr 0.01) |
+| Momentum DeltaNet | **A** (lr 0.003) |
+
+Development values for the unselected slots were not in the console tail and
+are pending the digest. Both new-rule families selected the short timescale;
+the declared long-τ configuration did not win selection for either.
+
+### Final-seed validation primary (update 200, evaluation-seed validation)
+
+These are the per-run lines printed during training, **not** the held-out
+split.
+
+| Arm | 201 | 202 | 203 |
+|---|---|---|---|
+| Generalized prospective | 0.4663 | 0.4622 | 0.4814 |
+| Inertial control | 0.4585 | 0.4502 | 0.4702 |
+| First-order delta | 0.5398 | 0.5581 | 0.5620 |
+| TSS prospective | 0.4968 | 0.5012 | 0.5166 |
+| Ideal equilibrium | 0.4084 | 0.3972 | 0.4143 |
+| Gated DeltaNet | 0.5430 | 0.5574 | 0.5681 |
+| Momentum DeltaNet | 0.5215 | 0.5232 | 0.4739 |
+
+### Held-out, mean over three seeds (512 sequences per family)
+
+| Arm | Primary (revision macro) | Revision untouched retention | Recall-family accuracy |
+|---|---|---|---|
+| Generalized prospective | 0.4671 | 0.3068 | 0.4755 |
+| Inertial control | 0.4547 | 0.2918 | 0.4653 |
+| First-order delta | **0.5497** | 0.4917 | 0.6253 |
+| TSS prospective | 0.5017 | 0.4822 | 0.6018 |
+| Ideal equilibrium | 0.4069 | 0.2174 | 0.4147 |
+| Gated DeltaNet | **0.5512** | 0.5029 | 0.6333 |
+| Momentum DeltaNet | 0.5015 | **0.6135** | **0.7136** |
 
 ### Verdicts
 
-* **Literature screen** (vs Momentum and Gated DeltaNet): *(pending)*
-* **Ordinary-prospectivity extension screen** (vs TSS and ideal equilibrium):
-  *(pending)*
-* **Attribution** to the prospective derivative (vs the equally gated inertial
-  control, and the first-order delta comparison): *(pending)*
+**Literature screen — FAILED.**
 
-These are reported separately. A win on one cannot substitute for a loss on the
-other, in either direction.
+| vs | Δ mean primary | all seeds positive | Δ retention | Δ recall | safeguard |
+|---|---|---|---|---|---|
+| Momentum DeltaNet | −0.0344 | no | −0.3067 | −0.2381 | failed |
+| Gated DeltaNet | −0.0841 | no | −0.1961 | −0.1578 | failed |
+
+**Ordinary-prospectivity extension screen — FAILED.**
+
+| vs | Δ mean primary | all seeds positive | Δ retention | Δ recall | safeguard |
+|---|---|---|---|---|---|
+| TSS prospective | −0.0347 | no | −0.1754 | −0.1263 | failed |
+| Ideal equilibrium | +0.0602 | **yes** | +0.0894 | +0.0608 | met |
+
+The candidate passes every condition against the ideal minimum-change
+reference, but the screen needs both references, and it loses to TSS on all
+three measures.
+
+**Attribution (independent of both screens) — credited against the inertial
+control.** Mean differences: primary +0.0124, retention +0.0150, recall
++0.0102, with positive paired primary differences in all three final seeds. The
+per-seed held-out values are pending the digest. This is a comparison of
+separately calibrated and trained rule families, not a term-removal ablation
+of one trajectory. It does not imply competitive performance.
+
+**First-order delta comparison — the simpler account wins.** The equally
+source-gated adaptive first-order delta arm scores **0.5497** primary against
+the generalized candidate's 0.4671, with better retention and recall. It is
+essentially level with Gated DeltaNet (0.5512) on primary. The protocol said
+that if the first-order delta arm matched the candidate's outcome, a simpler
+write-control account would remain viable; here it *exceeds* the candidate on
+every reported measure. In this pilot the second-order structure, prospective
+or inertial, costs accuracy relative to the gated first-order rule.
+
+### What the results support
+
+* The implementation passed all 190 focused checks, including the dense
+  references, the TSS original-equation integration, both derivative routes and
+  every recorded numerical error, and completed the declared batch inside the
+  cap.
+* **No improvement over Momentum or Gated DeltaNet.** The candidate is below
+  both on primary, with retention 31 and 20 points lower respectively.
+* **No improvement over ordinary prospectivity as a whole.** The candidate
+  beats the ideal minimum-change reference on all declared conditions but loses
+  to TSS finite adaptation, which also has substantially better retention and
+  recall.
+* **A small, seed-consistent advantage over the inertial control** (+1.2
+  points primary), in a regime where both second-order rules trail the gated
+  first-order rule by about 8–9 points.
+* Momentum DeltaNet has the best retention and recall by a wide margin, while
+  Gated DeltaNet and the adaptive first-order delta arm lead on primary. No
+  single arm dominates every measure.
+* This is one bounded development screen with three seeds, one task and 200
+  updates. The failed verdicts are reported as they stand; no criterion,
+  selection or configuration is changed in response.
+
+## Results pending the digest
+
+Per-seed held-out primary/retention/recall and CE, the paired per-seed
+differences behind each verdict, all four categories for both families,
+development values for every slot, learned coefficients and gate
+distributions, training gains and norms. None requires another run; all are in
+the saved JSON. Obtain them with the read-only digest:
+
+```
+python -m experiments.adaptive_memory.summary \
+  /Users/durso/s5-runs/adaptive-memory/20260916-153803 \
+  /Users/durso/s5-runs/adaptive-memory/logs/20260916-153803
+```
 
 ## Limitations, declared in advance
 
