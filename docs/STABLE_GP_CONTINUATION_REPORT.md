@@ -1,6 +1,7 @@
 # Stable generalized prospective continuation — report
 
-**Status: implemented, awaiting coordinator review. Not executed.**
+**Status: implemented, amended per static review of `97cedfa` (R0–R4),
+awaiting static review of the correction. Not executed.**
 
 No check, restore, calibration or training for this study has run anywhere.
 Local work was limited to editing, `ast` syntax checks, and static audits of
@@ -59,12 +60,29 @@ its `rho <= 0.9999` bound and its deferred runner are unchanged and not run.
    stated explicitly. Trained checkpoints are validated per epoch regardless of
    whether they fall in that range.
 
+## Static review of `97cedfa` — dispositions
+
+Source: `STABLE_GP_REVIEW_97cedfa_2026_09_16.md`. Full text of each amendment:
+protocol §13.
+
+| | Finding | Provenance | Disposition |
+|---|---|---|---|
+| **R0** | Equal horizons `T = T_in = 5` cancel the auxiliary pole in the first-order `r` direction | **Coordinator correction**: the brief prescribed equal horizons; implemented faithfully | Recurrent reference `T = 10 exp(t)`, input `T_in = 5 exp(q)`; all raw coordinates still zero, so C still starts exactly at B. Tangent identity, equal-horizon cancellation and distinct-horizon residue checks added |
+| **R1** | The fractional-excess interior can round past the boundary when `z` is small (witness `a = 3·2⁻²⁶`) | **Coordinator correction**: the brief prescribed `log1p((1-32 eps) z)`; implemented faithfully | `r ≤ max(0, L - 32 eps (1+\|L\|))`, `L = log1p(z)`, `2 log\|omega\|` for underflow safety, `rho = 1` fallback. Witness checked in float64 and through the production float32 path; projection fixtures moved to production float32 |
+| **R2** | Missing `r`-only check at the start; the shared-leaf comparison omitted `q`; purely relative identity undefined on null-direction leaves; update gate conflated rounding with routing | Implementation | `r`-only JVP vs FD at the start in both dtypes, and `dt ≈ 0`. Pair-specific shared leaves plus input gradients. Mixed absolute/relative criterion with published fixtures, including the training-mode encoder-bias null direction. Routing identity with copied gradients; independent first updates reported only |
+| **R3** | Preflight timed a resident batch, not the training host path; epoch records were lost on a stop | Implementation | Shared `step_loop` timed as executed; validation, acceptance/persistence and final serialization/diagnostics timed separately; every epoch persisted immediately |
+| **R4** | Validation used float64 reconstructions that could hide executed overflow or underflow; B's `T_in` unchecked; acceptance checked only losses | Implementation | Executed-dtype products and generator entries checked first; formula and executed-generator eigenvalues assessed separately; B covered; per-epoch finiteness of parameters, optimizer state, normalization state and scalars; executed coefficients recorded |
+
+The equation, three arms, source checkpoint, schedule, performance criteria and
+1200 s cap are unchanged.
+
 ## Known risks, before execution
 
 * **Budget.** Timescale-study measurements on the same GPU put a 10-epoch Rawat
   run at about 70 s and a block run at about 130 s. That projects roughly
   810 s of training, plus checks, restore, the gate and compilation, against
-  1160 s usable. It may not fit. Preflight will then refuse and report the
+  1160 s usable. R2 added checks, including one small training-mode network,
+  and R3 makes the projection more honest; both tighten the margin. It may not fit. Preflight will then refuse and report the
   measured obstruction, without trimming anything.
 * **First execution.** This is the first execution of all new code, inside the
   cap. Static audits do not substitute for the cluster checks.

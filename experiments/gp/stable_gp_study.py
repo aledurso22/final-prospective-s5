@@ -70,20 +70,37 @@ ARM_ADDED_LEAVES = {"A_rawat": (),
 
 # ---- DECLARED TOLERANCES for the production-dtype identity gate, frozen
 #      before execution. The EXACT identities are established separately in
-#      float64 (tests/test_stable_gp.py, 1e-9 relative). In production float32
-#      the B-vs-C comparison is a closed-form diagonal exponential against a
-#      Pade 4x4 block exponential; the repository's declared float32
-#      coefficient resolution for that block is F32 = 2e-4 (timescale probe),
-#      and these gates allow for its propagation through four layers.
+#      float64 (tests/test_stable_gp.py). In production float32 the B-vs-C
+#      comparison is a closed-form diagonal exponential against a Pade 4x4
+#      block exponential; the repository's declared float32 coefficient
+#      resolution for that block is F32 = 2e-4 (timescale probe), and these
+#      gates allow for its propagation through four layers.
 SOURCE_CE_TOL = 1e-5            # restored vs saved validation CE, as Stage 2
 LOGIT_REL_TOL = 5e-4            # relative Frobenius, validation probe
-GRAD_REL_TOL = 2e-3             # common-leaf gradients, per leaf, relative
-#: common-leaf FIRST optimizer update with the added leaves' gradients frozen,
-#: measured as max |u_x - u_ref| / lr_0 over every common entry. Adam's first
-#: step is ~ -lr g/(|g| + eps) entrywise, so a per-leaf relative norm would
-#: magnify float noise in near-zero entries; lr_0 is the natural scale.
+GRAD_REL_TOL = 2e-3             # shared-leaf and input gradients, per leaf
+#: AMENDED before execution (review R2): the ABSOLUTE branch for near-zero
+#: leaves. A leaf passes iff its values are finite and
+#:     ||g_x - g_ref||_F <= max(GRAD_REL_TOL ||g_ref||_F,
+#:                              GRAD_ABS_EPS_FACTOR * eps(dtype) * G_ref)
+#: with G_ref the global norm of the reference gradient over ALL compared
+#: leaves. In float32 the absolute floor is 1.2e-4 G_ref; in float64 it is
+#: 2.2e-13 G_ref. Needed because training-mode batch normalization removes a
+#: constant shift of the encoder Dense bias, so that leaf's exact gradient is
+#: zero while floating reductions leave residuals, and a purely relative
+#: criterion is undefined there. No leaf is dropped: both errors, magnitudes
+#: and finiteness are logged. Not tuned against any checkpoint.
+GRAD_ABS_EPS_FACTOR = 1e3
+#: optimizer ROUTING identity (review R2): the SAME shared gradient values are
+#: copied into both trees, genuinely extra leaves frozen, and the first
+#: updates compared entrywise as max |u_x - u_ref| / lr_0.
 UPDATE_MAX_TOL = 2e-3
+#: coordinates with |g| below this are reported as near-zero in the separate,
+#: NON-gating comparison of independently computed first updates
+NEAR_ZERO_GRAD = 1e-7
 PROBE_N = 256
+#: preflight: measured host-path training steps after warm-up
+PREFLIGHT_TIMED_STEPS = 40
+PREFLIGHT_VAL_BATCHES = 32
 # ---- declared performance screen
 SCREEN_MIN_GAIN_PP = 0.3
 IMPULSE_LAGS = 128
@@ -391,9 +408,11 @@ def train_step(model, tx, params, opt_state, batch_stats, x, y, rng):
 
 @partial(jax.jit, static_argnums=(0,))
 def grads_at(model, params, batch_stats, x, y, rng):
-    (loss, (logits, _)), g = jax.value_and_grad(
-        loss_fn, has_aux=True)(params, batch_stats, model, x, y, rng)
-    return loss, logits, g
+    """Loss, logits, parameter gradients AND input gradients, training mode."""
+    (loss, (logits, _)), (g, gx) = jax.value_and_grad(
+        loss_fn, argnums=(0, 3), has_aux=True)(params, batch_stats, model, x,
+                                                y, rng)
+    return loss, logits, g, gx
 
 
 @partial(jax.jit, static_argnums=(0,))
@@ -403,10 +422,9 @@ def logits_eval(model, params, batch_stats, x):
 
 
 # ---------------------------------------------------- identity gate --------
-def _common(tree):
+def _flat(tree):
     from flax.traverse_util import flatten_dict
-    return {k: v for k, v in flatten_dict(tree).items()
-            if k[-1] not in SG.ADDED_LEAVES}
+    return flatten_dict(tree) if isinstance(tree, dict) else {("x",): tree}
 
 
 def _rel(a, b):
@@ -416,44 +434,104 @@ def _rel(a, b):
     return d / n if n > 0 else (0.0 if d == 0 else float("inf"))
 
 
-def compare_common(ga, gb):
-    ca, cb = _common(ga), _common(gb)
-    if set(ca) != set(cb):
-        return dict(worst=float("inf"), note="common leaf sets differ")
-    rows = {"/".join(k): _rel(ca[k], cb[k]) for k in ca}
-    worst = max(rows.values()) if rows else 0.0
-    return dict(worst=worst, worst_leaf=max(rows, key=rows.get), n=len(rows))
+def compare_shared(gx, gref, dtype, rel_tol=GRAD_REL_TOL,
+                   abs_factor=GRAD_ABS_EPS_FACTOR):
+    """Mixed absolute/relative identity over the PAIR-SPECIFIC shared leaves.
+
+    The shared set is the intersection of the two trees, so C vs B includes
+    the shared input horizon q, and B vs A includes every inherited leaf.
+    Accepts trees or a single array (input gradients). Every leaf is recorded:
+    absolute and relative error, magnitude, finiteness, and which branch
+    decided it. Nothing is dropped.
+    """
+    fx, fr = _flat(gx), _flat(gref)
+    keys = sorted(set(fx) & set(fr))
+    G = float(onp.sqrt(sum(float(onp.sum(onp.asarray(fr[k], onp.float64) ** 2))
+                           for k in keys)))
+    abs_tol = abs_factor * float(onp.finfo(onp.dtype(dtype)).eps) * G
+    rows, ok = {}, True
+    for k in keys:
+        x = onp.asarray(fx[k], onp.float64); r = onp.asarray(fr[k], onp.float64)
+        finite = bool(onp.all(onp.isfinite(x)) and onp.all(onp.isfinite(r)))
+        d = float(onp.sqrt(onp.sum((x - r) ** 2))) if finite else float("inf")
+        n = float(onp.sqrt(onp.sum(r ** 2))) if finite else float("nan")
+        rel = d / n if (finite and n > 0) else None
+        passed = bool(finite and d <= max(rel_tol * n, abs_tol))
+        branch = ("relative" if (finite and rel_tol * n >= abs_tol)
+                  else "absolute")
+        ok = ok and passed
+        rows["/".join(map(str, k))] = dict(abs_err=d, rel_err=rel,
+                                           ref_norm=n, finite=finite,
+                                           branch=branch, passed=passed)
+    worst = max(rows, key=lambda n: (not rows[n]["passed"],
+                                     rows[n]["abs_err"])) if rows else None
+    return dict(passed=ok, n_leaves=len(rows), reference_global_norm=G,
+                abs_tol=abs_tol, rel_tol=rel_tol, worst_leaf=worst,
+                leaves=rows)
 
 
 def compare_updates(ua, ub):
-    ca, cb = _common(ua), _common(ub)
-    if set(ca) != set(cb):
-        return dict(worst=float("inf"), note="common leaf sets differ")
+    fa, fb = _flat(ua), _flat(ub)
+    keys = sorted(set(fa) & set(fb))
     rows = {"/".join(k): float(onp.max(onp.abs(
-        onp.asarray(ca[k], dtype=onp.float64)
-        - onp.asarray(cb[k], dtype=onp.float64)))) / LR for k in ca}
-    return dict(worst=max(rows.values()), worst_leaf=max(rows, key=rows.get),
+        onp.asarray(fa[k], dtype=onp.float64)
+        - onp.asarray(fb[k], dtype=onp.float64)))) / LR for k in keys}
+    return dict(worst=max(rows.values()) if rows else 0.0,
+                worst_leaf=max(rows, key=rows.get) if rows else None,
                 n=len(rows))
 
 
-def frozen_update(tx, params, g):
-    """One optimizer update with the ADDED leaves' gradients frozen to zero.
+def routed_gradients(params_x, g_ref):
+    """Copy the reference's gradient VALUES into x's tree on shared leaves;
+    genuinely extra leaves of x get zero (frozen)."""
+    from flax.traverse_util import flatten_dict, unflatten_dict
+    fr = flatten_dict(g_ref)
+    return unflatten_dict({k: (fr[k] if k in fr else jnp.zeros_like(v))
+                           for k, v in flatten_dict(params_x).items()})
 
-    Adding those gradients to the global clip can legitimately change common
-    updates even when common raw gradients agree, so the baseline comparison
-    of UPDATES is made with them frozen, as the brief specifies.
-    """
-    g0 = jax.tree_util.tree_map_with_path(
-        lambda p, v: (jnp.zeros_like(v) if leaf_name(p) in SG.ADDED_LEAVES
-                      else v), g)
+
+def first_update(tx, params, g):
     st = tx.init(params)
-    upd, _ = tx.update(g0, st, params)
+    upd, _ = tx.update(g, st, params)
     return upd
 
 
+def routing_identity(tx, p_x, p_ref, g_ref):
+    """Optimizer-routing identity (review R2): SAME gradient values, so any
+    difference is routing, grouping or decay - not gradient rounding."""
+    u_ref = first_update(tx, p_ref, routed_gradients(p_ref, g_ref))
+    u_x = first_update(tx, p_x, routed_gradients(p_x, g_ref))
+    c = compare_updates(u_x, u_ref)
+    c["passed"] = bool(c["worst"] <= UPDATE_MAX_TOL)
+    return c
+
+
+def independent_update_report(tx, model, p_x, bs_x, g_x, p_ref, bs_ref, g_ref,
+                              model_ref, xprobe):
+    """NOT a gate: actual first updates from independently computed gradients,
+    their near-zero coordinates, and the post-update functional discrepancy."""
+    u_x = first_update(tx, p_x, g_x)
+    u_ref = first_update(tx, p_ref, g_ref)
+    c = compare_updates(u_x, u_ref)
+    fr = _flat(g_ref)
+    near = sum(int(onp.sum(onp.abs(onp.asarray(v)) < NEAR_ZERO_GRAD))
+               for v in fr.values())
+    q_x = optax.apply_updates(p_x, u_x)
+    q_ref = optax.apply_updates(p_ref, u_ref)
+    post = _rel(logits_eval(model, q_x, bs_x, xprobe),
+                logits_eval(model_ref, q_ref, bs_ref, xprobe))
+    return dict(max_update_diff_over_lr=c["worst"], worst_leaf=c["worst_leaf"],
+                n_near_zero_reference_coordinates=near,
+                near_zero_threshold=NEAR_ZERO_GRAD,
+                post_update_logits_rel=post,
+                note=("reported only; a finite-precision forward identity does "
+                      "not imply identical training trajectories"))
+
+
 def identity_gate(start, data, tx):
-    """Initial predictions, shared gradients and frozen-extra updates, BEFORE
-    any arm trains. Any disagreement stops the screen."""
+    """Initial predictions, shared gradients (parameters and input), optimizer
+    routing, and C's initial executed domain - BEFORE any arm trains. Any gated
+    disagreement stops the screen."""
     Xtr, Ytr = data["train"]
     Xva, _ = data["val"]
     xp = jnp.asarray(onp.asarray(Xva[:PROBE_N]))
@@ -463,46 +541,51 @@ def identity_gate(start, data, tx):
     rng = jax.random.PRNGKey(SEEDS[0])
     out = dict(probe_n=PROBE_N, tolerances=dict(
         logits_rel=LOGIT_REL_TOL, grads_rel=GRAD_REL_TOL,
-        updates_max_over_lr=UPDATE_MAX_TOL))
-    logits, grads, updates = {}, {}, {}
+        grads_abs_eps_factor=GRAD_ABS_EPS_FACTOR,
+        routing_update_max_over_lr=UPDATE_MAX_TOL))
+    logits, grads, xgrads = {}, {}, {}
     for arm in ARMS:
         p, bs = start[arm]
         logits[arm] = onp.asarray(logits_eval(build(arm, False), p, bs, xp))
-        _, _, g = grads_at(build(arm, True), p, bs, xb, yb, rng)
-        grads[arm] = g
-        updates[arm] = frozen_update(tx, p, g)
+        _, _, g, gx = grads_at(build(arm, True), p, bs, xb, yb, rng)
+        grads[arm], xgrads[arm] = g, gx
     pairs = (("B_learned_input", "A_rawat"),
              ("C_stable_generalized", "B_learned_input"))
     ok = True
+    dtype = onp.float32
     for x, ref in pairs:
-        key = f"{x}_vs_{ref}"
         lr = _rel(logits[x], logits[ref])
         agree = float(onp.mean(onp.argmax(logits[x], -1)
                                == onp.argmax(logits[ref], -1)))
-        gc = compare_common(grads[x], grads[ref])
-        uc = compare_updates(updates[x], updates[ref])
+        gp = compare_shared(grads[x], grads[ref], dtype)
+        gi = compare_shared(xgrads[x], xgrads[ref], dtype)
+        route = routing_identity(tx, start[x][0], start[ref][0], grads[ref])
+        indep = independent_update_report(
+            tx, build(x, False), start[x][0], start[x][1], grads[x],
+            start[ref][0], start[ref][1], grads[ref], build(ref, False), xp)
         row = dict(logits_rel=lr, argmax_agreement=agree,
-                   grads_common_worst_rel=gc["worst"],
-                   grads_worst_leaf=gc.get("worst_leaf"),
-                   updates_frozen_extra_max_over_lr=uc["worst"],
-                   updates_worst_leaf=uc.get("worst_leaf"))
-        row["passed"] = bool(lr <= LOGIT_REL_TOL and gc["worst"] <= GRAD_REL_TOL
-                             and uc["worst"] <= UPDATE_MAX_TOL)
+                   param_grads=gp, input_grads=gi, routing=route,
+                   independent_first_update=indep)
+        row["passed"] = bool(lr <= LOGIT_REL_TOL and gp["passed"]
+                             and gi["passed"] and route["passed"])
         ok = ok and row["passed"]
-        out[key] = row
+        out[f"{x}_vs_{ref}"] = row
     # added-leaf gradients at the start, for the record: q is active in B and
-    # C; r is generally nonzero; t's task gradient vanishes at rho = 1
-    from flax.traverse_util import flatten_dict
+    # C; r is generally nonzero at T != T_in; t's task gradient vanishes at
+    # rho = 1
     added = {}
     for arm in ARMS[1:]:
-        for k, v in flatten_dict(grads[arm]).items():
+        for k, v in _flat(grads[arm]).items():
             if k[-1] in SG.ADDED_LEAVES:
                 added.setdefault(arm, {}).setdefault(k[-1], []).append(
                     float(onp.sqrt(onp.sum(onp.asarray(v) ** 2))))
     out["added_leaf_grad_norms_per_layer"] = added
     out["C_initial_domain"] = SG.executed_domain_report(
         start["C_stable_generalized"][0])
-    ok = ok and out["C_initial_domain"]["passed"]
+    out["B_initial_domain"] = SG.executed_domain_report(
+        start["B_learned_input"][0])
+    ok = (ok and out["C_initial_domain"]["passed"]
+          and out["B_initial_domain"]["passed"])
     out["passed"] = bool(ok)
     return out
 
@@ -538,25 +621,20 @@ def profile_change(start_rows, end_rows):
 
 
 def added_leaf_record(params):
-    from flax.traverse_util import flatten_dict
-    out = {}
-    for k, v in flatten_dict(params).items():
-        if k[-1] not in SG.ADDED_LEAVES:
-            continue
-        raw = onp.asarray(v, dtype=onp.float64)
-        if k[-1] == SG.LEAF_RHO:
-            val = onp.exp(raw); name = "rho"
-        elif k[-1] == SG.LEAF_T:
-            val = SG.RECURRENT_T_REFERENCE * onp.exp(raw); name = "T"
-        else:
-            val = SG.INPUT_T_REFERENCE * onp.exp(raw); name = "T_in"
-        out["/".join(k)] = dict(quantity=name,
-                                min=float(val.min()),
-                                median=float(onp.median(val)),
-                                max=float(val.max()),
-                                raw_abs_max=float(onp.abs(raw).max()),
-                                values=val.tolist())
-    return out
+    """Executed-dtype T_in, rho, T, M per layer (review R4), with summaries."""
+    rec = SG.executed_coefficients(params)
+    for layer, v in rec.items():
+        v["summary"] = {k: dict(min=float(onp.min(v[k])),
+                                median=float(onp.median(v[k])),
+                                max=float(onp.max(v[k])))
+                        for k in ("T_in", "rho", "T", "M") if k in v}
+    return rec
+
+
+def tree_finite(tree):
+    return bool(all(onp.all(onp.isfinite(onp.asarray(v)))
+                    for v in jax.tree_util.tree_leaves(tree)
+                    if onp.issubdtype(onp.asarray(v).dtype, onp.inexact)))
 
 
 def state_counts(arm, params):
@@ -567,66 +645,110 @@ def state_counts(arm, params):
                 else int(v) * N_LAYERS) for k, v in per.items()}
 
 
+# ------------------------------------------------- the shared step loop ---
+def step_loop(arm, tx, state, Xtr, Ytr, seed, epoch_index, tel,
+              max_steps=None):
+    """The ONE host path used by training AND by preflight timing (review R3):
+    host slicing, device transfer, RNG split, the jitted step with projection,
+    and synchronization of EVERY scalar the run records."""
+    params, opt_state, bs, rng = state
+    model = build(arm, True)
+    tl = ta = nb = 0.0
+    gn = 0.0
+    for i, idx in enumerate(SC.epoch_batches(Xtr.shape[0], BATCH, seed,
+                                             epoch_index)):
+        if max_steps is not None and i >= max_steps:
+            break
+        sel = onp.sort(idx)
+        xb = jnp.asarray(onp.asarray(Xtr[sel])); yb = jnp.asarray(Ytr[sel])
+        rng, sub = jax.random.split(rng)
+        (params, opt_state, bs, loss, acc, gnorm, t, agn,
+         aun) = train_step(model, tx, params, opt_state, bs, xb, yb, sub)
+        tl += float(loss); ta += float(acc); nb += 1
+        gn = float(gnorm)
+        tel["events"] += int(t["n_projected"])
+        tel["max_overshoot"] = max(tel["max_overshoot"],
+                                   float(t["max_overshoot"]))
+        tel["min_log_margin"] = min(tel["min_log_margin"],
+                                    float(t["min_log_margin"]))
+        tel["added_grad_norm_sum"] += float(agn)
+        tel["added_update_norm_sum"] += float(aun)
+        tel["steps"] += 1
+    return (params, opt_state, bs, rng), dict(
+        train_loss=tl / max(nb, 1), train_acc=ta / max(nb, 1),
+        last_grad_norm=gn, steps=int(nb))
+
+
+def new_telemetry():
+    return dict(events=0, max_overshoot=0.0, min_log_margin=float("inf"),
+                added_grad_norm_sum=0.0, added_update_norm_sum=0.0, steps=0)
+
+
+def epoch_acceptance(arm, params, opt_state, bs, rec):
+    """Finiteness of parameters, optimizer state, normalization state and
+    every reported scalar, plus the executed-domain report for B and C."""
+    scal = [rec["train_loss"], rec["train_acc"], rec["last_grad_norm"],
+            rec["val_accuracy"], rec["val_cross_entropy"]]
+    checks = dict(params_finite=tree_finite(params),
+                  optimizer_state_finite=tree_finite(opt_state),
+                  batch_stats_finite=tree_finite(bs),
+                  scalars_finite=bool(onp.all(onp.isfinite(scal))))
+    dom = (SG.executed_domain_report(params) if arm != "A_rawat" else None)
+    checks["domain_passed"] = True if dom is None else dom["passed"]
+    return all(checks.values()), checks, dom
+
+
 # --------------------------------------------------------------- one run ---
 def run_one(arm, seed, start, tx, data, steps_per_epoch, out, deadline,
             reserve_s, status, epoch0):
     (Xtr, Ytr), (Xva, Yva) = data["train"], data["val"]
-    train_model, eval_model = build(arm, True), build(arm, False)
+    eval_model = build(arm, False)
     params, bs = start[arm]
-    opt_state = tx.init(params)
-    rng = jax.random.PRNGKey(seed)          # SAME dropout stream in every arm
+    state = (params, tx.init(params), bs,
+             jax.random.PRNGKey(seed))          # SAME dropout stream per arm
     epochs = [dict(epoch=0, **epoch0[arm], note="shared start, measured once")]
-    tel = dict(events=0, max_overshoot=0.0, min_log_margin=float("inf"),
-               added_grad_norm_sum=0.0, added_update_norm_sum=0.0, steps=0)
+    tel = new_telemetry()
+    partial_path = os.path.join(out, "runs", f"seed{seed}_{arm}.json")
     t_run = time.time()
+
+    def persist(extra=None):
+        write(partial_path, dict(arm=arm, seed=seed, epochs=epochs,
+                                 projection_telemetry=dict(tel),
+                                 elapsed_s=time.time() - t_run,
+                                 **(extra or {})))
+
     for epoch in range(1, EPOCHS + 1):
         if time.time() > deadline - reserve_s:
             status["incomplete"].append(
                 f"{arm} seed {seed}: stopped before epoch {epoch} (budget)")
+            persist(dict(stopped="budget"))
             return None
         t0 = time.time()
-        tl = ta = nb = 0.0
         # data order is a pure function of (seed, epoch index from zero)
-        for idx in SC.epoch_batches(Xtr.shape[0], BATCH, seed, epoch - 1):
-            sel = onp.sort(idx)
-            xb = jnp.asarray(onp.asarray(Xtr[sel])); yb = jnp.asarray(Ytr[sel])
-            rng, sub = jax.random.split(rng)
-            (params, opt_state, bs, loss, acc, gn, t, agn,
-             aun) = train_step(train_model, tx, params, opt_state, bs, xb, yb,
-                               sub)
-            tl += float(loss); ta += float(acc); nb += 1
-            tel["events"] += int(t["n_projected"])
-            tel["max_overshoot"] = max(tel["max_overshoot"],
-                                       float(t["max_overshoot"]))
-            tel["min_log_margin"] = min(tel["min_log_margin"],
-                                        float(t["min_log_margin"]))
-            tel["added_grad_norm_sum"] += float(agn)
-            tel["added_update_norm_sum"] += float(aun)
-            tel["steps"] += 1
+        state, st = step_loop(arm, tx, state, Xtr, Ytr, seed, epoch - 1, tel)
+        params, opt_state, bs, _ = state
         val = RB.evaluate_split(params, bs, eval_model, Xva, Yva, BATCH)
-        rec = dict(epoch=epoch, train_loss=tl / nb, train_acc=ta / nb,
-                   val_accuracy=val["accuracy"],
+        rec = dict(epoch=epoch, **st, val_accuracy=val["accuracy"],
                    val_cross_entropy=val["cross_entropy"], val_n=val["n"],
-                   last_grad_norm=float(gn), epoch_s=time.time() - t0)
-        if arm == "C_stable_generalized":
-            dom = SG.executed_domain_report(params)
-            rec["domain_passed"] = dom["passed"]
-            rec["n_passive"] = sum(r["n_passive_rho_le_1"]
+                   epoch_s=time.time() - t0)
+        ok, checks, dom = epoch_acceptance(arm, params, opt_state, bs, rec)
+        rec["acceptance"] = checks
+        if dom is not None:
+            rec["domain"] = dom
+            rec["n_passive"] = sum(r.get("n_passive_rho_le_1", 0)
                                    for r in dom["layers"])
-            if not dom["passed"]:
-                status["failed"] = (f"{arm} seed {seed} epoch {epoch}: "
-                                    f"executed coefficients left the stable "
-                                    f"domain or became non-finite")
-                status["failed_domain"] = dom
-                return "FAILED"
-        if not all(onp.isfinite([rec["train_loss"], rec["val_cross_entropy"]])):
-            status["failed"] = f"{arm} seed {seed} epoch {epoch}: non-finite"
-            return "FAILED"
         epochs.append(rec)
+        persist()                     # every completed epoch, immediately
+        if not ok:
+            status["failed"] = (f"{arm} seed {seed} epoch {epoch}: acceptance "
+                                f"failed {checks}")
+            persist(dict(failed=status["failed"]))
+            return "FAILED"
         print(f"  [seed {seed}] {arm:22s} epoch {epoch:>2}  train "
               f"{rec['train_loss']:.4f}/{rec['train_acc']:.4f}  val "
               f"{val['accuracy']:.4f} ce {val['cross_entropy']:.4f}  "
               f"{rec['epoch_s']:.1f}s")
+    params, opt_state, bs, _ = state
     save_tree(os.path.join(out, "params", f"final_seed{seed}_{arm}.msgpack"),
               dict(params=params, batch_stats=bs))
     n = max(tel["steps"], 1)
@@ -647,7 +769,7 @@ def run_one(arm, seed, start, tx, data, steps_per_epoch, out, deadline,
                                  params)[0]
                              if leaf_name(p) in SG.ADDED_LEAVES),
         state_counts=state_counts(arm, params),
-        added_leaves_final=added_leaf_record(params),
+        executed_coefficients_final=added_leaf_record(params),
         projection_telemetry=dict(
             events=tel["events"],
             entry_updates=n * (N_LAYERS * (SSM_SIZE // 2)
@@ -661,68 +783,90 @@ def run_one(arm, seed, start, tx, data, steps_per_epoch, out, deadline,
                   "exceeded the stable-interior bound; optimizer state was "
                   "left untouched")),
         final_param_digest=tree_digest(params))
-    if arm == "C_stable_generalized":
+    if arm != "A_rawat":
         row["final_domain"] = SG.executed_domain_report(params)
     row["response_change"] = profile_change(start["_profile"][arm],
                                             response_profile(arm, params))
     for r in row["response_change"]:
         r.pop("K", None)
+    persist(dict(complete=True))
     return row
 
 
 # ------------------------------------------------------------- preflight ---
-def preflight(start, tx, data, steps_per_epoch, status, diag_s):
-    (Xtr, Ytr), (Xva, _) = data["train"], data["val"]
-    idx = onp.sort(next(iter(SC.epoch_batches(Xtr.shape[0], BATCH, 0, 0))))
-    xb = jnp.asarray(onp.asarray(Xtr[idx])); yb = jnp.asarray(Ytr[idx])
+def preflight(start, tx, data, steps_per_epoch, status, out):
+    """Time what training EXECUTES (review R3), per arm:
+
+      * steps through `step_loop`, the same host path as training, after a
+        warm-up that absorbs compilation (incurred, not projected);
+      * a validation pass, scaled from PREFLIGHT_VAL_BATCHES full batches;
+      * per-epoch acceptance: finiteness of params/optimizer/normalization
+        state and the executed-domain report;
+      * per-epoch persistence of the run record;
+      * final serialization and response diagnostics.
+    """
+    (Xtr, Ytr), (Xva, Yva) = data["train"], data["val"]
     rows, total, retraced = [], 0.0, False
     n_val_batches = -(-Xva.shape[0] // BATCH)
     for arm in ARMS:
-        m = build(arm, True)
         p, bs = start[arm]
         opt = tx.init(p)
-        rng = jax.random.PRNGKey(0)
+        state = (p, opt, bs, jax.random.PRNGKey(0))
         t0 = time.time()
-        out = train_step(m, tx, p, opt, bs, xb, yb, rng)
-        out[3].block_until_ready()
-        compile_s = time.time() - t0
-        q, o2, b2 = out[0], out[1], out[2]
-        out = train_step(m, tx, q, o2, b2, xb, yb, rng)
-        q, o2, b2 = out[0], out[1], out[2]
-        out[3].block_until_ready()
+        state, _ = step_loop(arm, tx, state, Xtr, Ytr, 0, 0, new_telemetry(),
+                             max_steps=2)
+        warm_s = time.time() - t0
         n0 = train_step._cache_size()
+        tel = new_telemetry()
         t1 = time.time()
-        for _ in range(5):
-            out = train_step(m, tx, q, o2, b2, xb, yb, rng)
-            q, o2, b2 = out[0], out[1], out[2]
-        out[3].block_until_ready()
-        step_s = (time.time() - t1) / 5
+        state, st = step_loop(arm, tx, state, Xtr, Ytr, 0, 1, tel,
+                              max_steps=PREFLIGHT_TIMED_STEPS)
+        step_s = (time.time() - t1) / st["steps"]
         arm_retraced = train_step._cache_size() != n0
         retraced = retraced or arm_retraced
+        q, o2, b2, _ = state
+        RB.evaluate_split(q, b2, build(arm, False), Xva[:BATCH * 2],
+                          Yva[:BATCH * 2], BATCH)            # warm
         t2 = time.time()
-        RB.evaluate_split(p, bs, build(arm, False), Xva[:BATCH * 8],
-                          data["val"][1][:BATCH * 8], BATCH)
-        val_s = (time.time() - t2) / 8 * n_val_batches
-        per_run = EPOCHS * (steps_per_epoch * step_s + val_s)
+        RB.evaluate_split(q, b2, build(arm, False),
+                          Xva[:BATCH * PREFLIGHT_VAL_BATCHES],
+                          Yva[:BATCH * PREFLIGHT_VAL_BATCHES], BATCH)
+        val_s = (time.time() - t2) / PREFLIGHT_VAL_BATCHES * n_val_batches
+        t3 = time.time()
+        rec = dict(train_loss=0.0, train_acc=0.0, last_grad_norm=0.0,
+                   val_accuracy=0.0, val_cross_entropy=0.0)
+        epoch_acceptance(arm, q, o2, b2, rec)
+        write(os.path.join(out, "preflight", f"persist_{arm}.json"),
+              dict(epochs=[rec] * EPOCHS, telemetry=tel))
+        epoch_host_s = time.time() - t3
+        t4 = time.time()
+        save_tree(os.path.join(out, "preflight", f"final_{arm}.msgpack"),
+                  dict(params=q, batch_stats=b2))
+        response_profile(arm, q)
+        state_counts(arm, q)
+        tree_digest(q)
+        final_s = time.time() - t4
+        per_run = (EPOCHS * (steps_per_epoch * step_s + val_s + epoch_host_s)
+                   + final_s)
         arm_total = len(SEEDS) * per_run
         total += arm_total
-        rows.append(dict(arm=arm, compile_s_incurred=compile_s, step_s=step_s,
-                         val_pass_s=val_s, per_run_s=per_run,
-                         arm_total_s=arm_total, retraced=arm_retraced))
-        print(f"[preflight] {arm:22s} compile {compile_s:6.1f}s  step "
+        rows.append(dict(arm=arm, warmup_s_incurred=warm_s,
+                         host_path_step_s=step_s, timed_steps=st["steps"],
+                         val_pass_s=val_s, epoch_acceptance_and_persist_s=
+                         epoch_host_s, final_serialize_diagnostics_s=final_s,
+                         per_run_s=per_run, arm_total_s=arm_total,
+                         retraced=arm_retraced))
+        print(f"[preflight] {arm:22s} warm {warm_s:6.1f}s  step "
               f"{step_s * 1e3:6.2f}ms  epoch {steps_per_epoch * step_s:6.1f}s  "
-              f"val {val_s:5.1f}s  x{len(SEEDS)} = {arm_total:6.1f}s")
-    host = 3.0 * len(SEEDS) * len(ARMS) + len(SEEDS) * len(ARMS) * diag_s
-    total += host
-    status["preflight"] = dict(rows=rows, host_and_diagnostics_s=host,
-                               measured_diagnostic_s_per_run=diag_s,
-                               projected_remaining_s=total,
-                               retraced_any=retraced,
-                               scope=("9 runs x 10 epochs x steps, one "
-                                      "validation pass per epoch, final "
-                                      "diagnostics and serialization. "
-                                      "Compilation measured here is incurred, "
-                                      "not projected again."))
+              f"val {val_s:5.1f}s  accept {epoch_host_s:4.2f}s  final "
+              f"{final_s:4.1f}s  x{len(SEEDS)} = {arm_total:6.1f}s")
+    status["preflight"] = dict(
+        rows=rows, projected_remaining_s=total, retraced_any=retraced,
+        scope=("9 runs x 10 epochs x steps through the SAME host path as "
+               "training (data access, transfer, RNG split, projection "
+               "telemetry, synchronization), the per-epoch validation pass, "
+               "acceptance and persistence, and final serialization and "
+               "diagnostics. Warm-up compilation is incurred, not projected."))
     print(f"PREFLIGHT_PROJECTED_REMAINING_S={total:.1f}")
     return total, retraced
 
@@ -865,13 +1009,17 @@ def main():
     for k in ("B_learned_input_vs_A_rawat",
               "C_stable_generalized_vs_B_learned_input"):
         g = gate[k]
-        print(f"[gate] {k}: logits {g['logits_rel']:.2e}  grads "
-              f"{g['grads_common_worst_rel']:.2e}  frozen-extra updates "
-              f"{g['updates_frozen_extra_max_over_lr']:.2e}  argmax "
-              f"{g['argmax_agreement']:.4f}  -> "
+        print(f"[gate] {k}: logits {g['logits_rel']:.2e}  param grads "
+              f"{'PASS' if g['param_grads']['passed'] else 'FAIL'} "
+              f"(worst {g['param_grads']['worst_leaf']})  input grads "
+              f"{'PASS' if g['input_grads']['passed'] else 'FAIL'}  routing "
+              f"{g['routing']['worst']:.2e}  independent update "
+              f"{g['independent_first_update']['max_update_diff_over_lr']:.2e}"
+              f" (reported)  argmax {g['argmax_agreement']:.4f}  -> "
               f"{'PASS' if g['passed'] else 'FAIL'}")
-    print(f"[gate] C initial stable domain: "
-          f"{'PASS' if gate['C_initial_domain']['passed'] else 'FAIL'}")
+    print(f"[gate] initial executed domain: C "
+          f"{'PASS' if gate['C_initial_domain']['passed'] else 'FAIL'}, B "
+          f"{'PASS' if gate['B_initial_domain']['passed'] else 'FAIL'}")
     if not gate["passed"]:
         status["failed"] = ("baseline identity or initial stable domain "
                             "disagreed; the screen is stopped, no tolerance "
@@ -880,7 +1028,6 @@ def main():
 
     # ---- epoch-0 validation for every arm, and response profiles
     epoch0 = {}
-    t_diag = time.time()
     start["_profile"] = {}
     for arm in ARMS:
         p, bs = start[arm]
@@ -888,15 +1035,13 @@ def main():
         epoch0[arm] = dict(val_accuracy=v["accuracy"],
                            val_cross_entropy=v["cross_entropy"], val_n=v["n"])
         start["_profile"][arm] = response_profile(arm, p)
-    diag_s = (time.time() - t_diag) / len(ARMS)
     status["epoch0"] = epoch0
     print(f"[epoch0] " + "  ".join(f"{a} {epoch0[a]['val_accuracy']:.4f}"
                                    for a in ARMS))
     write(os.path.join(out, "status.json"), status)
 
     # ---- preflight on the complete declared screen
-    proj, retraced = preflight(start, tx, data, steps_per_epoch, status,
-                               diag_s)
+    proj, retraced = preflight(start, tx, data, steps_per_epoch, status, out)
     write(os.path.join(out, "status.json"), status)
     if retraced:
         status["incomplete"].append("retrace during preflight step timing; "

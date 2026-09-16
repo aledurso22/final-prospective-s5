@@ -11,6 +11,21 @@ identities at the study's OWN declared gate tolerances.
      gradients and first updates with added leaves frozen, at LOGIT_REL_TOL,
      GRAD_REL_TOL and UPDATE_MAX_TOL from the study.
   3. The T derivative is available away from rho = 1.
+
+AMENDED BEFORE EXECUTION (review of 97cedfa):
+  R1  the rounding witness T = 1, omega = 1, a = 3 * 2^-26 through the
+      PRODUCTION float32 bound and exp: rho must be exactly 1 and stable;
+  R2  an r-ONLY directional derivative at the actual start q = r = t = 0
+      against central differences at BOTH declared float32 steps, a
+      vanishing t derivative there, the mixed absolute/relative gradient
+      identity on the PAIR-SPECIFIC shared leaves (q included for C vs B) and
+      on INPUT gradients, and the optimizer-routing identity with copied
+      gradients;
+  R0  recurrent reference horizon 10, input reference 5.
+
+Declared float32 derivative constants: steps (1e-2, 3e-3); relative
+tolerance 2e-2 at EACH step; resolvability |jvp| >= 100 eps32 |f| / h_min;
+t-derivative at the start <= 1e-3 max|dL/dr|.
 """
 
 import math
@@ -57,7 +72,8 @@ def layer(rs, P, lam_im_scale):
     return {"Lambda_re": jnp.asarray(lam_re), "Lambda_im": jnp.asarray(lam_im),
             "log_step": jnp.asarray(log_step),
             SG.LEAF_T: jnp.asarray(rs.uniform(-4, 4, P).astype(onp.float32)),
-            SG.LEAF_RHO: jnp.asarray(onp.zeros(P, onp.float32))}
+            SG.LEAF_RHO: jnp.asarray(onp.zeros(P, onp.float32)),
+            SG.LEAF_T_IN: jnp.asarray(onp.zeros(P, onp.float32))}
 
 
 project = jax.jit(SG.project_stable_domain)
@@ -71,7 +87,8 @@ for trial in range(40):
     for i in range(2):
         seq = tree["encoder"][f"layers_{i}"]["seq"]
         a, w = SG.modal_j(seq["Lambda_re"], seq["Lambda_im"], seq["log_step"])
-        b = SG.log_rho_upper(a, w, 5 * jnp.exp(seq[SG.LEAF_T]), onp.float32)
+        b = SG.log_rho_upper(a, w, SG.RECURRENT_T_REFERENCE
+                             * jnp.exp(seq[SG.LEAF_T]), onp.float32)
         bump = rs.choice([1e-6, 1e-3, 1.0, 50.0], P).astype(onp.float32)
         seq[SG.LEAF_RHO] = jnp.where(jnp.isfinite(b), b + bump, 3.0)
     out, tel = project(tree)
@@ -154,17 +171,23 @@ for name, mx, px, vx, mr, pr, vr in (
     yr = mr.apply({"params": pr, "batch_stats": vr["batch_stats"]}, x,
                   jnp.ones(x.shape[0]))
     lr_ = rel(yx, yr)
-    gx = jax.grad(loss(mx, vx["batch_stats"]))(px, x)
-    gr = jax.grad(loss(mr, vr["batch_stats"]))(pr, x)
-    gc = ST.compare_common(gx, gr)
-    uc = ST.compare_updates(ST.frozen_update(tx, px, gx),
-                            ST.frozen_update(tx, pr, gr))
+    gx, gxx = jax.grad(loss(mx, vx["batch_stats"]), argnums=(0, 1))(px, x)
+    gr, grx = jax.grad(loss(mr, vr["batch_stats"]), argnums=(0, 1))(pr, x)
+    gp = ST.compare_shared(gx, gr, onp.float32)
+    gi = ST.compare_shared(gxx, grx, onp.float32)
+    route = ST.routing_identity(tx, px, pr, gr)
+    shared_names = sorted(gp["leaves"])
+    q_in = any(n.endswith(SG.LEAF_T_IN) for n in shared_names)
     print(f"  [2] {name}: logits {lr_:.2e} (tol {ST.LOGIT_REL_TOL:.0e})  "
-          f"grads {gc['worst']:.2e} at {gc.get('worst_leaf')} (tol "
-          f"{ST.GRAD_REL_TOL:.0e})  frozen-extra update "
-          f"{uc['worst']:.2e} (tol {ST.UPDATE_MAX_TOL:.0e})")
-    if not (lr_ <= ST.LOGIT_REL_TOL and gc["worst"] <= ST.GRAD_REL_TOL
-            and uc["worst"] <= ST.UPDATE_MAX_TOL):
+          f"param grads {'PASS' if gp['passed'] else 'FAIL'} over "
+          f"{gp['n_leaves']} shared leaves (q included: {q_in}; worst "
+          f"{gp['worst_leaf']})  input grads "
+          f"{'PASS' if gi['passed'] else 'FAIL'}  routing "
+          f"{route['worst']:.2e} (tol {ST.UPDATE_MAX_TOL:.0e})")
+    if name.startswith("C") and not q_in:
+        fails.append("C vs B comparison omitted the shared q leaves")
+    if not (lr_ <= ST.LOGIT_REL_TOL and gp["passed"] and gi["passed"]
+            and route["passed"]):
         fails.append(f"{name}: production identity outside declared gate")
 
 
@@ -177,6 +200,63 @@ tg = max(float(onp.max(onp.abs(onp.asarray(v))))
 print(f"  [3] |dL/dt| away from rho = 1: {tg:.3e}")
 if not (onp.isfinite(tg) and tg > 0.0):
     fails.append("T derivative unavailable away from rho = 1")
+
+
+# ---------------------------------------------------------------- R1 --------
+a_w = jnp.asarray(3 * 2.0 ** -26, jnp.float32)
+one = jnp.asarray(1.0, jnp.float32)
+bound_w = SG.log_rho_upper(a_w[None], one[None], one[None], onp.float32)
+rho_w = float(jnp.exp(bound_w)[0])
+rmax_w = float(SG.rho_max_float64(onp.float32(3 * 2.0 ** -26), 1.0, 1.0))
+print(f"  [R1] witness: bound {float(bound_w[0]):.3e}  executed rho "
+      f"{rho_w!r}  rho_max {rmax_w!r}")
+if not (rho_w == 1.0 and rho_w < rmax_w
+        and SG.stability_S(3 * 2.0 ** -26, 1.0, 1.0, rho_w) > 0):
+    fails.append("R1 witness: production bound did not return the rho = 1 "
+                 "fallback inside the domain")
+
+# ---------------------------------------------------------------- R2 --------
+FD32_STEPS, FD32_REL = (1e-2, 3e-3), 2e-2
+kw = dict(_ssm_kwargs(4, 6), dt_min=0.1, dt_max=1.0)
+m0 = RawatClassifier(ssm=init_substrate_ssm("sgp_learned_input", **kw),
+                     d_model=6, n_layers=2, d_output=3, readout_width=5,
+                     mlp_hidden=7, training=False)
+x0 = jnp.asarray(onp.random.RandomState(8).randn(24, 2).astype(onp.float32))
+v0 = m0.init(jax.random.PRNGKey(3), x0, jnp.ones(24))
+rs0 = onp.random.RandomState(27)
+w0 = jnp.asarray(rs0.randn(3).astype(onp.float32))
+f0 = lambda p: jnp.sum(w0 * m0.apply(                              # noqa: E731
+    {"params": p, "batch_stats": v0["batch_stats"]}, x0, jnp.ones(24)))
+p0 = v0["params"]
+flat0 = flatten_dict(p0)
+d0 = unflatten_dict({k: (jnp.asarray(rs0.randn(*onp.shape(val))
+                                     .astype(onp.float32))
+                         if k[-1] == SG.LEAF_RHO else jnp.zeros_like(val))
+                     for k, val in flat0.items()})
+jvp0 = float(jax.jvp(f0, (p0,), (d0,))[1])
+fval = float(f0(p0))
+eps32 = float(onp.finfo(onp.float32).eps)
+resolvable = abs(jvp0) >= 100 * eps32 * max(abs(fval), 1.0) / min(FD32_STEPS)
+print(f"  [R2] r-only jvp at start {jvp0:.5e}  f {fval:.4e}  resolvable "
+      f"{resolvable}")
+if not resolvable:
+    fails.append("R2 r-only fixture is not resolvable in float32")
+for h in FD32_STEPS:
+    hp = jax.tree_util.tree_map(lambda a_, b_: a_ + onp.float32(h) * b_, p0, d0)
+    hm = jax.tree_util.tree_map(lambda a_, b_: a_ - onp.float32(h) * b_, p0, d0)
+    fd = (float(f0(hp)) - float(f0(hm))) / (2 * h)
+    rel_e = abs(jvp0 - fd) / max(abs(fd), 1e-30)
+    print(f"  [R2] h={h:g}  fd {fd:.5e}  rel {rel_e:.2e} (tol {FD32_REL:.0e})")
+    if not rel_e < FD32_REL:
+        fails.append(f"R2 r-only derivative at h={h}: rel {rel_e:.2e}")
+g0 = flatten_dict(jax.grad(f0)(p0))
+gr0 = max(float(onp.max(onp.abs(onp.asarray(v)))) for k, v in g0.items()
+          if k[-1] == SG.LEAF_RHO)
+gt0 = max(float(onp.max(onp.abs(onp.asarray(v)))) for k, v in g0.items()
+          if k[-1] == SG.LEAF_T)
+print(f"  [R2] start: max|dL/dr| {gr0:.3e}  max|dL/dt| {gt0:.3e}")
+if not (gr0 > 0 and gt0 <= 1e-3 * gr0):
+    fails.append("R2 start: r derivative absent or t derivative not ~0")
 
 if fails:
     print("FAILURES:")

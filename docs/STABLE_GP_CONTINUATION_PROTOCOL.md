@@ -1,6 +1,8 @@
 # Stable generalized prospective continuation — frozen protocol
 
-**Frozen before any execution.** Nothing in this study has run anywhere — no
+**Frozen before any execution. Amended before any execution by the static
+review of `97cedfa` — see §13, which supersedes the corresponding passages
+below.** Nothing in this study has run anywhere — no
 check, calibration, restore or training, on the cluster or locally. Local work
 was limited to editing, `ast` syntax checks and static symbol/signature audits.
 
@@ -48,11 +50,11 @@ fixed while its control learns one.
 ```
 rho T s'' + s' + R + T R' = 0 ,   R = j s - b (x + T_in x')
 j = -Delta lambda = a + i omega ,  b = Delta B_c   (clock absorbed exactly once)
-T_in = 5 exp(q) ,  rho = exp(r) ,  T = 5 exp(t) ,  M = rho T   (derived)
+T_in = 5 exp(q) ,  rho = exp(r) ,  T = 10 exp(t) ,  M = rho T   (derived; §13 R0)
 ```
 
 These are direct log coordinates, all initialized at **exactly zero**, which
-gives `T_in = 5`, `rho = 1` and `T = 5`. The conjugate partner shares the real
+gives `T_in = 5`, `rho = 1` and `T = 10` (amended from 5, §13 R0). The conjugate partner shares the real
 coefficients. Coefficients are constant within a sequence. Gamma stays absorbed
 in the clock, and the mass is derived, never learned.
 
@@ -113,7 +115,9 @@ positive M is not claimed stable for a complex mode. The old
 inside the jitted step after every optimizer update:
 
 ```
-r <= log1p((1 - epsilon_num) z) ,   epsilon_num = 32 * eps(executed real dtype)
+SUPERSEDED (§13 R1):  r <= log1p((1 - epsilon_num) z)
+IN FORCE:             L = log1p(z) ,  r <= max(0, L - 32 eps (1 + |L|))   complex modes
+                      r unbounded                                        omega == 0 exactly
 ```
 
 * It is computed from the **updated** `Lambda_re`, `Lambda_im`, `log_step` and
@@ -214,6 +218,11 @@ module headers.
 | B(q=0) vs A | ≤ 5e-4 | ≤ 2e-3 | ≤ 2e-3 |
 | C(r=0) vs B | ≤ 5e-4 | ≤ 2e-3 | ≤ 2e-3 |
 
+**Amended by §13 R2:** gradients use a mixed absolute/relative criterion on
+the pair-specific shared leaves (q included for C vs B) and on input
+gradients; the update gate is a routing identity with COPIED gradients;
+independently computed first updates are reported, not gated.
+
   Plus C's initial executed stable domain. These tolerances allow for the
   repository's declared float32 resolution of the Padé block exponential
   (`F32 = 2e-4`) propagated through four layers. The **exact** identities are
@@ -269,7 +278,10 @@ confirmation, comparable tuning budgets and a generic equal-carry control.
   gate, compilation, preflight, the nine runs, validation, diagnostics and a
   40 s reserve.
 * **Preflight:** measures every arm and projects all nine runs, including the
-  per-epoch validation passes, the measured diagnostics and serialization. A
+  per-epoch validation passes, the measured diagnostics and serialization.
+  **Amended by §13 R3:** steps are timed through the same host path as
+  training, and epoch acceptance/persistence and final
+  serialization/diagnostics are timed separately. A
   retrace refuses the screen. If the projection does not fit, the screen is not
   started and the measured obstruction is reported. No seed, epoch, arm or
   schedule is trimmed.
@@ -303,3 +315,180 @@ improves on both working prospective baselines.
 
 **Not tested here:** spatial-only training, Delta/Momentum augmentation, and any
 TSS benchmark.
+
+
+## 13. Pre-execution amendments — static review of `97cedfa`
+
+Source: `STABLE_GP_REVIEW_97cedfa_2026_09_16.md`. Recorded **before** any
+check, restore or training ran. No result of this study exists.
+
+The unchanged parts are the equation, the three arms, the shared learned input
+horizon, the source checkpoint and its selection rule, the continuation
+streams, epochs, schedule and optimizer groups, the success criteria, the
+tolerances of §5, and the 1200 s cap.
+
+### R0 — recurrent reference horizon 10 (coordinator correction)
+
+**Provenance.** The equal initial horizons `T = T_in = 5` were prescribed by
+the coordinator's brief and implemented faithfully at `97cedfa`. This is a
+coordinator correction, not an implementation defect.
+
+**Why.** At `r = 0`,
+
+```
+dG/dr = -b T p^2 (1 + T_in p) / [(1 + T p)(p + j)^2]
+```
+
+At `T = T_in` this reduces to `-b T p^2 / (p + j)^2`, and the auxiliary pole
+`-1/T` drops out of the first-order direction. At `T != T_in` its residue is
+`-b (1 - T_in/T) / [T^2 (j - 1/T)^2]`, nonzero for nonzero drive.
+
+**Change.** `T = 10 exp(t)`; `T_in = 5 exp(q)`; `rho = exp(r)`. All raw
+coordinates still start at zero, so C still starts at exactly B's function.
+Ten is a transparent nondegenerate initialization. It is not a measurement or
+a predicted optimum, and no horizon sweep is run. Fixtures use the single
+constant `RECURRENT_T_REFERENCE`.
+
+**New checks.** The tangent identity against exact AD of the transfer
+(1e-8 relative). The equal-horizon cancellation as an analytical regression.
+The distinct-horizon residue at `delta = 1e-9` (1e-5 relative), with
+`j != 1/T`. The module starts at `T = 10`, `T_in = 5`, `rho = 1`, equal to B.
+
+None of this explains any earlier, different experiment retrospectively.
+
+### R1 — representation-aware projection margin (coordinator correction)
+
+**Provenance.** The fractional-excess interior `log1p((1 - 32 eps) z)` was
+prescribed by the coordinator's brief and implemented faithfully. This is a
+coordinator correction.
+
+**Why.** That margin shrinks only the excess `z`. For small `z` its safety
+distance is below one float32 step of `rho` above one, so a correctly rounded
+`exp` can land beyond the boundary.
+
+**Witness** (analytical): `T = 1`, `omega = 1`, `a = 3 * 2^-26`. Here
+`rho_max - 1 ≈ 0.75` of a float32 step, the old bound rounds `rho` to
+`1 + 2^-23`, and `S < 0`.
+
+**In force:**
+
+```
+L = log(rho_max) = log1p(z) = logaddexp(0, log z)
+log z = logaddexp(log(T a), log a + 2 log c - log T - 2 log|omega|)
+r_upper = max(0, L - 32 eps (1 + |L|))     complex modes
+unbounded                                  omega == 0 exactly
+```
+
+* `2 log|omega|` replaces `log omega^2`, so a complex mode whose `omega^2`
+  underflows is not misread as real.
+* `rho = 1` is retained exactly as the stable fallback.
+* It is still direct log coordinates and post-update projection of `r` from
+  the updated complete layer, with optimizer state untouched, no forward clip
+  and no straight-through estimator.
+* It is a conservative numerical interior, not a circuit restriction.
+* The analytical stability domain and every §5 comparison tolerance are
+  unchanged.
+
+**New checks.** The float64 closed form of the new bound (1e-12). The witness
+in float64 (the old bound fails, the new bound returns `r = 0`, stable) and
+through the production float32 bound and `exp` in the probe. The existing
+projection fixtures now use production float32 leaves, because a float64
+fixture projected to its own `32 eps64` interior sits at the eigensolver's
+resolution. The float32 probe is unchanged in scope.
+
+If this policy fails the existing checks, the concrete obstruction is reported
+before launch. No boundary policy is chosen from task scores.
+
+### R2 — verification of the new direction and of numerical identity
+
+**r-only derivative at the actual start `q = r = t = 0`.**
+* float64: steps `1e-5` and `1e-6`, 1e-6 relative at each, `|jvp| > 1e-6`.
+* float32 probe: steps `1e-2` and `3e-3`, 2e-2 relative at each,
+  resolvability `|jvp| >= 100 eps32 |f| / h_min`.
+* The fixture uses clock range `[0.1, 1]` so the path is resolvable.
+* `t`'s task derivative at the start: `<= 1e-9 max|dL/dr|` (float64) and
+  `<= 1e-3 max|dL/dr|` (float32).
+* The existing off-baseline joint tangent is kept.
+
+**Pair-specific shared leaves.** Comparisons use the intersection of the two
+trees, so C vs B includes `q`. Input derivatives are included in the
+production fixture and in the gate.
+
+**Mixed absolute/relative gradient criterion.** A leaf passes iff it is finite
+and
+
+```
+||g_x - g_ref||_F <= max(GRAD_REL_TOL ||g_ref||_F,  1e3 * eps(dtype) * G_ref)
+```
+
+Here `G_ref` is the reference global norm over the compared leaves. The
+absolute floor is `1.2e-4 G_ref` in float32 and `2.2e-13 G_ref` in float64.
+Every leaf's absolute and relative error, magnitude, finiteness and deciding
+branch is logged; no leaf is dropped.
+
+The motivation is the training-mode null direction: the encoder Dense bias
+shift is removed by batch normalization, so its exact gradient is zero.
+
+**Fixtures:**
+* rounding-level residual on an analytically zero leaf: accepted, absolute
+  branch;
+* a finite `1e-2 G` gradient on that leaf: rejected;
+* a 5 % error on a resolved leaf: rejected;
+* NaN: rejected and recorded;
+* the actual training-mode null direction on a small `BatchRawatClassifier`,
+  where the encoder bias gradient is `< 1e-10 G`.
+
+The criterion was not tuned against any checkpoint.
+
+**Optimizer checks, split in three:**
+1. **Forward/gradient identity** uses independently computed gradients with
+   the mixed criterion.
+2. **Routing identity** uses the SAME shared gradient values copied into both
+   trees, with genuinely extra leaves frozen, and keeps the 2e-3·lr gate.
+3. **Independently computed first updates** are REPORTED, not gated: their
+   maximum difference over lr, near-zero reference coordinates (`|g| < 1e-7`),
+   and the post-update logit discrepancy. A finite-precision forward identity
+   is not claimed to imply identical trajectories.
+
+This amends the measurement of numerical equality only. The performance
+success criterion is unchanged.
+
+### R3 — preflight times the executed path; epochs persist
+
+* `step_loop` is the single host path for training and timing: slicing,
+  transfer, RNG split, the jitted step with projection, and synchronization of
+  every recorded scalar.
+* Preflight times 40 steps after a warm-up; compilation is incurred, not
+  projected.
+* It separately times a validation pass (32 batches, scaled), per-epoch
+  acceptance and persistence, and final serialization and diagnostics.
+* A retrace still refuses the screen.
+* Every completed epoch's metrics, acceptance and telemetry are written
+  immediately to `runs/seed<k>_<arm>.json`. This preserves artifacts; it is
+  not a resume or retry feature.
+
+### R4 — validation of executed arithmetic
+
+* `executed_domain_report` forms `T_in`, `rho`, `T`, `M` and the block
+  generator entries in the **executed dtype**. It requires finite, positive
+  `a`, `T`, `rho`, `M`, `T_in` and finite `omega` and generator entries.
+* It then assesses in float64, **separately**, the formula diagnostic
+  (`S > 0`, `rho < rho_max`) and the eigenvalues of the rounded executed
+  generator.
+* It covers B (`T_in`) as well as C.
+* **Fixture:** a real mode with `rho, T ~ 1e30` in float32, whose float64
+  product is finite but whose executed mass overflows, fails; an underflowed
+  `T_in` fails for B.
+* Every epoch's acceptance checks parameters, optimizer state, normalization
+  state and every reported scalar for finiteness, plus the executed domain for
+  B and C. A failure is a FAILED run, persisted.
+* Summaries record the executed-dtype coefficients, not a float64
+  recomputation.
+
+### Statement of scope
+
+Physics and exact nesting do not imply that finite BPTT reaches a better task
+optimum, or that held-out accuracy improves. No new observations or future
+information enter the network. Larger general SSMs can represent such rational
+responses, so an equal-capacity control remains necessary for any attribution
+claim.

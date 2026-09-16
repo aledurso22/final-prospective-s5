@@ -15,6 +15,15 @@ PREDECLARED TOLERANCES (frozen before any execution):
     ZEROT64  1e-9    |dL/dt| relative to |dL/dq| at rho = 1
     STREAM64 1e-10   relative: chunked carries and resets vs one call
     TSS64    1e-12   absolute: equation-level discrete references
+    TAN64    1e-8    relative: dG/dr at r = 0 vs the displayed closed form
+    RES64    1e-5    relative: auxiliary-pole residue at delta = 1e-9
+    FD_R64   1e-6    relative: r-ONLY JVP at the actual start, h = 1e-5, 1e-6
+
+AMENDED BEFORE EXECUTION (review of 97cedfa, R0-R4): recurrent reference
+horizon 10 (input 5); full-ratio projection margin with rho = 1 fallback;
+r-only derivative at the actual start; mixed absolute/relative gradient
+identity; optimizer-routing identity with copied gradients; executed-arithmetic
+domain validation. See docs/STABLE_GP_CONTINUATION_PROTOCOL.md section 13.
 
 Production float32/complex64 coverage runs in `stable_gp_float32_probe.py`, in
 its own process with x64 off, using the study's declared gate tolerances.
@@ -42,6 +51,7 @@ from tests.response_reference import (reference_block,            # noqa: E402
 POLY64, COEF64, IDENT64, GRAD64 = 1e-10, 1e-10, 1e-9, 1e-8
 UPD64, FD64, ZEROT64, STREAM64, TSS64 = 1e-8, 1e-6, 1e-9, 1e-10, 1e-12
 FD_STEPS = (1e-5, 1e-6)
+TAN64, RES64, FD_R64 = 1e-8, 1e-5, 1e-6
 
 
 def _cast(tree, dt=onp.float64):
@@ -180,7 +190,8 @@ def test_log_bound_equals_the_closed_form_interior_float64():
                                        np.asarray(T), onp.float64))
     c = 1 + T * a
     z = T * a + a * c ** 2 / (T * omega ** 2)
-    want = onp.log1p((1 - SG.eps_num(onp.float64)) * z)
+    Lz = onp.log1p(z)
+    want = onp.maximum(0.0, Lz - SG.eps_num(onp.float64) * (1 + onp.abs(Lz)))
     assert onp.max(onp.abs(got - want) / onp.maximum(1.0, onp.abs(want))) \
         < 1e-12
     assert onp.all(onp.isinf(onp.asarray(SG.log_rho_upper(
@@ -192,11 +203,16 @@ def _layer_tree(rs, P, r=None, t=None, lam_re=None, lam_im=None, log_step=None):
     lam_im = rs.uniform(-3, 3, P) if lam_im is None else lam_im
     log_step = (onp.log(rs.uniform(1e-3, 1e-1, P))[:, None]
                 if log_step is None else log_step)
+    # PRODUCTION float32 leaves: executed_domain_report checks the executed
+    # generator's eigenvalues, and a float64 fixture projected to its own
+    # 32 eps64 interior would sit at the eigensolver's resolution
+    f32 = onp.float32
     return {"encoder": {"layers_0": {"seq": {
-        "Lambda_re": np.asarray(lam_re), "Lambda_im": np.asarray(lam_im),
-        "log_step": np.asarray(log_step),
-        SG.LEAF_T: np.asarray(onp.zeros(P) if t is None else t),
-        SG.LEAF_RHO: np.asarray(onp.zeros(P) if r is None else r)}}}}
+        "Lambda_re": np.asarray(lam_re, f32), "Lambda_im": np.asarray(lam_im, f32),
+        "log_step": np.asarray(log_step, f32),
+        SG.LEAF_T: np.asarray(onp.zeros(P) if t is None else t, f32),
+        SG.LEAF_RHO: np.asarray(onp.zeros(P) if r is None else r, f32),
+        SG.LEAF_T_IN: np.asarray(onp.zeros(P), f32)}}}}
 
 
 def test_projection_uses_the_UPDATED_complete_layer_and_only_moves_r():
@@ -208,8 +224,8 @@ def test_projection_uses_the_UPDATED_complete_layer_and_only_moves_r():
     seq = tree["encoder"]["layers_0"]["seq"]
     # propose an outward r against the UPDATED leaves
     a, w = SG.modal_j(seq["Lambda_re"], seq["Lambda_im"], seq["log_step"])
-    T = 5 * np.exp(seq[SG.LEAF_T])
-    bound = SG.log_rho_upper(a, w, T, onp.float64)
+    T = SG.RECURRENT_T_REFERENCE * np.exp(seq[SG.LEAF_T])
+    bound = SG.log_rho_upper(a, w, T, onp.float32)
     seq[SG.LEAF_RHO] = bound + 0.5
     out, tel = SG.project_stable_domain(tree)
     s2 = out["encoder"]["layers_0"]["seq"]
@@ -217,14 +233,15 @@ def test_projection_uses_the_UPDATED_complete_layer_and_only_moves_r():
     for k in ("Lambda_re", "Lambda_im", "log_step", SG.LEAF_T):
         assert onp.array_equal(onp.asarray(s2[k]), onp.asarray(seq[k])), k
     assert int(tel["n_projected"]) == P
-    assert float(tel["max_overshoot"]) == pytest.approx(0.5)
+    assert float(tel["max_overshoot"]) == pytest.approx(0.5, rel=1e-5)
     assert SG.executed_domain_report(out)["passed"]
     # a different update of T and of the poles moves the bound with it
     seq2 = dict(s2, **{SG.LEAF_T: s2[SG.LEAF_T] + 1.0,
                        "Lambda_im": s2["Lambda_im"] * 3.0})
     tree2 = {"encoder": {"layers_0": {"seq": seq2}}}
     a2, w2 = SG.modal_j(seq2["Lambda_re"], seq2["Lambda_im"], seq2["log_step"])
-    b2 = SG.log_rho_upper(a2, w2, 5 * np.exp(seq2[SG.LEAF_T]), onp.float64)
+    b2 = SG.log_rho_upper(a2, w2, SG.RECURRENT_T_REFERENCE * np.exp(seq2[SG.LEAF_T]),
+                          onp.float32)
     out2, _ = SG.project_stable_domain(tree2)
     assert onp.allclose(onp.asarray(out2["encoder"]["layers_0"]["seq"]
                                     [SG.LEAF_RHO]),
@@ -296,9 +313,9 @@ def test_production_block_coefficients_match_the_independent_reference(P, H):
     params = params["x"]
     c = ssm.apply({"params": params}, method=lambda m: m.coefficients())
     a, b = ssm.apply({"params": params}, method=lambda m: m.clock_absorbed())
-    T = 5 * onp.exp(onp.asarray(params[SG.LEAF_T]))
+    T = SG.RECURRENT_T_REFERENCE * onp.exp(onp.asarray(params[SG.LEAF_T]))
     rho = onp.exp(onp.asarray(params[SG.LEAF_RHO]))
-    T_in = 5 * onp.exp(onp.asarray(params[SG.LEAF_T_IN]))
+    T_in = SG.INPUT_T_REFERENCE * onp.exp(onp.asarray(params[SG.LEAF_T_IN]))
     ref = reference_block(onp.asarray(a), onp.asarray(b), T, rho)
     J_in = T_in[:, None, None] * onp.einsum("pij,pjh->pih", ref["A_bar"],
                                             ref["B"])
@@ -418,13 +435,13 @@ def test_streaming_carries_and_resets_clear_BOTH_state_and_delayed_input(arm):
 # =========================================================================
 #  4. Full network: logits, gradients, a real tangent, frozen-extra updates
 # =========================================================================
-def _net(arm, P=4, H=6, L=20, seed=0):
+def _net(arm, P=4, H=6, L=20, seed=0, dt=onp.float64):
     from s5.rawat_model import RawatClassifier
     m = RawatClassifier(ssm=init_substrate_ssm(arm, **_ssm_kwargs(P, H)),
                         d_model=H, n_layers=2, d_output=3, readout_width=5,
                         mlp_hidden=7, training=False)
-    x = np.asarray(onp.random.RandomState(seed + 1).randn(L, 2))
-    v = _cast(m.init(jax.random.PRNGKey(seed), x, np.ones(L)))
+    x = np.asarray(onp.random.RandomState(seed + 1).randn(L, 2), dt)
+    v = _cast(m.init(jax.random.PRNGKey(seed), x, np.ones(L, dt)), dt)
     return m, v, x
 
 
@@ -494,25 +511,110 @@ def test_a_nonzero_response_tangent_matches_central_differences():
     assert tg > 1e-8, tg
 
 
-def test_first_update_with_added_leaves_frozen_agrees_on_common_leaves():
-    """With the added gradients in the global clip the common updates may
-    legitimately differ; with them FROZEN they must agree."""
+def test_routing_identity_uses_copied_gradients_and_labels_are_published():
+    """Review R2: the optimizer-routing gate feeds the SAME shared gradient
+    values into both trees (extra leaves frozen), so it tests grouping, decay
+    and clipping routing - not gradient rounding."""
     from experiments.gp import stable_gp_study as ST
+    from flax.traverse_util import flatten_dict
     rs = onp.random.RandomState(23)
     mb, vb, x = _net("rawat_learned_input")
     mc, vc, _ = _net("sgp_learned_input")
     w = np.asarray(rs.randn(3)) * 50.0          # large enough to engage clip
     tx, desc = ST.make_optimizer(steps_per_epoch=10, epochs=10)
     gb = jax.grad(_loss(mb, vb["batch_stats"], w))(vb["params"], x)
-    gc = jax.grad(_loss(mc, vc["batch_stats"], w))(vc["params"], x)
-    ub = ST.frozen_update(tx, vb["params"], gb)
-    uc = ST.frozen_update(tx, vc["params"], gc)
-    assert ST.compare_updates(uc, ub)["worst"] < UPD64
+    r = ST.routing_identity(tx, vc["params"], vb["params"], gb)
+    assert r["worst"] < UPD64 and r["passed"], r
+    # the routed tree of C carries B's q gradient and zero on r and t
+    routed = flatten_dict(ST.routed_gradients(vc["params"], gb))
+    for k, v in routed.items():
+        if k[-1] in (SG.LEAF_RHO, SG.LEAF_T):
+            assert float(onp.max(onp.abs(onp.asarray(v)))) == 0.0
     assert desc["labels"]["response"].startswith("Adam(")
-    labels = ST.label_tree(vc["params"])
-    from flax.traverse_util import flatten_dict
-    for k, lab in flatten_dict(labels).items():
+    for k, lab in flatten_dict(ST.label_tree(vc["params"])).items():
         assert lab == ("response" if k[-1] in SG.ADDED_LEAVES else "common"), k
+
+
+def test_mixed_identity_accepts_rounding_and_catches_a_real_defect():
+    """Review R2 fixtures for the absolute branch, exercised on the actual
+    comparison function with both dtypes' floors."""
+    from experiments.gp import stable_gp_study as ST
+    rs = onp.random.RandomState(26)
+    ref = {"a": rs.randn(50), "b": rs.randn(30), "zero": onp.zeros(8)}
+    G = float(onp.sqrt(sum(onp.sum(v ** 2) for v in ref.values())))
+    for dt in (onp.float32, onp.float64):
+        eps = float(onp.finfo(dt).eps)
+        # analytical zero-gradient leaf with rounding-level residuals: accepted
+        ok = dict(ref, zero=onp.full(8, 10 * eps * G / 8))
+        ok["a"] = ref["a"] * (1 + 10 * eps)
+        r = ST.compare_shared(ok, ref, dt)
+        assert r["passed"], r["leaves"]
+        assert r["leaves"]["zero"]["branch"] == "absolute"
+        assert r["leaves"]["zero"]["rel_err"] is None
+        # a finite gradient on the zero leaf far above rounding: rejected
+        bad = dict(ref, zero=onp.full(8, 1e-2 * G))
+        assert not ST.compare_shared(bad, ref, dt)["passed"]
+        # a 5% error on a resolved leaf: rejected
+        bad = dict(ref, a=ref["a"] * 1.05)
+        assert not ST.compare_shared(bad, ref, dt)["passed"]
+        # non-finite: rejected, and the leaf is kept in the record
+        bad = dict(ref, b=onp.full(30, onp.nan))
+        rb = ST.compare_shared(bad, ref, dt)
+        assert not rb["passed"] and rb["leaves"]["b"]["finite"] is False
+    # the pair-specific shared set includes q for C vs B
+    c_tree = {"Lambda_re": onp.ones(3), SG.LEAF_T_IN: onp.ones(3),
+              SG.LEAF_RHO: onp.ones(3)}
+    b_tree = {"Lambda_re": onp.ones(3), SG.LEAF_T_IN: onp.ones(3)}
+    assert set(ST.compare_shared(c_tree, b_tree, onp.float64)["leaves"]) == \
+        {"Lambda_re", SG.LEAF_T_IN}
+
+
+def test_training_mode_null_direction_is_handled_by_the_absolute_branch():
+    """Review R2: in TRAINING mode a constant shift of the encoder Dense bias
+    survives the residual skips and is removed by batch normalization, so its
+    exact task gradient is zero. Both arms must agree through the absolute
+    branch, and the relative error there is not the deciding quantity."""
+    from experiments.gp import stable_gp_study as ST
+    from s5.rawat_model import BatchRawatClassifier
+    from flax.traverse_util import flatten_dict
+    import optax
+
+    def batch_net(arm):
+        m = BatchRawatClassifier(ssm=init_substrate_ssm(arm,
+                                                        **_ssm_kwargs(4, 6)),
+                                 d_model=6, n_layers=2, d_output=3,
+                                 readout_width=5, mlp_hidden=7, training=True)
+        x = np.asarray(onp.random.RandomState(5).randn(8, 20, 2))
+        v = m.init({"params": jax.random.PRNGKey(0),
+                    "dropout": jax.random.PRNGKey(1)}, x, np.ones((8, 20)),
+                   None)
+        return m, _cast(v), x
+
+    y = np.asarray(onp.random.RandomState(6).randint(0, 3, 8))
+    grads = {}
+    for arm in ("rawat_learned_input", "sgp_learned_input"):
+        m, v, x = batch_net(arm)
+
+        def loss(p):
+            logits, _ = m.apply({"params": p, "batch_stats": v["batch_stats"]},
+                                x, np.ones((8, 20)), None,
+                                rngs={"dropout": jax.random.PRNGKey(2)},
+                                mutable=["batch_stats"])
+            return optax.softmax_cross_entropy(
+                logits, jax.nn.one_hot(y, 3)).mean()
+        grads[arm] = jax.grad(loss)(v["params"])
+    fb = flatten_dict(grads["rawat_learned_input"])
+    null = [k for k in fb if k[-1] == "bias" and k[:2] == ("encoder",
+                                                           "encoder")]
+    assert null, sorted(fb)[:10]
+    G = float(onp.sqrt(sum(float(onp.sum(onp.asarray(v) ** 2))
+                           for v in fb.values())))
+    assert float(onp.max(onp.abs(onp.asarray(fb[null[0]])))) < 1e-10 * G
+    r = ST.compare_shared(grads["sgp_learned_input"],
+                          grads["rawat_learned_input"], onp.float64,
+                          rel_tol=GRAD64)
+    assert r["passed"], {k: v for k, v in r["leaves"].items()
+                         if not v["passed"]}
 
 
 def test_a_real_optimizer_step_then_projection_keeps_an_inward_gradient():
@@ -520,8 +622,10 @@ def test_a_real_optimizer_step_then_projection_keeps_an_inward_gradient():
     confirm the gradient at the projected point is finite and usable."""
     from experiments.gp import stable_gp_study as ST
     rs = onp.random.RandomState(24)
-    mc, vc, x = _net("sgp_learned_input")
-    w = np.asarray(rs.randn(3))
+    # production float32: the report checks executed-generator eigenvalues
+    # at the projected boundary, which float64's own interior cannot resolve
+    mc, vc, x = _net("sgp_learned_input", dt=onp.float32)
+    w = np.asarray(rs.randn(3), onp.float32)
     f = _loss(mc, vc["batch_stats"], w)
     tx, _ = ST.make_optimizer(steps_per_epoch=1, epochs=1)
     p = _set(vc["params"], SG.LEAF_RHO, lambda i, v: onp.full(4, 40.0))
@@ -554,6 +658,144 @@ def test_checkpoint_round_trip_reproduces_the_generalized_logits():
                   np.ones(x.shape[0]))
     y1 = mc.apply(back, x, np.ones(x.shape[0]))
     assert onp.array_equal(onp.asarray(y0), onp.asarray(y1))
+
+
+# =========================================================================
+#  4b. Review R0-R4 amendments
+# =========================================================================
+def _dG_dr(p, j, b, T, T_in):
+    """Exact AD derivative of the transfer in r at r = 0 (real tangent)."""
+    def G(r):
+        return SG.transfer(p, j, b, T, np.exp(r), T_in)
+    return jax.jvp(G, (np.asarray(0.0),), (np.asarray(1.0),))[1]
+
+
+def test_R0_the_r_tangent_identity_and_the_equal_horizon_cancellation():
+    """dG/dr|_0 = -b T p^2 (1 + T_in p) / [(1 + T p)(p + j)^2]. At T = T_in the
+    auxiliary pole -1/T cancels (the brief's original choice); at T != T_in
+    its residue is -b (1 - T_in/T) / [T^2 (j - 1/T)^2]."""
+    j, b = 0.3 + 0.8j, 1.7 - 0.4j            # j != 1/T for both horizons
+    for T, T_in in ((5.0, 5.0), (SG.RECURRENT_T_REFERENCE,
+                                 SG.INPUT_T_REFERENCE)):
+        for p in (0.2 + 0.5j, -0.4 + 1.3j, 2.0):
+            got = complex(_dG_dr(p, j, b, T, T_in))
+            want = -b * T * p ** 2 * (1 + T_in * p) / ((1 + T * p)
+                                                       * (p + j) ** 2)
+            assert abs(got - want) / abs(want) < TAN64, (T, T_in, p)
+        delta = 1e-9
+        p0 = -1.0 / T + delta
+        res_num = complex(_dG_dr(p0, j, b, T, T_in)) * delta
+        if T == T_in:
+            assert abs(res_num) < 1e-5, "equal horizons: pole cancels"
+        else:
+            res = -b * (1 - T_in / T) / (T ** 2 * (j - 1 / T) ** 2)
+            assert abs(res) > 1e-3
+            assert abs(res_num - res) / abs(res) < RES64, (res_num, res)
+
+
+def test_R0_the_module_starts_at_T10_Tin5_rho1_and_equals_B():
+    sc, pc, x = _layer("sgp_learned_input")
+    T = onp.asarray(sc.apply({"params": pc}, method=lambda m: m.recurrent_T()))
+    Ti = onp.asarray(sc.apply({"params": pc},
+                              method=lambda m: m.input_horizon()))
+    rho = onp.asarray(sc.apply({"params": pc},
+                               method=lambda m: m.recurrent_rho()))
+    assert onp.all(T == 10.0) and onp.all(Ti == 5.0) and onp.all(rho == 1.0)
+    sb, pb, _ = _layer("rawat_learned_input")
+    assert _rel(sc.apply({"params": pc}, x), sb.apply({"params": pb}, x)) \
+        < IDENT64
+
+
+def _old_fractional_excess_bound(a, omega, T, eps):
+    """The coordinator's ORIGINAL prescription, kept only as a regression."""
+    c = 1 + T * a
+    z = T * a + a * c ** 2 / (T * omega ** 2)
+    return math.log1p((1 - 32 * eps) * z)
+
+
+def test_R1_rounding_witness_old_margin_fails_new_margin_holds():
+    """T = 1, omega = 1, a = 3 * 2^-26 in float32: rho_max - 1 is about 0.75 of
+    a float32 step. The old margin rounds exp(bound) to 1 + 2^-23, beyond the
+    boundary; the full-ratio margin returns r = 0, the exact rho = 1 fallback."""
+    eps32 = float(onp.finfo(onp.float32).eps)
+    a = onp.float32(3 * 2.0 ** -26)
+    T = onp.float32(1.0); w = onp.float32(1.0)
+    rmax = float(SG.rho_max_float64(a, w, T))
+    old = onp.float32(_old_fractional_excess_bound(float(a), 1.0, 1.0, eps32))
+    rho_old = onp.float32(onp.exp(onp.float64(old)))
+    assert float(rho_old) == 1.0 + 2.0 ** -23
+    assert float(rho_old) > rmax, "the witness: old interior is not interior"
+    assert SG.stability_S(float(a), 1.0, 1.0, float(rho_old)) < 0
+    new = onp.asarray(SG.log_rho_upper(np.asarray(a, dtype=onp.float32),
+                                       np.asarray(w, dtype=onp.float32),
+                                       np.asarray(T, dtype=onp.float32),
+                                       onp.float32))
+    assert float(new) == 0.0
+    assert SG.stability_S(float(a), 1.0, 1.0, 1.0) > 0
+
+
+def _net_resolvable(arm):
+    """A nondegenerate fixture: larger clock so the r path is resolvable."""
+    from s5.rawat_model import RawatClassifier
+    kw = dict(_ssm_kwargs(4, 6), dt_min=0.1, dt_max=1.0)
+    m = RawatClassifier(ssm=init_substrate_ssm(arm, **kw), d_model=6,
+                        n_layers=2, d_output=3, readout_width=5, mlp_hidden=7,
+                        training=False)
+    x = np.asarray(onp.random.RandomState(8).randn(24, 2))
+    v = _cast(m.init(jax.random.PRNGKey(3), x, np.ones(24)))
+    return m, v, x
+
+
+def test_R2_r_only_derivative_at_the_actual_start_float64():
+    """At q = r = t = 0: an r-ONLY tangent against independent central
+    differences at both declared steps, and a vanishing t derivative."""
+    from flax.traverse_util import flatten_dict, unflatten_dict
+    rs = onp.random.RandomState(27)
+    m, v, x = _net_resolvable("sgp_learned_input")
+    w = np.asarray(rs.randn(3))
+    f = _loss(m, v["batch_stats"], w)
+    p = v["params"]
+    flat = flatten_dict(p)
+    d = unflatten_dict({k: (np.asarray(rs.randn(*onp.shape(val)))
+                            if k[-1] == SG.LEAF_RHO else np.zeros_like(val))
+                        for k, val in flat.items()})
+    jvp = float(jax.jvp(lambda pp: f(pp, x), (p,), (d,))[1])
+    assert abs(jvp) > 1e-6, jvp
+    for h in FD_STEPS:
+        plus = jax.tree_util.tree_map(lambda a_, b_: a_ + h * b_, p, d)
+        minus = jax.tree_util.tree_map(lambda a_, b_: a_ - h * b_, p, d)
+        fd = (float(f(plus, x)) - float(f(minus, x))) / (2 * h)
+        assert abs(jvp - fd) / abs(fd) < FD_R64, (h, jvp, fd)
+    g = flatten_dict(jax.grad(lambda pp: f(pp, x))(p))
+    gr = max(float(onp.max(onp.abs(onp.asarray(val))))
+             for k, val in g.items() if k[-1] == SG.LEAF_RHO)
+    gt = max(float(onp.max(onp.abs(onp.asarray(val))))
+             for k, val in g.items() if k[-1] == SG.LEAF_T)
+    assert gr > 1e-6 and gt <= ZEROT64 * gr, (gr, gt)
+
+
+def test_R4_validation_detects_executed_overflow_a_float64_product_hides():
+    """A real mode with rho and T each ~1e30 in float32: the float64 product is
+    finite, the EXECUTED float32 mass overflows. The report must fail it."""
+    P = 2
+    tree = {"encoder": {"layers_0": {"seq": {
+        "Lambda_re": np.asarray([-0.5, -0.5], dtype=onp.float32),
+        "Lambda_im": np.asarray([0.0, 0.0], dtype=onp.float32),
+        "log_step": np.asarray([[-2.0], [-2.0]], dtype=onp.float32),
+        SG.LEAF_RHO: np.asarray([69.0, 0.0], dtype=onp.float32),
+        SG.LEAF_T: np.asarray([68.0, 0.0], dtype=onp.float32),
+        SG.LEAF_T_IN: np.zeros(P, dtype=onp.float32)}}}}
+    rho64 = math.exp(69.0); T64 = 10 * math.exp(68.0)
+    assert math.isfinite(rho64 * T64)
+    rep_ = SG.executed_domain_report(tree)
+    assert rep_["passed"] is False
+    assert rep_["layers"][0]["executed_finite_positive"] is False
+    # an underflowed input horizon fails for B as well
+    btree = {"encoder": {"layers_0": {"seq": {
+        SG.LEAF_T_IN: np.asarray([-200.0, 0.0], dtype=onp.float32)}}}}
+    rb = SG.executed_domain_report(btree)
+    assert rb["passed"] is False and rb["layers"][0]["kind"] == \
+        "input_horizon_only"
 
 
 # =========================================================================

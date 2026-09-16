@@ -10,7 +10,7 @@ The candidate, per stored conjugate mode, with gamma normalized to one
 
     rho T s'' + s' + R + T R' = 0 ,   R = j s - b (x + T_in x')
     j = -Delta lambda = a + i omega  (a > 0 after pole clipping),  b = Delta B_c
-    T_in = 5 exp(q) ,  rho = exp(r) ,  T = 5 exp(t) ,  M = rho T  (derived)
+    T_in = 5 exp(q) ,  rho = exp(r) ,  T = 10 exp(t) ,  M = rho T  (derived)
 
 DIRECT log coordinates, all initialized at zero. At r = 0 (rho = 1) the
 denominator factors as (1 + T p)(p + j), so the model is the learned-input-
@@ -37,13 +37,32 @@ response equation (positive inertia and damping, a gyroscopic velocity force
 and a circulatory positional force). It is never described as the passive
 circuit, and arbitrary positive M is NOT claimed stable for a complex mode.
 
-Declared numerical interior, enforced by POST-UPDATE projection of r only:
+Declared numerical interior, enforced by POST-UPDATE projection of r only
+(AMENDED before execution, review R1 - see the protocol):
 
-    r <= log1p((1 - epsilon_num) z) ,  epsilon_num = 32 * eps(executed dtype)
+    L = log(rho_max) = log1p(z)
+    r <= max(0, L - 32 eps (1 + |L|))      complex modes
+    r unbounded                            exactly real modes (omega == 0)
 
-using the UPDATED poles, clock and T of the complete layer. Optimizer state is
-left untouched. This excludes a rounding strip at the exact boundary; it is not
-an additional biological or circuit sector.
+using the UPDATED poles, clock and T of the complete layer. The margin is on the
+scale of the FULL log ratio, and rho = 1 is kept exactly as the known stable
+fallback. The coordinator's original prescription, log1p((1 - 32 eps) z),
+shrank only the EXCESS z; for small z its safety distance is below one float32
+step of rho around one, so a correctly rounded exp could land beyond the exact
+boundary. Optimizer state is left untouched. This is a conservative numerical
+interior, not an additional biological or circuit sector.
+
+RECURRENT REFERENCE HORIZON (AMENDED before execution, review R0): T = 10 exp(t)
+while T_in = 5 exp(q). The original brief set both references to 5. At r = 0
+and T = T_in the tangent
+
+    dG/dr = -b T p^2 (1 + T_in p) / [(1 + T p)(p + j)^2]
+
+loses the auxiliary pole -1/T, so the new temporal response would enter the
+first-order learning direction only at second order. With T != T_in its
+residue there is -b (1 - T_in/T) / [T^2 (j - 1/T)^2], nonzero for nonzero drive.
+Ten is a transparent nondegenerate initialization, not a measured or predicted
+optimum. C still starts at EXACTLY B's function, since rho = 1 removes T.
 """
 
 import math
@@ -55,12 +74,14 @@ import numpy as onp
 #: raw leaf names, one real per stored complex mode, shared with its partner
 LEAF_T_IN = "log_T_in"        # q : T_in = 5 exp(q)
 LEAF_RHO = "log_rho_rec"      # r : rho  = exp(r)
-LEAF_T = "log_T_rec"          # t : T    = 5 exp(t)
+LEAF_T = "log_T_rec"          # t : T    = 10 exp(t)  (review R0)
 ADDED_LEAVES = (LEAF_T_IN, LEAF_RHO, LEAF_T)
 
 #: Rawat's literature horizons, in native-clock intervals
 INPUT_T_REFERENCE = 5.0
-RECURRENT_T_REFERENCE = 5.0
+#: review R0: distinct from the input reference so the first-order r tangent
+#: carries the auxiliary pole; a declared initialization, not an optimum
+RECURRENT_T_REFERENCE = 10.0
 #: the paper's pole clip, Appendix E.3; identical to S5SSM's forward clip
 POLE_CLIP = -1e-4
 #: declared numerical interior factor
@@ -93,26 +114,27 @@ def stability_S(a, omega, T, rho):
 
 
 def log_rho_upper(a, omega, T, dtype=None):
-    """The projection bound on r, evaluated safely in log arithmetic.
+    """The projection bound on r (review R1), in log arithmetic.
 
-        bound = log(1 + (1 - eps_num) z)
-              = logaddexp(0, log1p(-eps_num) + log z)
-        log z = logaddexp(log(T a), log a + 2 log c - log T - log omega^2)
+        log z = logaddexp(log(T a), log a + 2 log c - log T - 2 log|omega|)
+        L     = log(rho_max) = log1p(z) = logaddexp(0, log z)
+        bound = max(0, L - 32 eps (1 + |L|))
 
-    Real modes (omega^2 == 0 in the executed dtype) have no bound: +inf.
-    Their division is MASKED before it is evaluated, so no inf/nan is ever
-    formed, and the masked value never reaches the result.
+    `2 log|omega|` replaces `log(omega^2)`, so a genuinely complex mode whose
+    omega^2 would underflow is NOT misread as real. Only omega == 0 exactly is
+    unbounded. The inactive division is masked BEFORE evaluation, and
+    max(0, .) keeps rho = 1 as the exact stable fallback.
     """
     dtype = dtype or a.dtype
-    w2 = omega * omega
-    complex_mode = w2 > 0
-    w2_safe = jnp.where(complex_mode, w2, jnp.ones_like(w2))
+    complex_mode = omega != 0
+    abs_w = jnp.where(complex_mode, jnp.abs(omega), jnp.ones_like(omega))
     c = 1.0 + T * a
     log_z = jnp.logaddexp(jnp.log(T * a),
                           jnp.log(a) + 2.0 * jnp.log(c) - jnp.log(T)
-                          - jnp.log(w2_safe))
-    shift = jnp.asarray(math.log1p(-eps_num(dtype)), dtype=log_z.dtype)
-    bound = jnp.logaddexp(jnp.zeros_like(log_z), shift + log_z)
+                          - 2.0 * jnp.log(abs_w))
+    L = jnp.logaddexp(jnp.zeros_like(log_z), log_z)
+    margin = jnp.asarray(eps_num(dtype), dtype=L.dtype) * (1.0 + jnp.abs(L))
+    bound = jnp.maximum(jnp.zeros_like(L), L - margin)
     return jnp.where(complex_mode, bound, jnp.full_like(bound, jnp.inf))
 
 
@@ -122,25 +144,26 @@ def rho_max_float64(a, omega, T):
     omega = onp.asarray(omega, dtype=onp.float64)
     T = onp.asarray(T, dtype=onp.float64)
     c = 1.0 + T * a
-    w2 = omega * omega
-    with onp.errstate(divide="ignore", invalid="ignore"):
-        z = T * a + onp.where(w2 > 0, a * c ** 2 / (T * onp.where(w2 > 0, w2,
-                                                                   1.0)),
-                              onp.inf)
-    return onp.where(w2 > 0, 1.0 + z, onp.inf)
+    cplx = omega != 0                     # same classification as the bound
+    w2 = onp.where(cplx, omega * omega, 1.0)
+    with onp.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        z = T * a + a * c ** 2 / (T * w2)
+    return onp.where(cplx, 1.0 + z, onp.inf)
 
 
 # ------------------------------------------------ coupled projection ------
-def _group_layers(params):
-    """{layer prefix: {leaf name: array}} for every layer carrying LEAF_RHO."""
+def _group_layers(params, marker=LEAF_RHO):
+    """{layer prefix: {leaf name: array}} for every layer carrying `marker`."""
     from flax.traverse_util import flatten_dict
     flat = flatten_dict(params)
+    names = {LEAF_RHO: ("Lambda_re", "Lambda_im", "log_step", LEAF_T, LEAF_RHO,
+                        LEAF_T_IN),
+             LEAF_T_IN: (LEAF_T_IN,)}[marker]
     layers = {}
     for k in flat:
-        if k[-1] == LEAF_RHO:
-            layers[k[:-1]] = {n: flat[k[:-1] + (n,)] for n in
-                              ("Lambda_re", "Lambda_im", "log_step", LEAF_T,
-                               LEAF_RHO)}
+        if k[-1] == marker:
+            layers[k[:-1]] = {n: flat[k[:-1] + (n,)] for n in names
+                              if k[:-1] + (n,) in flat}
     return flat, layers
 
 
@@ -191,50 +214,113 @@ def project_stable_domain(params):
 
 
 def executed_domain_report(params):
-    """Host-side validation of the EXECUTED coefficients, per layer.
+    """Validate the EXECUTED arithmetic, then assess it in float64 (review R4).
 
-    rho, T and M are formed in the executed dtype exactly as the forward pass
-    forms them; stability is then evaluated in float64 from those executed
-    values, so a float32 rounding across the boundary would be DETECTED rather
-    than reproduced. Non-finite or underflowed mass/horizon fails. Nothing is
-    clamped.
+    Every quantity is first formed in the executed dtype exactly as the forward
+    pass forms it - T_in = 5 exp(q), rho = exp(r), T = 10 exp(t), M = rho T,
+    and the block generator entries of `mass_block_generator` - and those
+    ROUNDED values are what is checked:
+
+      * finite and strictly positive a, T, rho, M and T_in; finite omega;
+      * finite generator entries;
+      * the FORMULA diagnostic S > 0 and rho < rho_max, evaluated in float64
+        from the executed a, omega, T and rho;
+      * separately, the EIGENVALUES of the executed generator, promoted to
+        complex128: max Re < 0.
+
+    Covers B (T_in only) and C. A layer passes only if all apply and hold. An
+    underflowed horizon or an overflowed mass fails even if a float64
+    reconstruction of the product would not. Nothing is clamped.
     """
-    _, layers = _group_layers(params)
     rows, ok = [], True
-    for prefix, lv in layers.items():
-        r = lv[LEAF_RHO]
-        rho = onp.asarray(jnp.exp(r))
-        T = onp.asarray(RECURRENT_T_REFERENCE * jnp.exp(lv[LEAF_T]))
-        a, omega = modal_j(lv["Lambda_re"], lv["Lambda_im"], lv["log_step"])
-        a = onp.asarray(a, dtype=onp.float64)
-        omega = onp.asarray(omega, dtype=onp.float64)
-        M = rho.astype(onp.float64) * T.astype(onp.float64)
-        rmax = rho_max_float64(a, omega, T)
-        S = stability_S(a, omega, T.astype(onp.float64),
-                        rho.astype(onp.float64))
-        finite = bool(onp.all(onp.isfinite(rho)) and onp.all(onp.isfinite(T))
-                      and onp.all(onp.isfinite(M)))
-        positive = bool(onp.all(rho > 0) and onp.all(T > 0) and onp.all(M > 0))
-        stable = bool(onp.all(S > 0))
-        inside = bool(onp.all(rho < rmax))
+    _, c_layers = _group_layers(params, LEAF_RHO)
+    _, q_layers = _group_layers(params, LEAF_T_IN)
+    for prefix, lv in q_layers.items():
+        if prefix in c_layers:
+            continue
+        T_in = onp.asarray(INPUT_T_REFERENCE * jnp.exp(lv[LEAF_T_IN]))
+        good = bool(onp.all(onp.isfinite(T_in)) and onp.all(T_in > 0))
+        ok = ok and good
+        rows.append(dict(layer="/".join(prefix), kind="input_horizon_only",
+                         T_in=_stats(T_in), T_in_finite_positive=good,
+                         passed=good))
+    for prefix, lv in c_layers.items():
+        dt = lv[LEAF_RHO].dtype
+        rho_e = jnp.exp(lv[LEAF_RHO])
+        T_e = RECURRENT_T_REFERENCE * jnp.exp(lv[LEAF_T])
+        M_e = rho_e * T_e
+        T_in_e = INPUT_T_REFERENCE * jnp.exp(lv[LEAF_T_IN])
+        a_e, w_e = modal_j(lv["Lambda_re"], lv["Lambda_im"], lv["log_step"])
+        j_e = a_e + 1j * w_e
+        A_e = onp.asarray(jnp.stack([
+            jnp.stack([-j_e / rho_e, -((1.0 - rho_e) / rho_e) + 0j], -1),
+            jnp.stack([-j_e / (rho_e * T_e), -(1.0 / (rho_e * T_e)) + 0j], -1),
+        ], -2))
+        rho, T, M, T_in = (onp.asarray(v) for v in (rho_e, T_e, M_e, T_in_e))
+        a, omega = onp.asarray(a_e), onp.asarray(w_e)
+
+        def fp(v):
+            return bool(onp.all(onp.isfinite(v)) and onp.all(v > 0))
+        executed_ok = (fp(a) and fp(T) and fp(rho) and fp(M) and fp(T_in)
+                       and bool(onp.all(onp.isfinite(omega)))
+                       and bool(onp.all(onp.isfinite(A_e))))
+        a64, w64 = a.astype(onp.float64), omega.astype(onp.float64)
+        T64, rho64 = T.astype(onp.float64), rho.astype(onp.float64)
+        with onp.errstate(all="ignore"):
+            S = stability_S(a64, w64, T64, rho64)
+            rmax = rho_max_float64(a64, w64, T64)
+            ev = (onp.linalg.eigvals(A_e.astype(onp.complex128))
+                  if executed_ok else onp.full((rho.size, 2), onp.nan))
+        formula_ok = bool(executed_ok and onp.all(S > 0)
+                          and onp.all(rho64 < rmax))
+        max_re = onp.max(ev.real, axis=-1)
+        eig_ok = bool(executed_ok and onp.all(onp.isfinite(max_re))
+                      and onp.all(max_re < 0))
         cplx = onp.isfinite(rmax)
-        rel = onp.where(cplx, (rmax - rho) / onp.where(cplx, rmax, 1.0),
+        rel = onp.where(cplx, (rmax - rho64) / onp.where(cplx, rmax, 1.0),
                         onp.inf)
-        ok_layer = finite and positive and stable and inside
+        ok_layer = executed_ok and formula_ok and eig_ok
         ok = ok and ok_layer
         rows.append(dict(
-            layer="/".join(prefix), n_modes=int(rho.size),
+            layer="/".join(prefix), kind="stable_generalized",
+            executed_dtype=str(dt), n_modes=int(rho.size),
             n_real_modes=int(onp.sum(~cplx)),
-            rho=_stats(rho), T=_stats(T), M=_stats(M),
+            rho=_stats(rho), T=_stats(T), M=_stats(M), T_in=_stats(T_in),
             n_passive_rho_le_1=int(onp.sum(rho <= 1.0)),
-            min_S=float(onp.min(S)),
+            min_S=float(onp.min(S)) if executed_ok else None,
             min_relative_margin_complex=(float(onp.min(rel[cplx]))
-                                         if cplx.any() else None),
-            finite=finite, positive=positive, stable_S_positive=stable,
-            strictly_inside_rho_max=inside, passed=ok_layer))
+                                         if (executed_ok and cplx.any())
+                                         else None),
+            max_real_part_executed_generator=(float(onp.max(max_re))
+                                              if eig_ok or executed_ok
+                                              else None),
+            executed_finite_positive=executed_ok,
+            formula_stable=formula_ok, executed_generator_stable=eig_ok,
+            passed=ok_layer))
     return dict(layers=rows, passed=ok,
-                scope=("float64 evaluation of the EXECUTED float32 rho, T and "
-                       "poles; passive subdomain is rho <= 1"))
+                scope=("executed-dtype arithmetic checked first; the formula "
+                       "diagnostic and the executed-generator eigenvalues are "
+                       "assessed separately in float64; passive subdomain is "
+                       "rho <= 1"))
+
+
+def executed_coefficients(params):
+    """Executed-dtype T_in, rho, T and M per layer, for summaries (review R4)."""
+    out = {}
+    _, c_layers = _group_layers(params, LEAF_RHO)
+    _, q_layers = _group_layers(params, LEAF_T_IN)
+    for prefix, lv in q_layers.items():
+        rec = dict(T_in=onp.asarray(INPUT_T_REFERENCE
+                                    * jnp.exp(lv[LEAF_T_IN])).tolist())
+        if prefix in c_layers:
+            cl = c_layers[prefix]
+            rho = jnp.exp(cl[LEAF_RHO])
+            T = RECURRENT_T_REFERENCE * jnp.exp(cl[LEAF_T])
+            rec.update(rho=onp.asarray(rho).tolist(),
+                       T=onp.asarray(T).tolist(),
+                       M=onp.asarray(rho * T).tolist())
+        out["/".join(prefix)] = rec
+    return out
 
 
 def _stats(v):
