@@ -386,9 +386,18 @@ def preflight(cfg, status, profile=False):
             print("            components " + "  ".join(
                 f"{k.replace('_ms', '')}={v:.2f}ms" for k, v in comp.items()))
         del p2, opt2
-    # evaluation, interventions, probes, checkpoints and the post-training
-    # correctness checks. An allowance, measured only as such.
-    host_s = 60.0
+    # Host-side work outside the timed training step: per seed and arm, the
+    # 192-sequence evaluation, three intervention evaluations, the checkpoint
+    # write, and the trained-parameter correctness checks -- which compile a
+    # fresh gradient at TWO fixed-point iteration counts for the two
+    # fixed-point arms and a refinement rollout for the two ODE arms, roughly
+    # 18 additional compilations across the batch.
+    #
+    # It is an ALLOWANCE, not a measurement, and deliberately generous:
+    # under-allowing it would let the inner deadline stop training mid-batch
+    # and record arms as incomplete, which is a worse failure than refusing up
+    # front. Raised from 60 s for that reason.
+    host_s = 120.0
     total += host_s
     status["preflight"] = dict(
         rows=rows, host_allowance_s=host_s, projected_total_s=total,
@@ -412,6 +421,10 @@ def main():
     ap.add_argument("--reserve_s", type=float, default=30.0)
     ap.add_argument("--matmul_precision", default="highest")
     ap.add_argument("--preflight_only", action="store_true")
+    ap.add_argument("--part_b_run", default=None,
+                    help="artifact directory of the COMPLETED Part B, recorded "
+                         "so the two halves stay linked without re-running it")
+    ap.add_argument("--part_b_commit", default=None)
     ap.add_argument("--profile", action="store_true",
                     help="always measure the stage-by-stage breakdown; it is "
                          "otherwise measured only when the projection fails")
@@ -490,6 +503,13 @@ def main():
                                 "batch"),
             seeds="three seeds identify a development signal, not a "
                   "superiority theorem"),
+        part_b_reference=dict(
+            run=args.part_b_run, commit=args.part_b_commit,
+            note=("Part B completed separately and is NOT re-run here. It is a "
+                  "frozen-parameter probe with fixed inputs, seeds and filters "
+                  "that reproduced identically on five dispatches; there is no "
+                  "scientific requirement that both parts share one "
+                  "invocation.")),
         results=[], incomplete=[])
     print(f"[*] out={out} backend={backend} seeds={seeds}")
     print(f"[*] task structure: {struct}")
@@ -519,10 +539,16 @@ def main():
         return 0
     if proj > left() and not args.profile:
         # It does not fit: NOW the stage breakdown is worth its cost, because
-        # it is the thing that explains the projection.
-        print("[*] projection does not fit; measuring the stage breakdown")
-        preflight(cfg, status, profile=True)
-        write(os.path.join(out, "status.json"), status)
+        # it is the thing that explains the projection. It costs about 60 s, so
+        # it runs only if that much is genuinely spare -- a diagnostic must not
+        # become the thing that overruns the deadline it is diagnosing.
+        if left() > 90:
+            print("[*] projection does not fit; measuring the stage breakdown")
+            preflight(cfg, status, profile=True)
+            write(os.path.join(out, "status.json"), status)
+        else:
+            print("[*] projection does not fit and there is no room to measure "
+                  "the stage breakdown; re-run with --profile to obtain it")
     if proj > left():
         status["incomplete"].append(
             f"projected {proj:.0f}s > remaining {left():.0f}s; Part A NOT "

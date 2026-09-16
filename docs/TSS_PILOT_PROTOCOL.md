@@ -444,6 +444,49 @@ additionally requires lower relative error than the GLE-inspired baseline at
 Initial-state gradients stay outside the approximate comparison — those initial
 conditions are fixed — and that is recorded, not hidden.
 
+**Amendment, 16 September 2026: Part A runs as its own continuation.** Part B
+is complete at `6000b26` with artifacts at
+`/Users/durso/s5-runs/tss_pilot/20260916-020800/part_b`, and it has reproduced
+identically on five dispatches. It is a **frozen-parameter** probe with fixed
+inputs, seeds and filters, so re-running it to accompany Part A would add cost
+and no information; there is no scientific requirement that the two parts share
+one invocation. `bin/run_experiments/cluster_tss_part_a.sh` therefore runs the
+checks and Part A only, gives Part A the **whole** deadline, and records Part
+B's run directory and commit in Part A's status file so the halves stay linked.
+
+**The experiment is unchanged**: the same four arms, three seeds, 300 updates,
+equations, data, initialization, optimizer and tolerances, under the same
+600-second total cap.
+
+Budget, from costs measured at `6000b26`:
+
+| item | cost |
+|---|---|
+| environment + GPU probe | ~4 s |
+| focused checks, 50 tests | ~174 s |
+| Part A setup + preflight, profiling **off** | ~39 s |
+| Part A training, projected | ~188 s (68.5 s arms + 120 s host allowance) |
+| cleanup reserve | 30 s |
+| **total** | **~436 s of 600 s**, margin ~165 s |
+
+At the preflight's own gate: ~217 s elapsed, `left()` ~353 s against ~188 s
+needed — headroom ~165 s. Even if the checks regressed to their largest
+observed size and setup doubled, it still fits at ~500 s. The projection is
+recomputed and gated on at run time; these figures are the review, not a
+substitute for it.
+
+Two supporting changes, both accounting rather than experiment:
+
+* the host allowance is raised from 60 s to **120 s**, stated as an allowance.
+  It covers the per-seed per-arm evaluation, three intervention evaluations,
+  the checkpoint write, and the trained-parameter correctness checks — roughly
+  18 additional compilations across the batch. Under-allowing it would let the
+  inner deadline stop training mid-batch and record arms incomplete, which is a
+  worse failure than refusing up front;
+* the diagnostic stage breakdown stays **off** unless the projection fails, and
+  now runs even then only if more than 90 s is spare, so a diagnostic cannot
+  become the thing that overruns the deadline it is diagnosing.
+
 **Amendment, 16 September 2026: the budget's own overheads.** With the
 weak-type fix the projection fell from 2431 s to **128.5 s** — the memory arm's
 step went 2560.91 ms to **3.00 ms** — and Part A still did not start, by 21 s
