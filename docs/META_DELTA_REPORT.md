@@ -1,6 +1,12 @@
 # Generalized prospective memory around the delta boundary — report
 
-**Status: dispatch 1 at `2a86cc9` FAILED at the focused checks (1 of 33).
+**Status: dispatch 2 at `5dc4b07` — operational PASS (273 s of 600).
+Verdicts: literature FAILED, matched delta PASSED, TSS Eq. (17) direct
+fast weight (applicability-limited) FAILED, heavy-ball family comparison
+PASSED. Per-seed values pending the read-only digest. Dispatch 1 below is
+preserved.**
+
+Previous status line (dispatch 1): **dispatch 1 at `2a86cc9` FAILED at the focused checks (1 of 33).
 No calibration stage, preflight or training ran. Logs preserved. No retry. The
 narrow probe correction was cleared; one relaunch is authorized.**
 
@@ -104,6 +110,43 @@ finite derivative below the threshold is reported as a limitation. That is
 consistent with R1; no tolerance, threshold, fixture or equation changes. The
 fix and any relaunch need authorization.
 
+## Dispatch 2 — `5dc4b07`: operational PASS
+
+| | |
+|---|---|
+| started | 2026-09-16T20:23:10Z, `pgi15-gpu3`, SLURM 66044 |
+| checks | **33 passed** in 139.8 s |
+| preflight | projected 120.0 s; no failures and no retrace |
+| study | completed; held-out opened after all 18 final runs |
+| total | **273 s of 600** |
+| artifacts | `/Users/durso/s5-runs/meta-delta/20260916-222310/` |
+
+**Checks.**
+* The stress-fixture `raw_r` tangent is finite and below float32
+  resolvability (jvp −3.365e-3, threshold 7.37e-3). It is reported as a
+  limitation, with FD relative errors of 1.10e-3 and 3.62e-3.
+* Actual start in float32: `raw_r` jvp 1.514e-2, FD relative errors 2.84e-4
+  and 1.03e-3, `raw_tau` gradient −1.26e-7.
+* Actual start in float64: `raw_r` jvp 1.174e-2, `raw_tau` gradient 1.3e-16.
+* Wider region against the float64 dense reference: 1.74e-7 at `rho = 1.275`
+  and 2.84e-7 at `rho = 2.250`, the projection margin.
+* Wider-interior tangent: FD relative errors 1.40e-4 and 1.88e-3.
+* Projection: 400 points plus 49 edge points certified.
+* Float32 nesting: logits 1.77e-7.
+
+**Verdicts, as printed by the run:**
+
+| Verdict | Result |
+|---|---|
+| Literature: Momentum DeltaNet AND Gated DeltaNet | **FAILED** |
+| Matched delta: departure from the exact delta boundary | **PASSED** |
+| TSS Eq. (17) applied directly to the fast weight (applicability-limited) | **FAILED** |
+| Heavy-ball family comparison (not causal attribution) | **PASSED** |
+
+Operational PASS is not a performance claim. Per-seed primary, retention,
+recall, categories, selection and learned coefficients are pending
+`python -m experiments.meta_delta.summary <run_dir>`.
+
 ## Results
 
-*(empty)*
+*(per-seed values pending the digest)*
