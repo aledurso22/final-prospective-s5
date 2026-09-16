@@ -186,7 +186,25 @@ def init_params(arm, seed, n_classes=8):
 
     p["ro_W"] = _glorot(k_ro, (D_HID, n_out))
     p["ro_b"] = jnp.zeros((D_HID,))
-    return p
+    return strip_weak_types(p)
+
+
+def strip_weak_types(tree):
+    """Make every leaf STRONGLY typed.
+
+    A leaf built by `jnp.full(shape, python_float)` is weakly typed, while the
+    same leaf after an optimizer update is strongly typed. A jitted step that
+    consumes its own output therefore traces once for the weak input and again
+    for the strong one, and the retrace is silent.
+
+    That cost one measurement and three hypotheses. The memory comparator's
+    `log_decay` was the only weakly typed leaf in the pilot, which is why that
+    arm alone appeared to take 2.5 s per update while its measured stages summed
+    to 3.2 ms: `step x 3 == compile_s` held to two digits in every run, i.e. the
+    "step time" was one recompilation amortized over the three timed calls.
+    """
+    return jax.tree_util.tree_map(
+        lambda v: jnp.asarray(v).astype(jnp.asarray(v).dtype), tree)
 
 
 def project_params(arm, p):

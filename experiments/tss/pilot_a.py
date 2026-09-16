@@ -232,17 +232,37 @@ def write(path, obj):
         json.dump(jsonable(obj), fh, indent=2)
 
 
+def _cache_size(fn):
+    try:
+        return int(fn._cache_size())
+    except Exception:
+        return None
+
+
 def _time(fn, *a, n=3):
-    """Compile once, then time `n` calls. Returns (compile_s, steady_s)."""
+    """Compile, WARM UP AGAIN, then time `n` calls. Returns (compile, steady).
+
+    The second warm-up is not redundant. A jitted step that consumes its own
+    output retraces when the output's weak-typing differs from the input's, and
+    that retrace lands inside the timing loop and is silently amortized over
+    it - which is exactly how a 3 ms step read as 2.5 s.
+    """
     t0 = time.time()
     r = fn(*a)
     jax.block_until_ready(r)
     compile_s = time.time() - t0
+    jax.block_until_ready(fn(*a))          # absorb any second trace
+    before = _cache_size(fn)
     t1 = time.time()
     for _ in range(n):
         r = fn(*a)
     jax.block_until_ready(r)
-    return compile_s, (time.time() - t1) / n
+    steady = (time.time() - t1) / n
+    after = _cache_size(fn)
+    if before is not None and after is not None and after != before:
+        print(f"[!] RETRACE during timing: jit cache {before} -> {after}; "
+              f"the reported steady cost is contaminated")
+    return compile_s, steady
 
 
 def component_timing(arm, p, cfg, es, args=None, tx=None, opt=None):
@@ -325,15 +345,28 @@ def preflight(cfg, status):
         p2, opt2, loss, aux, gn = train_step(arm, tx, p, opt, *args, cfg)
         loss.block_until_ready()
         compile_s = time.time() - t0
+        # Feed the output back ONCE before timing: a step that consumes its own
+        # output can retrace when the output's weak-typing differs from the
+        # input's, and that retrace would otherwise be averaged into the step.
+        p2, opt2, loss, aux, gn = train_step(arm, tx, p2, opt2, *args, cfg)
+        loss.block_until_ready()
+        n_before = _cache_size(train_step)
         t1 = time.time()
         for _ in range(3):
             p2, opt2, loss, aux, gn = train_step(arm, tx, p2, opt2, *args, cfg)
         loss.block_until_ready()
         step_s = (time.time() - t1) / 3.0
+        n_after = _cache_size(train_step)
+        retraced = (n_before is not None and n_after is not None
+                    and n_after != n_before)
+        if retraced:
+            print(f"[!] {arm}: RETRACE during step timing "
+                  f"({n_before} -> {n_after}); projection is unreliable")
         arm_s = compile_s + len(SEEDS) * UPDATES * step_s
         total += arm_s
         rows.append(dict(arm=arm, compile_s=compile_s, step_s=step_s,
-                         arm_total_s=arm_s,
+                         arm_total_s=arm_s, retraced_during_timing=retraced,
+                         jit_cache=[n_before, n_after],
                          params=TM.parameter_count(p),
                          state=TM.temporal_state_count(arm)))
         es = jnp.swapaxes(TM.encode(p, args[0]), 0, 1)   # (L, B, D_ENC)

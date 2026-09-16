@@ -340,6 +340,47 @@ def test_the_batched_path_equals_the_single_sequence_path(arm):
         assert d / sc < EQUIV, (arm, d / sc)
 
 
+@pytest.mark.parametrize("arm", list(TM.ARMS))
+def test_no_parameter_leaf_is_weakly_typed(arm):
+    """A weakly typed leaf makes a self-consuming jitted step retrace, silently.
+
+    `jnp.full(shape, python_float)` is weak; the same leaf after an optimizer
+    update is strong; so the step traces once for each and the second trace
+    lands wherever the caller happens to be measuring. The memory comparator's
+    `log_decay` was the pilot's only weak leaf, and it is why that arm alone
+    reported 2.5 s per update while its measured stages summed to 3.2 ms.
+    """
+    p = TM.init_params(arm, 100)
+    weak = [k for k, v in
+            jax.tree_util.tree_flatten_with_path(p)[0]
+            if jnp.asarray(v).weak_type]
+    assert not weak, [jax.tree_util.keystr(k) for k, _ in weak] if weak else weak
+
+
+@pytest.mark.parametrize("arm", list(TM.ARMS))
+def test_the_training_step_does_not_RETRACE_when_fed_its_own_output(arm):
+    """The production step, run three times on its own output, must compile
+    ONCE. This is the regression for the measurement that cost four runs."""
+    from experiments.tss import pilot_a as PA
+    cfg = TM.coefficients()
+    rng = onp.random.RandomState(0)
+    xs, y_sig, y_cls, q_idx, _ = TK.generate(rng, 4)
+    args = (jnp.asarray(xs), jnp.asarray(y_sig), jnp.asarray(y_cls),
+            jnp.asarray(q_idx))
+    p = TM.init_params(arm, 100)
+    tx = PA.get_tx()
+    opt = tx.init(p)
+    p, opt, loss, aux, gn = PA.train_step(arm, tx, p, opt, *args, cfg)
+    jax.block_until_ready(loss)
+    before = PA.train_step._cache_size()
+    for _ in range(3):
+        p, opt, loss, aux, gn = PA.train_step(arm, tx, p, opt, *args, cfg)
+    jax.block_until_ready(loss)
+    after = PA.train_step._cache_size()
+    print(f"  {arm}: jit cache {before} -> {after}")
+    assert after == before, (arm, before, after)
+
+
 def test_the_state_budget_is_what_is_declared():
     counts = {a: TM.temporal_state_count(a) for a in TM.ARMS}
     assert counts["ideal_prospective"]["total"] == 0

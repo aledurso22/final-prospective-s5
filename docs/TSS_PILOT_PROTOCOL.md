@@ -444,6 +444,46 @@ additionally requires lower relative error than the GLE-inspired baseline at
 Initial-state gradients stay outside the approximate comparison — those initial
 conditions are fixed — and that is recorded, not hidden.
 
+**Amendment, 16 September 2026: the memory comparator was never slow; the
+MEASUREMENT was wrong.** The stage-by-stage bisect (`c7d7bf2`, logs
+`20260916-015831`) closed this:
+
+```
+tss_memory_then_prospective   step 2560.91 ms
+   temporal_forward=0.48  temporal_grad=2.09  memory_forward=0.15
+   processing_forward=0.46  encode=0.12  readout=0.13
+   loss_value_and_grad=2.23  project_params=0.68  optimizer_update=0.28
+```
+
+Every stage the step performs sums to about **3.2 ms**, against a reported step
+of 2560.91 ms. The remainder is not in any stage, and the arithmetic says what
+it is:
+
+| run | `compile_s` | `step` | `step x 3` |
+|---|---|---|---|
+| `17f009e` | 8.8 s | 2942.87 ms | **8.83 s** |
+| `bc11b5d` | 7.7 s | 2549.71 ms | **7.65 s** |
+| `c7d7bf2` | 7.7 s | 2560.91 ms | **7.68 s** |
+
+`step x 3 == compile_s` to two digits in every run. Exactly one
+**recompilation** was landing inside the three-call timing loop and being
+averaged over it. The arm's real step is about 3 ms, comparable with the ideal
+control's 2.8 ms.
+
+The cause is a **weakly typed parameter**. `jnp.full(shape, python_float)`
+produces a weakly typed leaf; the same leaf after an optimizer update is
+strongly typed; so a jitted step that consumes its own output traces once for
+each. The memory comparator's `log_decay` was the pilot's only weak leaf, which
+is why that arm alone showed it. `init_params` now strips weak types
+tree-wide, the preflight warms up once more before timing **and reports any
+jit-cache growth during it**, and two tests cover both halves: no weak leaf in
+any arm, and the production step compiles exactly once when fed its own output.
+
+This invalidated three earlier performance diagnoses, which are kept above as
+what they were. The associative scan, the vectorized fixed point and the
+batch-native rewrite are all retained: each is correct, cheaper and separately
+tested, but none of them was the reported cost.
+
 **Amendment, 16 September 2026: the model is batch-native, with no `vmap`
 around the temporal layer.** The component breakdown added for exactly this
 purpose settled it in one run (`17f009e`, logs `20260916-014155`):
