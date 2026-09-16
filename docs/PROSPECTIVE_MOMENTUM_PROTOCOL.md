@@ -212,7 +212,7 @@ Nothing is clamped by validation. FAILED stops the batch.
 |---|---|
 | ID64 | 1e-9 |
 | GRAD64 | 1e-8, with floor 1e3 eps64 G |
-| FD64 | 1e-6 at h = 1e-5, 1e-6 |
+| FD64 | 1e-6 relative; since the post-dispatch-1 amendment, the decisive kappa reference is an independent analytic sensitivity (finite differences at h = 1e-5, 1e-6 kept as diagnostics) |
 | EXACT64 | 1e-12 |
 
 1. The semi-implicit canonical step (3), solved independently as a linear
@@ -236,9 +236,19 @@ Nothing is clamped by validation. FAILED stops the batch.
    - a finite gradient of the extension scalar.
 7. Idle-token (m = 0) identity with native for the same state and gates, at
    any kappa and g.
-8. The kappa JVP against central differences at the restored start
-   (kappa = 0) and at the interior point 0.5·Kmax. The start derivative must
-   not be identically zero.
+8. The kappa JVP at the restored start (kappa = 0) and at the interior point
+   0.5·Kmax, on the same checkpoint and episode `_ep(9300)`. The start
+   derivative must not be identically zero. **Amended after dispatch 1**
+   (see "Post-dispatch amendment" below):
+   - the decisive reference is an independent sequential NumPy float64
+     sensitivity recursion;
+   - its logits and final W/Q must match the production rollout at ID64,
+     and the production JVP must match its derivative at FD64 with scale
+     `max(|reference|, 1e-12)`;
+   - everything must be finite first;
+   - both original central differences (h = 1e-5, 1e-6) are still evaluated
+     and must be finite, and their base and perturbed losses and discrepancies
+     are printed as diagnostics only.
 9. Executed 2×2 transitions against A_kappa and against (11), for random
    gates including alpha = 1, at kappa ∈ {0, 0.5B, (1−1e-3)B, (1+1e-3)B}.
    Eigenvalue moduli must agree with the classification, and above the
@@ -493,6 +503,53 @@ training protocol and cap are unchanged.
   same executed value being reported. The independent float64 exponential
   is compared at the declared production float32 tolerance, 2e-5 relative,
   and the discrepancy is printed.
+
+### Post-dispatch amendment after dispatch 1 (20260916-234352, commit 81b6461)
+
+This is a test-method amendment made **after** a dispatch. The model,
+training protocol, performance criteria, production tolerances and the
+600-second cap are unchanged. Dispatch 1 and its logs are preserved as the
+actual result: FAILED/4 at focused checks, 48 passed and 2 failed
+(`docs/PROSPECTIVE_MOMENTUM_REPORT.md`).
+
+- **Derivative reference (brief
+  `PROSPECTIVE_MOMENTUM_DISPATCH1_CORRECTION_2026_09_16.md`).** The acceptance
+  reference for the float64 kappa derivative changes from requiring both
+  subtractive finite differences to requiring an independent analytic
+  sensitivity. That sensitivity is a sequential NumPy float64 recursion for
+  W, Q and U = dW/dkappa, V = dQ/dkappa:
+  - old carries throughout;
+  - `dR_dkappa = m alpha (U k) k^T`, including the state dependence of R;
+  - `U+ = alpha U - beta mu V - beta eta [R + (1+kappa) dR_dkappa]` and
+    `V+ = mu V + eta (1 - kappa c) dR_dkappa - eta c R`, with
+    `c = (1-mu)/mu`;
+  - `dL/dkappa = sum_t q_t (softmax(l_t) - y_t)^T H U_t k_t / max(sum q, 1)`,
+    with a stable softmax.
+
+  It uses no JAX differentiation, no production update function and no
+  finite differences. Only kappa-independent inputs (preprocessing, gates,
+  readout) are shared as constants. The requested derivative accuracy
+  (1e-6 relative) is unchanged, and the subtraction of nearly equal losses
+  is removed from the decisive reference. If the reference disagrees, the
+  result is reported: no tolerance tuning, no other episode, no other
+  interior point.
+- **Supervisor fixtures (approved readiness handshake).** Dispatch 1's
+  completed-leader fixture let the leader exit before its descendant ignored
+  TERM, so a correctly delivered TERM emptied the group without KILL. Now:
+  - descendants install `trap "" TERM` and only then publish readiness;
+  - for the deadline fixtures the test observes readiness before the
+    absolute TERM time minus 0.2 s (bounded at 10 s), otherwise it reports a
+    SETUP failure;
+  - the completed-leader fixture waits (bounded) for readiness before exiting,
+    and exit 97 is reported as a SETUP failure;
+  - cleanup assertions are labelled CLEANUP;
+  - harness exceptions clean up the descendant, the leader group and the
+    supervisor, but the normal path never kills the descendant before the
+    survival assertion.
+
+  The production supervisor is unchanged. The prior static review had not
+  identified this race.
+- The float32 probe and its limitation policy are unchanged.
 
 ## 13. Open items for the reviewer (as at a1f0439)
 

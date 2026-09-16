@@ -279,16 +279,116 @@ def test_idle_token_update_is_native_for_the_same_state_and_gates():
 
 
 # ================================= 5. kappa tangent, float64 reference ======
-def _kappa_fd(p, kappa0, ep):
+# POST-DISPATCH TEST-METHOD AMENDMENT (dispatch 1, 20260916-234352; brief
+# PROSPECTIVE_MOMENTUM_DISPATCH1_CORRECTION_2026_09_16.md). Dispatch 1 failed
+# the h = 1e-6 subtractive finite difference at the interior point (relative
+# 1.16e-6 vs 1e-6). The DECISIVE derivative reference is now an independent
+# sequential NumPy float64 sensitivity recursion (no JAX differentiation, no
+# production update function, no finite differences). Both original finite
+# differences are still evaluated, must be finite, and are printed in full
+# as DIAGNOSTICS; their agreement or disagreement is not an accuracy pass.
+def _kappa_inputs(p, ep):
+    """Input-only constants shared with production (preprocessing and gates
+    do not depend on kappa): keys, values, write mask, the four gates, the
+    readout, query indicator and labels, as float64 NumPy arrays."""
+    from experiments.adaptive_memory import model as AM
+    e = AM.sanitize_episode(ep)
+    key_id, val_id, event = e["key_id"], e["val_id"], e["event"]
+    k_all, k_valid = NMD.safe_normalize(p["key_raw"])
+    keys = k_all[key_id]
+    has_v = (val_id >= 0).astype(jnp.float64)
+    vals = p["value_table"][jnp.maximum(val_id, 0)] * has_v[:, None]
+    mask = (event == TK.WRITE).astype(jnp.float64) * k_valid[key_id]
+    gx = NM.gate_features(key_id, val_id, event).astype(jnp.float64)
+    gates = NM._momentum_gates(p, gx)
+    c = {k: onp.asarray(v, F64) for k, v in dict(
+        keys=keys, vals=vals, mask=mask, alpha=gates[0], beta=gates[1],
+        mu=gates[2], eta=gates[3], H=p["readout_W"], b=p["readout_b"]).items()}
+    c["q"] = (onp.asarray(e["event"]) == TK.QUERY).astype(F64)
+    c["label"] = onp.maximum(onp.asarray(e["label"]), 0)
+    return c
+
+
+def _sensitivity_reference(c, kappa):
+    """Independent sequential primal + d/dkappa recursion (brief s2).
+
+    Old carries throughout; every right-hand side is computed before any
+    carry is replaced; dR_dkappa includes the state dependence of R."""
+    d_v, d_k = c["vals"].shape[1], c["keys"].shape[1]
+    W = onp.zeros((d_v, d_k)); Q = onp.zeros((d_v, d_k))
+    U = onp.zeros((d_v, d_k)); V = onp.zeros((d_v, d_k))
+    L = c["keys"].shape[0]
+    logits = onp.zeros((L, c["H"].shape[0]))
+    dlogits = onp.zeros_like(logits)
+    for t in range(L):
+        k, v, m = c["keys"][t], c["vals"][t], c["mask"][t]
+        al, be, mu, et = (c[x][t] for x in ("alpha", "beta", "mu", "eta"))
+        cc = (1.0 - mu) / mu
+        R = m * onp.outer(al * (W @ k) - v, k)
+        dR_dkappa = m * al * onp.outer(U @ k, k)
+        W_new = al * W - be * mu * Q - be * et * (1.0 + kappa) * R
+        Q_new = mu * Q + et * (1.0 - kappa * cc) * R
+        U_new = (al * U - be * mu * V
+                 - be * et * (R + (1.0 + kappa) * dR_dkappa))
+        V_new = mu * V + et * (1.0 - kappa * cc) * dR_dkappa - et * cc * R
+        W, Q, U, V = W_new, Q_new, U_new, V_new
+        logits[t] = c["H"] @ (W @ k) + c["b"]
+        dlogits[t] = c["H"] @ (U @ k)
+    z = logits - logits.max(axis=1, keepdims=True)          # stable softmax
+    lse = onp.log(onp.exp(z).sum(axis=1))
+    logp = z - lse[:, None]
+    sm = onp.exp(logp)
+    y = onp.eye(logits.shape[1])[c["label"]]
+    nq = max(c["q"].sum(), 1.0)
+    loss = float(-(c["q"] * (y * logp).sum(axis=1)).sum() / nq)
+    dL = float((c["q"] * ((sm - y) * dlogits).sum(axis=1)).sum() / nq)
+    return dict(W=W, Q=Q, U=U, V=V, logits=logits, dlogits=dlogits,
+                loss=loss, dL_dkappa=dL)
+
+
+def _kappa_reference_check(p, kappa0, ep):
     f = _loss_fn("prospective_momentum", ep)
+    pk = dict(p, kappa=jnp.asarray([kappa0]))
     fk = lambda kk: f(dict(p, kappa=jnp.asarray([kk])), None)  # noqa: E731
     jvp = float(jax.jvp(fk, (jnp.float64(kappa0),), (jnp.float64(1.0),))[1])
-    assert onp.isfinite(jvp)
+    ref = _sensitivity_reference(_kappa_inputs(p, ep), kappa0)
+    out = PM.rollout("prospective_momentum", pk, ep)
+    f0 = float(fk(kappa0))
+    # (2) finiteness of everything BEFORE any comparison
+    for name, x in (("jvp", jvp), ("production loss", f0),
+                    ("reference loss", ref["loss"]),
+                    ("reference dL/dkappa", ref["dL_dkappa"]),
+                    ("production logits", out["logits"]),
+                    ("production W", out["final_carry"][0]),
+                    ("production Q", out["final_carry"][1])) + tuple(
+                        (f"reference {k}", ref[k]) for k in
+                        ("W", "Q", "U", "V", "logits", "dlogits")):
+        assert onp.all(onp.isfinite(onp.asarray(x, F64))), \
+            f"non-finite {name} at kappa={kappa0}"
+    # (3) the reference IS the executed model at this kappa
+    e_log = _rel(ref["logits"], out["logits"])
+    e_W = _rel(ref["W"], out["final_carry"][0])
+    e_Q = _rel(ref["Q"], out["final_carry"][1])
+    print(f"  kappa={kappa0!r} reference vs production: logits {e_log:.2e} "
+          f"W {e_W:.2e} Q {e_Q:.2e} loss {ref['loss']!r} vs {f0!r}")
+    assert e_log < ID64 and e_W < ID64 and e_Q < ID64, (e_log, e_W, e_Q)
+    # (5) the original finite differences: finite, printed, DIAGNOSTIC only
     for h in FD_STEPS:
-        fd = (float(fk(kappa0 + h)) - float(fk(kappa0 - h))) / (2 * h)
-        assert onp.isfinite(fd)
-        print(f"  kappa={kappa0:.4g} jvp {jvp:.6e} fd(h={h}) {fd:.6e}")
-        assert abs(jvp - fd) <= FD64 * max(abs(fd), 1e-12), (h, jvp, fd)
+        fp, fm = float(fk(kappa0 + h)), float(fk(kappa0 - h))
+        fd = (fp - fm) / (2 * h)
+        assert onp.isfinite(fp) and onp.isfinite(fm) and onp.isfinite(fd), \
+            f"non-finite finite-difference evaluation at h={h}"
+        a_fd = abs(jvp - fd)
+        print(f"  DIAGNOSTIC kappa={kappa0!r} h={h}: f={f0!r} f(+h)={fp!r} "
+              f"f(-h)={fm!r} fd={fd!r} jvp={jvp!r} |jvp-fd|={a_fd:.3e} "
+              f"rel={a_fd / max(abs(fd), 1e-12):.3e} (tolerance {FD64}; "
+              f"diagnostic, not decisive)")
+    # (4) DECISIVE: production JVP vs the independent sensitivity
+    r = ref["dL_dkappa"]
+    err = abs(jvp - r)
+    print(f"  DECISIVE kappa={kappa0!r}: jvp={jvp!r} reference={r!r} "
+          f"|diff|={err:.3e} rel={err / max(abs(r), 1e-12):.3e} (FD64 {FD64})")
+    assert err <= FD64 * max(abs(r), 1e-12), (kappa0, jvp, r)
     return jvp
 
 
@@ -299,9 +399,9 @@ def test_kappa_tangent_at_the_restored_start_and_an_interior_point():
     kmax = float(jnp.min(PD.kappa_bound(a, b, mu, eta)))
     assert onp.isfinite(kmax) and kmax > 0
     ep = _ep(9300)
-    j0 = _kappa_fd(p, 0.0, ep)
+    j0 = _kappa_reference_check(p, 0.0, ep)
     assert j0 != 0.0, "kappa derivative identically zero at the start"
-    _kappa_fd(p, 0.5 * kmax, ep)
+    _kappa_reference_check(p, 0.5 * kmax, ep)
 
 
 # ================================= 6. frozen-token transition (11)-(12) =====
@@ -857,7 +957,16 @@ def _kill_quietly(pid_files):
             pass
 
 
+def _kill_group_quietly(pid_file):
+    import signal as _sig
+    try:
+        os.killpg(int(open(pid_file).read().split()[0]), _sig.SIGKILL)
+    except (OSError, ValueError, IndexError):
+        pass
+
+
 def _supervise(tmp_path, script, term_in, grace):
+    """Blocking supervisor run (no readiness requirement)."""
     import time
     out = tmp_path / "outcome"
     t0 = time.time()
@@ -874,43 +983,113 @@ def _supervise(tmp_path, script, term_in, grace):
     return rec, elapsed
 
 
+# Readiness handshake (post-dispatch-1 fixture correction). The descendant
+# installs its TERM-ignore disposition and only THEN publishes readiness, so
+# a TERM that reaches it cannot kill it by the default action. For deadline
+# fixtures the TEST observes readiness before the supervisor's absolute TERM
+# time (with a margin); otherwise the run is a SETUP failure, reported as
+# such, never as a cleanup result. On a setup/harness exception the helper
+# kills the descendant, the leader's group and the supervisor; on the normal
+# path each test kills its descendant in `finally` AFTER its survival
+# assertion.
+READY_DESCENDANT = ('(trap "" TERM; touch "$0/ready"; exec sleep 60) & '
+                    'echo $! > "$0/gc.pid"; ')
+READY_WAIT_S = 10.0
+READY_MARGIN_S = 0.2
+
+
+def _run_with_readiness(tmp_path, script, term_in, grace, leader_waits):
+    import time
+    out, ready = tmp_path / "outcome", tmp_path / "ready"
+    t0 = time.time()
+    term_at = t0 + term_in
+    proc = subprocess.Popen([sys.executable, SUPERVISOR, "--term_at",
+                             repr(term_at), "--grace", str(grace),
+                             "--outcome", str(out), "--", "bash", "-c",
+                             'echo $$ > "$0/leader.pid"; ' + script,
+                             str(tmp_path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    try:
+        if not leader_waits:
+            by = min(t0 + READY_WAIT_S, term_at - READY_MARGIN_S)
+            while time.time() < by and not ready.exists():
+                time.sleep(0.01)
+            if not ready.exists():
+                pytest.fail(f"SETUP failure: descendant readiness not "
+                            f"observed before the stop time minus "
+                            f"{READY_MARGIN_S} s; no cleanup claim is made")
+        so, se = proc.communicate(timeout=60)
+        elapsed = time.time() - t0
+        line = open(out).read().split()
+        rec = json.load(open(str(out) + ".json"))
+        print(rec, elapsed, se[-500:])
+        assert line == [rec["outcome"], str(rec["rc"])]
+        return rec, elapsed
+    except BaseException:
+        # setup/harness failure: clean up here. On the normal path nothing is
+        # killed before the caller's survival assertion, so a cleanup failure
+        # of the supervisor cannot be masked by the fixture itself.
+        _kill_quietly([tmp_path / "gc.pid"])
+        _kill_group_quietly(tmp_path / "leader.pid")
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        raise
+
+
 def test_supervisor_kills_when_leader_and_descendant_ignore_term(tmp_path):
     pidf = tmp_path / "gc.pid"
     try:
-        rec, el = _supervise(tmp_path, 'trap "" TERM; (exec sleep 60) & '
-                             'echo $! > "$0/gc.pid"; wait', 1.0, 1.0)
-        assert rec["outcome"] == "watchdog_kill" and rec["rc"] == 137
-        assert el <= 5.0
-        assert _gone_within(int(pidf.read_text()))
+        rec, el = _run_with_readiness(
+            tmp_path, 'trap "" TERM; ' + READY_DESCENDANT + 'wait',
+            term_in=3.0, grace=1.0, leader_waits=False)
+        assert rec["outcome"] == "watchdog_kill" and rec["rc"] == 137, \
+            f"CLEANUP: {rec}"
+        assert el <= 7.0, f"CLEANUP: elapsed {el}"
+        assert _gone_within(int(pidf.read_text())), \
+            "CLEANUP: descendant still executing"
     finally:
         _kill_quietly([pidf])
 
 
 def test_supervisor_kills_descendant_after_leader_exits_on_term(tmp_path):
-    """The GNU-timeout gap: the leader exits on TERM, a descendant ignores
-    TERM. The group must still be KILLed at term + grace."""
+    """The GNU-timeout gap: the leader exits on TERM, a READY descendant
+    ignores TERM. The group must still be KILLed at term + grace."""
     pidf = tmp_path / "gc.pid"
     try:
-        rec, el = _supervise(tmp_path, '(trap "" TERM; exec sleep 60) & '
-                             'echo $! > "$0/gc.pid"; wait', 1.0, 1.0)
-        assert rec["term_sent"] and rec["kill_sent"]
-        assert rec["outcome"] == "watchdog_kill"
-        assert rec["leader_rc"] == 128 + 15
-        assert el <= 5.0
-        assert _gone_within(int(pidf.read_text()))
+        rec, el = _run_with_readiness(
+            tmp_path, READY_DESCENDANT + 'wait',
+            term_in=3.0, grace=1.0, leader_waits=False)
+        assert rec["term_sent"] and rec["kill_sent"], f"CLEANUP: {rec}"
+        assert rec["outcome"] == "watchdog_kill", f"CLEANUP: {rec}"
+        assert rec["leader_rc"] == 128 + 15, f"CLEANUP: {rec}"
+        assert el <= 7.0, f"CLEANUP: elapsed {el}"
+        assert _gone_within(int(pidf.read_text())), \
+            "CLEANUP: descendant still executing"
     finally:
         _kill_quietly([pidf])
 
 
 def test_supervisor_cleans_members_left_by_a_completed_leader(tmp_path):
+    """The leader waits (bounded) for the descendant's readiness, then exits
+    0; exit 97 marks a readiness SETUP failure."""
     pidf = tmp_path / "gc.pid"
     try:
-        rec, el = _supervise(tmp_path, '(trap "" TERM; exec sleep 60) & '
-                             'echo $! > "$0/gc.pid"; exit 0', 30.0, 1.0)
-        assert rec["outcome"] == "completed" and rec["rc"] == 0
-        assert rec["orphans_cleaned"] and rec["kill_sent"]
-        assert el <= 5.0
-        assert _gone_within(int(pidf.read_text()))
+        rec, el = _run_with_readiness(
+            tmp_path, READY_DESCENDANT +
+            'i=0; while [ ! -e "$0/ready" ] && [ $i -lt 1000 ]; do '
+            'sleep 0.01; i=$((i+1)); done; [ -e "$0/ready" ] || exit 97; '
+            'exit 0', term_in=30.0, grace=1.0, leader_waits=True)
+        if rec["leader_rc"] == 97:
+            pytest.fail(f"SETUP failure: descendant readiness not "
+                        f"established by the leader: {rec}")
+        assert rec["outcome"] == "completed" and rec["rc"] == 0, \
+            f"CLEANUP: {rec}"
+        assert rec["orphans_cleaned"] and rec["kill_sent"], f"CLEANUP: {rec}"
+        assert el <= 16.0, f"CLEANUP: elapsed {el}"
+        assert _gone_within(int(pidf.read_text())), \
+            "CLEANUP: descendant still executing"
     finally:
         _kill_quietly([pidf])
 
