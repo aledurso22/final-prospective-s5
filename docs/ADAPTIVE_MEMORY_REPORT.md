@@ -17,6 +17,8 @@ cluster output, favourable or not.
 | Implementation | `experiments/adaptive_memory/` |
 | Checks | `tests/test_adaptive_memory.py` |
 | Launcher | `bin/run_experiments/cluster_adaptive_memory.sh` |
+| Reviewed commit | `c12e20b` — static review `IMPLEMENTATION_REVIEW_c12e20b.md`, fix-before-launch |
+| Launch commit | `8999d2ef7e1c4a1b73f02909cf7b91c470fff727` (R1–R5 corrected) |
 | Executed commit | *(to be recorded from the launcher's `git rev-parse HEAD`)* |
 
 Coordinator sources, all dated 16 September 2026:
@@ -68,6 +70,36 @@ done here.
    nested review. The rate is now dynamic.
 3. `study.coefficient_report` had an unreachable/incorrect branch for the
    literature arms' gate reporting.
+
+### Coordinator static review of `c12e20b` — R1–R5
+
+The coordinator reviewed `c12e20b` before launch and found five further
+defects, all static. Full dispositions are in
+`docs/ADAPTIVE_MEMORY_PROTOCOL.md` §10; in brief:
+
+* **R1** — the calibration grid's upper end (`ν = exp(12)`) overflowed `cosh`
+  in the host exponential, so `configurations()` could never reach the bracket
+  loop. The host routine now uses `scipy.linalg.expm`, and the scan is
+  incremental and stops at the first bracket.
+* **R2** — the retention safeguard rejected a candidate only when *both*
+  metrics regressed. It now requires **both** differences `≥ −1 point`. All
+  three paired seeds are required. Attribution no longer depends on the
+  literature screen.
+* **R3** — the query-value test demanded invariance the pinned literature
+  gates cannot provide. Fixed by specifying the input contract at the common
+  boundary, **not** by changing the literature rule. This was never label
+  leakage in a valid episode.
+* **R4** — `expm2` overflowed float32 for finite answers such as
+  `diag(−200,−1)`. The trace is now folded inside the hyperbolic functions,
+  with a dtype-derived series switch. No coefficient clamp was added.
+* **R5** — the "float32 trajectory" tests used float64 coefficients; the TSS
+  JVP was float64-only; the confluent check asserted only finiteness; the
+  derivative path used a surrogate scalar. All four are corrected, and the
+  pre-existing float32 coverage was preserved rather than discarded.
+
+Two of these — R1 and R4 — would have failed the batch at the checks with no
+training, exactly as the nested study's first dispatch did. They were found by
+reading, not by running.
 
 ## Declared configuration
 
