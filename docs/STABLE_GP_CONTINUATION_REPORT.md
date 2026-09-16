@@ -253,11 +253,14 @@ would have measured it.
 
 | Stream | A acc / CE | B acc / CE | C acc / CE |
 |---|---|---|---|
-| 202 | 0.9575 / 0.2578 | 0.9582 / 0.2576 | 0.9576 / 0.2559 |
-| 203 | 0.9550 / 0.2616 | 0.9557 / 0.2614 | 0.9573 / 0.2597 |
+| 201 | 0.95798 / 0.25713 | 0.95798 / 0.25681 | 0.95919 / 0.25549 |
+| 202 | 0.95746 / 0.25785 | 0.95815 / 0.25757 | 0.95763 / 0.25593 |
+| 203 | 0.95504 / 0.26159 | 0.95573 / 0.26140 | 0.95729 / 0.25972 |
 
-Stream 201's per-arm endpoints were cut off in the console; they are in
-`results.json`.
+Paired CE differences (C − A): −0.00164 / −0.00192 / −0.00187. (C − B):
+−0.00132 / −0.00164 / −0.00168. (B − A, descriptive): −0.00032 / −0.00028 /
+−0.00019. All from the epoch-10 endpoint; best-validation epochs are
+descriptive only and not used.
 
 | Comparison | Mean accuracy | Per stream 201 / 202 / 203 | Mean CE | Verdict |
 |---|---|---|---|---|
@@ -273,25 +276,78 @@ criterion is reported as it stands and not loosened.
 
 Scale: 0.1 pp on 5783 validation examples is about 6 examples.
 
-### Pending
+### Learned coefficients, domain and projection (from `stable_gp_summary`)
 
-Learned `T_in`, `rho` and `T`; passive occupancy and stability margins;
-projection telemetry; response changes; stream-201 endpoints. All are in the
-saved run and will be read with
-`python -m experiments.gp.stable_gp_summary <run_dir>`, a read-only tool added
-after the run that does not affect it.
+**Start of training.** The `r` gradient was nonzero in every layer (norms
+0.059, 0.029, 0.043 and 0.082) and the `t` gradient was exactly 0, as the
+nesting predicts at `rho = 1`. The `q` gradients of B and C agreed to about
+1e-7. C's epoch-0 validation CE differed from A and B by 5.7e-8.
 
-### Checks
-### Source checkpoint and reproduction
-### Identity gate and epoch 0
-### Preflight
-### Per-stream endpoints (epoch 10)
-### Screen: C vs A, C vs B (paired values), B vs A (descriptive)
-### T_in / rho / T movement, stability margins, passive occupancy, projection telemetry
-### Current-input and history response changes
-### Cost: parameters, carry, time
+**Final executed coefficients of C** (ranges over layers, all three streams):
 
-## Guarantees: checked versus analytical
+| Quantity | Start | Per-layer medians | Overall range |
+|---|---|---|---|
+| `T_in` (B and C similar) | 5 | 5.06 – 5.26 | 4.34 – 5.84 |
+| `rho` | 1 | 0.936 – 1.002 | 0.877 – 1.149 |
+| `T` | 10 | 9.01 – 10.13 | 7.33 – 11.44 |
+| `M = rho T` | 10 | 8.76 – 9.48 | 7.10 – 12.38 |
 
-See protocol §12. Numerical PASS is distinct from development success, and
-neither by itself establishes superiority.
+`rho` moved in **both** directions. The passive subdomain (`rho <= 1`) holds
+42–43 of 64 modes per stream (per layer 8–9, 15, 10–11 and 9 of 16), so about a
+third of the modes left the passive circuit sector for the wider stable
+domain. `T` moved away from its initial 10, mostly downward.
+
+**Executed stability domain:** all layers passed in every stream, with no real
+modes. The minimum relative margin to `rho_max` was 0.27–0.40. The executed
+generator's largest real part was −0.00099 to −0.0014, and the minimum `S` was
+about 1e-3. Those small magnitudes reflect slow modes; the modes are not near
+the `rho` boundary.
+
+**Projection telemetry:** **0 projection events** in all three C runs, out of
+539,520 entry-updates each, with no proposed overshoot. The minimum
+post-projection log margin was 0.312–0.330. The stability constraint was
+**never active**; learning stayed well inside the domain.
+
+**Identity gate, first-update detail (reported, not gated).**
+* C vs B: the independent first updates differed by up to 1.05·lr, at
+  `encoder/encoder/bias`, the batch-norm null-direction leaf. There were 35
+  near-zero reference coordinates, and the post-update logit difference was
+  1.4e-3.
+* B vs A: the updates were identical, and the post-update logit difference of
+  4.8e-4 comes from B's own `q` update.
+
+**Response change** (128-lag window, start to end, relative). All arms changed
+their current tap and history substantially during continuation, by 0.28–0.62,
+and B and C by similar amounts. In layer 0, C's history norm grew less than A's
+and B's in every stream (1.419 to about 1.49, versus about 1.53–1.55).
+Descriptive only.
+
+**Cost:**
+
+| Arm | Wall per run | Parameters | Carry (real) |
+|---|---|---|---|
+| A | 32.0 s | 35,050 | 256 |
+| B | 32.1–32.3 s | 35,114 (+64) | 256 |
+| C | 76.4–76.6 s (**2.4×**) | 35,242 (+192) | **384** |
+
+The study phase took 586 s; the whole dispatch took 857 s.
+
+### What this result supports
+
+* **Operationally:** all checks passed; the source was reproduced exactly; the
+  nested identity held at start in production dtype; every executed
+  coefficient stayed inside the stable domain; the batch completed within the
+  cap.
+* **Development screen: FAILED** against both controls. C's accuracy gains
+  (+0.121 pp over Rawat, +0.075 pp over the learned-input control) are below the
+  0.3 pp threshold, and one stream is negative against B.
+* **C's CE was lower in all six paired comparisons**, by 0.0013–0.0019. That
+  is several times B's own gain over A. Consistent direction across three
+  continuation streams of **one** source checkpoint is not independent
+  replication, and it is not a significance test. It does not satisfy the
+  criterion and is not reported as a success.
+* The added freedom was genuinely used: `rho` straddled 1, a third of the
+  modes left the passive sector, and `T` moved. That came at 2.4× time and 1.5×
+  carry. An equal-capacity generic control would be needed before attributing
+  any CE difference to the physical structure.
+* No rescue sweep, retry or criterion change was made.
