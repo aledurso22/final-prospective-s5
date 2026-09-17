@@ -232,6 +232,46 @@ def test_closed_loop_first_write_agrees_before_later_readouts():
     assert rep["executed_coefficients"]["generalized_M1q_T1h"]["c"] == 2.0
 
 
+def _payload(dtype=onp.float32):
+    z = onp.zeros((2, 3, 1, 1), dtype=dtype)
+    return dict(logits=onp.zeros((2, 3, 8), dtype=dtype), W_trace=z.copy(),
+                U_trace=z.copy(), proc_max_abs=onp.zeros((2, 3), dtype=dtype),
+                coeff={k: onp.ones((2,), dtype=dtype) for k in FL.COEFF_NAMES})
+
+
+def test_diagnostic_payload_guards_reject_nonfinite_or_wrong_dtype():
+    """Review R1 regressions: an otherwise valid payload fails on a
+    non-finite U trace, processing summary, logit or coefficient copy, and
+    on a non-production dtype."""
+    assert TD.payload_failures("ok", _payload(), onp.float32) == []
+    for key in ("U_trace", "proc_max_abs", "logits", "W_trace"):
+        bad = _payload()
+        bad[key] = bad[key].copy()
+        bad[key].flat[0] = onp.nan
+        f = TD.payload_failures("bad", bad, onp.float32)
+        assert f and key in f[0], (key, f)
+    bad = _payload()
+    bad["coeff"]["b"] = onp.array([0.3, onp.inf], dtype=onp.float32)
+    assert TD.payload_failures("bad", bad, onp.float32)
+    missing = _payload()
+    del missing["proc_max_abs"]
+    assert TD.payload_failures("bad", missing, onp.float32)
+    assert TD.payload_failures("dtype", _payload(onp.float64), onp.float32)
+
+
+def test_diagnostic_readout_guards_reject_nonfinite_or_empty():
+    assert TD.finite_failures("p", onp.array([0.2, 0.8])) == []
+    assert TD.finite_failures("p", onp.array([0.2, onp.nan]))
+    assert TD.finite_failures("p", onp.array([]))
+    good = {"revision/idle_gap": dict(n=4, revised_label_probability=[0.5])}
+    assert TD.curve_failures("c", good) == []
+    nanc = {"revision/idle_gap": dict(n=4,
+                                      revised_label_probability=[onp.nan])}
+    assert TD.curve_failures("c", nanc)
+    empty = {"revision/idle_gap": dict(n=0, revised_label_probability=[])}
+    assert TD.curve_failures("c", empty)
+
+
 def test_trace_is_opt_in_and_shares_the_scan():
     pn = _source_native_f64()
     b = TT.generate_batch(987_010, 4)
@@ -364,6 +404,31 @@ def test_aggregate_screen_and_secondary_cells():
     assert sc["generalized_versus_learned_operator"][
         "aggregate_screen_passed"] is False
     assert g["secondary_cells"]["revision"]["by_delay"]["revised_probe"]
+
+
+def test_heldout_match_is_reported_separately_from_the_descriptive_flag():
+    """Review R2: an immediate difference of +0.10 in every seed with later
+    improvement makes the descriptive flag true but the held-out match
+    false; a difference inside [0, 0.01] matches."""
+    far = dict(immediate_revision=dict(mean=0.10, per_seed=[0.10] * 3),
+               later=dict(mean=0.02, per_seed=[0.02] * 3))
+    assert TR.descriptive_flag(far) is True
+    hm = TR.heldout_immediate_match(far)
+    assert hm["all_seeds_in_band"] is False and hm["mean_in_band"] is False
+    near = dict(immediate_revision=dict(mean=0.004,
+                                        per_seed=[0.0, 0.004, 0.008]),
+                later=dict(mean=0.02, per_seed=[0.02] * 3))
+    hm2 = TR.heldout_immediate_match(near)
+    assert hm2["all_seeds_in_band"] and hm2["mean_in_band"]
+    mixed = dict(immediate_revision=dict(mean=0.001,
+                                         per_seed=[-0.01, 0.005, 0.008]),
+                 later=dict(mean=0.02, per_seed=[0.02] * 3))
+    hm3 = TR.heldout_immediate_match(mixed)
+    assert hm3["per_seed_in_band"] == [False, True, True]
+    assert hm3["mean_in_band"] is True and hm3["all_seeds_in_band"] is False
+    assert TR.descriptive_flag(mixed) is True
+    assert "every seed" in TR.DESCRIPTIVE_FLAG_MEANING
+    assert TR.heldout_immediate_match(None) is None
 
 
 # =========================== 6. the runner ==================================

@@ -609,25 +609,61 @@ def screen(final_rows, seeds=SOURCE_FINAL):
     return out
 
 
+#: wording of the existing descriptive flag (review R2); its test is unchanged
+DESCRIPTIVE_FLAG_MEANING = ("later improved in every seed with no mean "
+                            "immediate decrease")
+ATTRIBUTION_NOTE = (
+    "Even a held-out accuracy match does not match the immediate amplitude c, "
+    "the gates, the learned backbone or the actual write matrices. The "
+    "trained comparison can support an operating trade-off; it cannot by "
+    "itself attribute that trade-off solely to response timing. The frozen-"
+    "backbone, equal-first-write diagnostic is the controlled mechanism "
+    "comparison and is separate from learned-performance evidence.")
+
+
+def heldout_immediate_match(diff, band=MATCH_BAND):
+    """Whether the held-out immediate-revision difference lies in the ALREADY
+    DECLARED band [0, band], per seed and for the mean, reported separately.
+    Reporting only: nothing is reselected, widened or suppressed."""
+    if diff is None:
+        return None
+    per = diff["immediate_revision"]["per_seed"]
+    mean = diff["immediate_revision"]["mean"]
+    return dict(band=[0.0, band],
+                per_seed_in_band=[bool(0.0 <= x <= band) for x in per],
+                all_seeds_in_band=bool(all(0.0 <= x <= band for x in per)),
+                mean_in_band=bool(0.0 <= mean <= band),
+                per_seed_difference=per, mean_difference=mean)
+
+
+def descriptive_flag(diff):
+    """The unchanged descriptive flag: mean held-out immediate difference >= 0
+    AND later difference > 0 in every seed. It does NOT establish a held-out
+    match and does not isolate timing from stronger writing."""
+    return bool(diff is not None and diff["immediate_revision"]["mean"] >= 0
+                and all(x > 0 for x in diff["later"]["per_seed"]))
+
+
 def timing_analysis(final_rows, matched, status, seeds=SOURCE_FINAL):
-    """SECONDARY, declared (protocol s4.3): does generalized processing
-    improve later behaviour at matched or no-worse immediate revision?
-    `later_improved_at_no_worse_immediate` requires mean held-out immediate
-    revision difference >= 0 AND later difference > 0 in every seed. The
-    executed immediate amplitude c of each endpoint is reported alongside."""
+    """SECONDARY, declared (protocol s4.3). For each generalized endpoint
+    against the selected literal-TSS endpoint: I and L differences, the
+    unchanged descriptive flag, the held-out immediate match against the
+    declared band reported separately, and the executed immediate amplitude
+    c. The matched endpoint is labelled DEVELOPMENT-matched; whether it stays
+    matched on held-out data is measured, not assumed."""
     def amp(rows, arm):
         return {r["seed"]: [ex["c"] for ex in (r.get("heldout", {}).get(
             "executed_coefficient_sets") or [])]
             for r in rows if r["rule"] == arm}
 
-    def flag(d):
-        return bool(d is not None and d["immediate_revision"]["mean"] >= 0
-                    and all(x > 0 for x in d["later"]["per_seed"]))
     main = cell_differences(final_rows, GEN, TSS, seeds)
     res = dict(
         main_endpoints=dict(
+            label="primary-selected generalized endpoint (not matched)",
             differences=main,
-            later_improved_at_no_worse_immediate=flag(main),
+            later_improved_at_no_worse_immediate=descriptive_flag(main),
+            descriptive_flag_meaning=DESCRIPTIVE_FLAG_MEANING,
+            heldout_immediate_match=heldout_immediate_match(main),
             executed_immediate_amplitude_c=dict(generalized=amp(final_rows,
                                                                 GEN),
                                                 literal_tss=amp(final_rows,
@@ -635,14 +671,28 @@ def timing_analysis(final_rows, matched, status, seeds=SOURCE_FINAL):
         matched_operating_point=status.get("matched_operating_point"))
     if matched is not None:
         mt = cell_differences(final_rows, GEN_MATCHED, TSS, seeds)
+        hm = heldout_immediate_match(mt)
         res["matched_endpoints"] = dict(
+            label=("DEVELOPMENT-matched generalized endpoint (matched to the "
+                   "primary-selected literal-TSS endpoint's development "
+                   "immediate revision)"),
             differences=mt,
-            later_improved_at_no_worse_immediate=flag(mt),
+            later_improved_at_no_worse_immediate=descriptive_flag(mt),
+            descriptive_flag_meaning=DESCRIPTIVE_FLAG_MEANING,
+            heldout_immediate_match=hm,
+            heldout_match_statement=(
+                None if hm is None else
+                ("development match holds on held-out data in every seed"
+                 if hm["all_seeds_in_band"] else
+                 "development match does NOT hold on held-out data in every "
+                 "seed; reported without reselection, band widening or "
+                 "suppression")),
             executed_immediate_amplitude_c=amp(final_rows, GEN_MATCHED))
-    res["scope"] = ("secondary: these flags describe timing and cannot "
-                    "rescue a failed aggregate screen; a held-out immediate "
-                    "match is measured, not guaranteed by the development "
-                    "match")
+    res["attribution"] = ATTRIBUTION_NOTE
+    res["scope"] = ("secondary: these records describe timing and cannot "
+                    "rescue a failed aggregate screen. Immediate revision I "
+                    "pools revised queries at actual offsets 1 and 2 (nominal "
+                    "delay 1), not exclusively one-token accuracy.")
     return res
 
 

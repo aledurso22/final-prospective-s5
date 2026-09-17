@@ -77,6 +77,16 @@ distribution of times after that revision.
 - `intervening_writes`: every fill token writes a uniformly drawn non-target
   key with an independent value.
 
+**Nominal delay.** `d` is a nominal block delay. The revised query sits at
+actual offset `d` or `d+1`, balanced across episodes. So immediate revision
+`I` pools revised queries at actual offsets 1 and 2; it is not exclusively
+one-token accuracy, and tables and plots label delays as nominal.
+
+**IDLE means no new residual write, not frozen memory.** Momentum and the
+processing state keep evolving through IDLE tokens, and the existing key-0
+gate features apply to them. The pretrained sources never saw IDLE tokens;
+every arm shares that shift.
+
 **Two distinct times are recorded per query:**
 - `since_revision`: tokens since the block's revision, or since the key's own
   revision for late selected probes;
@@ -197,10 +207,15 @@ aggregate verdict.
 
 **(a) Main endpoints.** Report generalized − TSS differences in `I` and `L`,
 per seed, together with each endpoint's executed immediate amplitude `c` (the
-first-write gain). The flag `later_improved_at_no_worse_immediate` requires
-both:
+first-write gain). The descriptive flag `later_improved_at_no_worse_immediate`
+means **"later improved in every seed with no mean immediate decrease"**. It
+requires both:
 - mean held-out `I` difference ≥ 0;
 - `L` difference > 0 in all three seeds.
+
+It can be true when immediate accuracy rises by ten points, or when one seed
+loses immediate accuracy. It is therefore **not** a held-out match and does
+not separate timing from stronger writing.
 
 **(b) Matched operating point.**
 - **Reference:** the selected literal-TSS development checkpoint's `I_ref`.
@@ -212,8 +227,27 @@ both:
   band is never widened.
 
 When a matched checkpoint exists, its recipe is carried to the final seeds
-(s6) and evaluated with the same flag. A held-out match is measured, not
-guaranteed by the development match.
+(s6). The endpoint is labelled **development-matched**.
+
+**Held-out match, reported separately** (review of 36b8e57, R2), for both
+the main and the development-matched endpoints:
+- for each seed, whether the held-out `I` difference against the selected
+  TSS endpoint lies in the already declared band `[0, 0.01]`;
+- whether that holds in all seeds;
+- separately, whether the mean difference lies in the band.
+
+If the development match does not hold on held-out data, the report says so.
+Nothing is reselected, the band is not widened, and no result is suppressed.
+The descriptive flag is reported beside this record, not merged into it.
+
+**Attribution.** Even a held-out accuracy match does not match `c`, the
+gates, the learned backbone or the actual write matrices. The trained
+comparison can support an operating trade-off; it cannot by itself attribute
+that trade-off solely to response timing. The frozen-backbone,
+equal-first-write diagnostic (s5) is the controlled mechanism comparison, and
+it is separate from evidence of learned performance. The matched checkpoint
+is chosen against the primary-selected TSS endpoint, not against an
+exhaustively optimized TSS retention frontier.
 
 ## 5. Mechanism diagnostic (`temporal_diagnostic.py`, same batch, before training)
 
@@ -253,11 +287,31 @@ winning coefficients.
      label probability and accuracy at every token offset 0–17, per family
      and condition, as differences between settings.
 
-**Failure policy:** any open-loop disagreement, native-point disagreement,
-first-write disagreement, non-finite value or unaccepted executed filter
-**fails the run** before training.
+**Finite-first contract** (review of 36b8e57, R1). Before any use or
+reduction, the diagnostic checks each of the following and returns a named
+failure at the first failing stage:
+1. **Returned rollout arrays**, from both the full and the suffix rollouts:
+   logits, W and U traces, the processing-state summary (max |entry| of
+   `y, y_prev, R_prev`) and every returned coefficient copy. Each is checked
+   finite and in the production dtype. Only after this are production outputs
+   converted to host float64 for analysis.
+2. **Native reference:** the native rule's logits.
+3. **Inputs to the readout:** the incoming W and U, the normalized keys, and
+   the readout weights and bias.
+4. **Derived readouts:** logits before softmax and argmax, probabilities
+   before aggregation, a non-empty cell before every mean, and every
+   reported curve and difference before acceptance.
 
-**Scope:** neither diagnostic alone establishes a task improvement.
+Every distinct returned coefficient set must pass the executed-coefficient
+gate.
+
+**Failure policy:** any open-loop disagreement, native-point disagreement,
+first-write disagreement, non-finite or wrong-dtype value, empty cell or
+unaccepted executed filter **fails the run** before training.
+
+**Scope:** neither diagnostic alone establishes a task improvement, a
+novelty claim or a SOTA result. An isolated-filter stability check is not a
+switching closed-loop stability theorem.
 
 ## 6. Work, streams and cap
 
@@ -315,7 +369,17 @@ dispatch and no automatic relaunch.
 
 ## 7. Focused checks (cluster, inside the cap)
 
-`tests/test_prospective_temporal_response.py` (float64):
+`tests/test_prospective_temporal_response.py` (float64). The review of
+36b8e57 added two groups of regressions:
+- diagnostic payload and readout guards: an otherwise valid payload fails on
+  a non-finite U trace, processing summary, logit, W trace or coefficient
+  copy, on a missing array, or on a non-production dtype; readout checks
+  reject non-finite, empty or empty-cell values;
+- a reporting fixture: an immediate difference of +0.10 makes the
+  descriptive flag true and the held-out match false, and mixed per-seed
+  cases are reported separately from the mean.
+
+The existing checks:
 
 - **Task:** exact balance and oracle; declared block shapes and fill;
   `since_revision` versus `age`; offset balance in every cell; family
@@ -362,3 +426,27 @@ benchmark or SOTA. No Gated DeltaNet arm is included.
 ## 9. Launch (after static review only)
 
     bash bin/run_experiments/cluster_prospective_temporal_response.sh
+
+## 10. Amendment record (review of 36b8e57)
+
+- **R1:** the diagnostic enforces its finite-first contract on every
+  returned state, logit, processing summary and coefficient copy (in the
+  production dtype), on the incoming states and readout inputs, and on
+  derived readout logits, probabilities, cells, curves and differences. Each
+  stage returns a named failure. Guard regressions were added.
+- **R2:** held-out immediate matching against the declared `[0, 0.01]` band
+  is reported per seed, for all seeds and for the mean, separately from the
+  unchanged descriptive flag. The flag is now worded "later improved in every
+  seed with no mean immediate decrease". The matched endpoint is labelled
+  development-matched, and an attribution note separates accuracy matching
+  from timing. A reporting fixture was added.
+- **Clarifications recorded:** `d` is a nominal delay (`I` pools offsets 1
+  and 2); IDLE means no new write, not frozen memory; isolated-filter
+  stability is not a switching theorem; the matched checkpoint is chosen
+  against the primary-selected TSS endpoint; the diagnostic supports no win,
+  novelty or SOTA claim.
+
+Unchanged: equations, coefficients, arms, streams, loss, schedule, training,
+selection rules, the match band, numerical tolerances, performance criteria
+and the single 600-second cap.
+

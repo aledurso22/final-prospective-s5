@@ -31,7 +31,7 @@ def delay_lines(m, indent="      "):
     for fam in FAMS:
         bd = (m.get(fam) or {}).get("by_delay") or {}
         for kind, curve in bd.items():
-            print(f"{indent}{fam:<8} {kind:<16} " + " ".join(
+            print(f"{indent}{fam:<8} {kind:<16} nominal " + " ".join(
                 f"d{d}:{pct(v)}" for d, v in curve.items()))
         bc = (m.get(fam) or {}).get("by_condition") or {}
         for kind, cc in bc.items():
@@ -88,7 +88,13 @@ def main(run_dir):
               f"{[round(x, 6) for x in r.get('executed_response')[:6]]} "
               f"max error {r.get('max_abs_error')}")
     cl = dg.get("closed_loop") or {}
-    if cl:
+    if cl and cl.get("stage"):
+        print(f"  CLOSED LOOP stopped at stage {cl.get('stage')} "
+              f"(see failures above)")
+    if cl and not cl.get("stage"):
+        print(f"  finite-first: {cl.get('finite_first')}")
+        print(f"  processing-state max |entry| "
+              f"{cl.get('processing_state_max_abs')}")
         print(f"  CLOSED LOOP incoming: {cl.get('incoming_state')}")
         print(f"  native-point logit agreement "
               f"{cl.get('native_point_logit_agreement')}")
@@ -184,8 +190,16 @@ def main(run_dir):
             if not t:
                 continue
             d = t.get("differences") or {}
-            print(f"  {part}: later_improved_at_no_worse_immediate="
-                  f"{t.get('later_improved_at_no_worse_immediate')}")
+            print(f"  {part}: {t.get('label')}")
+            print(f"    descriptive flag ({t.get('descriptive_flag_meaning')})"
+                  f": {t.get('later_improved_at_no_worse_immediate')}")
+            hm = t.get("heldout_immediate_match") or {}
+            print(f"    held-out immediate match (band {hm.get('band')}): "
+                  f"per seed {hm.get('per_seed_in_band')} all seeds "
+                  f"{hm.get('all_seeds_in_band')} mean in band "
+                  f"{hm.get('mean_in_band')}")
+            if t.get("heldout_match_statement"):
+                print(f"    {t['heldout_match_statement']}")
             print(f"    immediate {d.get('immediate_revision')}")
             print(f"    later {d.get('later')}")
             for k in ("later_part/revised_later", "later_part/retention",
@@ -194,6 +208,7 @@ def main(run_dir):
             print(f"    executed immediate amplitude c "
                   f"{t.get('executed_immediate_amplitude_c')}")
         print(f"  matched rule record {ta.get('matched_operating_point')}")
+        print(f"  attribution: {ta.get('attribution')}")
         print(f"  scope: {ta.get('scope')}")
     for arm, o in (st.get("deployment_outcome") or {}).items():
         print(f"  deployment outcome {arm:<22} -> {o.get('label')} held-out "
