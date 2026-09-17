@@ -250,11 +250,12 @@ Float64 module (`tests/test_prospective_tss_containment.py`):
   agree on a compiled rollout's returned values; repair clamping, gaps,
   idempotence, fixed exact points, frozen leaves; validation requires executed
   records and the TSS boundary;
-- gradients: M, gamma inward and T at the TSS boundary, M and T inward at the
+- gradients: M, gamma inward and T at the TSS boundary, M inward at the
   native point, and all three at an interior point, against the independent
   original-law sensitivity (SENS64) with its primal carries and loss checked,
   finite-first decisions (injected-NaN regressions), inward forward
-  differences only;
+  differences only; T inward at the native point is the one DECLARED analytic
+  zero (s12), with its own regressions;
 - runner: masked step freezes constants and gates the forward pass (an
   unstable tree is refused); step failures at any step; zero-update endpoints
   of all four named families are valid, persisted and not anchors, and a
@@ -274,7 +275,9 @@ T = h / kappa = 1 correspondence (TRAJ32); gate verdicts on coefficients the
 compiled rollout returned, including two masses refused although the gaps
 hold, and exact native-point coefficients; repair; derivatives against the
 independent float64 original-law reference with primal loss and carries at
-TRAJ32 and derivatives at REF32, finite-first with injected-NaN regressions;
+TRAJ32 and derivatives at REF32 (the declared analytic zero of s12 against
+dtype-specific absolute floors), finite-first with injected-NaN and
+declared-zero regressions;
 the masked optimizer path of both processing arms followed by full checkpoint
 acceptance; NaN refusal.
 
@@ -317,4 +320,53 @@ arms, sources, streams, loss, learning-rate slots, checkpoint opportunities,
 search budget, selection criterion, performance criteria and the 600-second
 cap. The shared `study.evaluate` gains two optional arguments whose defaults
 leave every completed study's evaluation unchanged.
+
+## 12. Failed dispatch 20260917-152713 and test-method amendment
+
+**Dispatch (preserved).** Commit `e38b61a`, run stamp `20260917-152713`, logs
+`/Users/durso/s5-runs/prospective-tss-containment/logs/20260917-152713`.
+Operational verdict **FAILED (exit 4)** at the focused float64 checks after
+76 s of 600: 62 passed, 1 failed. The float32 probe, start-point checks,
+preflight, training and held-out evaluation never started; no status file or
+digest exists. Source re-verification: all six files unchanged. No retry.
+
+**Failure.** `test_coefficient_derivatives_match_the_independent_sensitivity
+[T inward at the native point]`: production JVP `0.0`, independent reference
+`-1.112707e-17`, forward difference `5.55e-11`. The fixture required a
+nondegenerate reference (`|ref| > 1e-12`) and relative agreement, and so
+failed as a declared FIXTURE DEFECT. All other derivative fixtures agreed with
+the reference to about 1e-15.
+
+**Cause: an analytically degenerate fixture, not a model defect.** For
+`M = 0, gamma = h` the executed coefficients are `a = d = T/(h+T)`, `b = 0`,
+`c = 1`, i.e.
+
+    y_next = R_t + T/(h+T) (y - R_prev).
+
+With matched (zero) initialization `y = R_prev` holds on every token by
+induction, so the entire trajectory is native for EVERY fixed `T` on this
+line, and `dL/dT = 0` exactly for any data. That direction was added in the
+correction of 7613c86 without checking it; neither processing arm starts or is
+evaluated at the native point.
+
+**Amendment (tests and documentation only; approved before this patch).**
+- The fixture is marked `expected_zero` by declaration from the identity
+  above, never classified from its measured magnitude.
+- For it, the production derivative and the independent reference are checked
+  SEPARATELY against the absolute floor of the dtype that computed each:
+  `1e3 x eps x max(|loss|, 1)`, with eps32 for the float32 production JVP and
+  eps64 for the float64 production JVP and for the reference. Finite-first
+  checks, primal agreement (ID64 in float64, TRAJ32 in float32) and the finite
+  forward-difference diagnostic are unchanged. A pass is reported as
+  **"analytic zero verified within tolerance"**, not as unresolvable.
+- Regressions in both precision paths reject a production or reference
+  derivative above its floor and a non-finite value in either derivative; the
+  float32 path also rejects a reference that is below the float32 floor but
+  above the float64 floor.
+- Every other derivative fixture, including every direction at the literal-TSS
+  start, keeps its nondegeneracy requirement and relative tolerance unchanged.
+
+Unchanged: model and study code, equation, arms, sources, streams, loss,
+selection, performance criteria, all other tolerances and the 600-second cap.
+The relaunch is a single normal launch after static confirmation.
 

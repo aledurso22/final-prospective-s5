@@ -521,10 +521,23 @@ def _loss_fn(p, ep):
     return f
 
 
+#: absolute floor factor for a DECLARED analytic zero (amendment after the
+#: failed dispatch 20260917-152713): |derivative| <= ZERO_FLOOR x eps x
+#: max(|loss|, 1), with eps of the dtype that computed that derivative
+ZERO_FLOOR = 1e3
+
+
 def sensitivity_decision(label, val, jvp, ref_val, ref_deriv, fwd_val, hstep,
-                         rel_tol):
-    """Finite FIRST for every piece of evidence (review R5), then the
-    decisive analytic comparison, then the diagnostic forward difference."""
+                         rel_tol, expected_zero=False, prod_eps=EPS64):
+    """Finite FIRST for every piece of evidence (review R5), then the primal
+    agreement, then the decisive derivative decision, then the diagnostic
+    forward difference (which must be finite).
+
+    `expected_zero` is DECLARED by the fixture from an analytic identity,
+    never inferred from a measured magnitude. For such a fixture the
+    production JVP and the independent reference are each checked SEPARATELY
+    against the absolute floor of the dtype that computed it; otherwise the
+    reference must be nondegenerate and the JVP must agree with it."""
     fails = []
     pieces = dict(loss=val, jvp=jvp, reference_loss=ref_val,
                   reference_derivative=ref_deriv, perturbed_loss=fwd_val)
@@ -532,18 +545,36 @@ def sensitivity_decision(label, val, jvp, ref_val, ref_deriv, fwd_val, hstep,
     if nonfinite:
         return [f"{label}: non-finite {nonfinite}"], None
     fd = (float(fwd_val) - float(val)) / hstep
-    err = abs(float(jvp) - ref_deriv) / max(abs(ref_deriv), 1e-30)
-    if not _all_finite(fd, err):
-        return [f"{label}: non-finite FD or error"], None
+    if not _all_finite(fd):
+        return [f"{label}: non-finite FD"], None
     if abs(float(val) - ref_val) > ID64 * max(abs(ref_val), 1.0):
         fails.append(f"{label}: reference primal loss differs")
+    resolvable = abs(float(jvp)) >= 100 * EPS64 * max(abs(float(val)),
+                                                      1.0) / hstep
+    if expected_zero:
+        prod_floor = ZERO_FLOOR * prod_eps * max(abs(float(val)), 1.0)
+        ref_floor = ZERO_FLOOR * EPS64 * max(abs(ref_val), 1.0)
+        if abs(float(jvp)) > prod_floor:
+            fails.append(f"{label}: declared analytic zero, but production "
+                         f"JVP {float(jvp):.3e} > floor {prod_floor:.3e}")
+        if abs(ref_deriv) > ref_floor:
+            fails.append(f"{label}: declared analytic zero, but reference "
+                         f"{ref_deriv:.3e} > floor {ref_floor:.3e}")
+        return fails, dict(fd=fd, err=None, resolvable=bool(resolvable),
+                           production_floor=prod_floor,
+                           reference_floor=ref_floor,
+                           verdict=("analytic zero verified within tolerance"
+                                    if not fails else "analytic zero NOT "
+                                    "verified"))
+    err = abs(float(jvp) - ref_deriv) / max(abs(ref_deriv), 1e-30)
+    if not _all_finite(err):
+        return [f"{label}: non-finite error"], None
     if abs(ref_deriv) <= 1e-12:
         fails.append(f"FIXTURE DEFECT: degenerate sensitivity for {label}")
     elif err > rel_tol:
         fails.append(f"{label}: derivative error {err:.2e}")
-    resolvable = abs(float(jvp)) >= 100 * EPS64 * max(abs(float(val)),
-                                                      1.0) / hstep
-    return fails, dict(fd=fd, err=err, resolvable=bool(resolvable))
+    return fails, dict(fd=fd, err=err, resolvable=bool(resolvable),
+                       verdict="agrees with the independent sensitivity")
 
 
 def test_sensitivity_decision_rejects_nan_evidence():
@@ -559,21 +590,57 @@ def test_sensitivity_decision_rejects_nan_evidence():
     assert not fails and info is not None
 
 
-@pytest.mark.parametrize("point,direction,name", [
-    ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), "M inward at the TSS boundary"),
-    ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0), "gamma inward at the TSS boundary"),
-    ((0.0, 0.0, 1.0), (0.0, 0.0, 1.0), "T on the TSS boundary"),
-    ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), "M inward at the native point"),
-    ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), "T inward at the native point"),
-    ((0.4, 0.3, 1.5), (1.0, 0.0, 0.0), "M at an interior point"),
-    ((0.4, 0.3, 1.5), (0.0, 1.0, 0.0), "gamma at an interior point"),
-    ((0.4, 0.3, 1.5), (0.0, 0.0, 1.0), "T at an interior point"),
+def test_expected_zero_decision_rejects_above_floor_and_nonfinite():
+    """Amendment regressions: a declared analytic zero is rejected when
+    EITHER derivative exceeds its own dtype's floor or is non-finite."""
+    floor = ZERO_FLOOR * EPS64 * 1.0
+    args = dict(hstep=1e-6, rel_tol=SENS64, expected_zero=True)
+    ok, info = sensitivity_decision("z", 1.0, 0.0, 1.0, -1.1e-17, 1.0,
+                                    **args)
+    assert not ok and info["verdict"] == ("analytic zero verified within "
+                                          "tolerance")
+    assert sensitivity_decision("z", 1.0, 0.5 * floor, 1.0, 0.5 * floor, 1.0,
+                                **args)[0] == []
+    assert sensitivity_decision("z", 1.0, 3 * floor, 1.0, 0.0, 1.0,
+                                **args)[0]                 # production
+    assert sensitivity_decision("z", 1.0, 0.0, 1.0, 3 * floor, 1.0,
+                                **args)[0]                 # reference
+    assert sensitivity_decision("z", 1.0, float("nan"), 1.0, 0.0, 1.0,
+                                **args)[0]
+    assert sensitivity_decision("z", 1.0, 0.0, 1.0, float("inf"), 1.0,
+                                **args)[0]
+    # the float32 floor is looser for the PRODUCTION derivative only
+    f32 = float(onp.finfo(onp.float32).eps)
+    assert sensitivity_decision("z", 1.0, 3 * floor, 1.0, 0.0, 1.0,
+                                prod_eps=f32, **args)[0] == []
+    assert sensitivity_decision("z", 1.0, 0.0, 1.0, 3 * floor, 1.0,
+                                prod_eps=f32, **args)[0]
+
+
+#: the ONE declared analytic zero. For M = 0, gamma = h the law is
+#: y_next = R_t + T/(h+T) (y - R_prev); with matched (zero) initialization
+#: y = R_prev on every token by induction, so the whole trajectory is native
+#: for EVERY fixed T on this line and dL/dT = 0 exactly, for any data.
+EXPECTED_ZERO = "T inward at the native point"
+
+
+@pytest.mark.parametrize("point,direction,name,expected_zero", [
+    ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), "M inward at the TSS boundary", False),
+    ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0), "gamma inward at the TSS boundary",
+     False),
+    ((0.0, 0.0, 1.0), (0.0, 0.0, 1.0), "T on the TSS boundary", False),
+    ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), "M inward at the native point", False),
+    ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), EXPECTED_ZERO, True),
+    ((0.4, 0.3, 1.5), (1.0, 0.0, 0.0), "M at an interior point", False),
+    ((0.4, 0.3, 1.5), (0.0, 1.0, 0.0), "gamma at an interior point", False),
+    ((0.4, 0.3, 1.5), (0.0, 0.0, 1.0), "T at an interior point", False),
 ])
 def test_coefficient_derivatives_match_the_independent_sensitivity(
-        point, direction, name):
+        point, direction, name, expected_zero):
     """Derivatives flow through the coefficients with no boundary branch;
     at the boundaries they are taken INWARD, never through the repair and
-    never at a negative-mass or negative-damping point."""
+    never at a negative-mass or negative-damping point. `expected_zero` is a
+    declaration from the analytic identity above, not a measured outcome."""
     pn = _source_native_f64()
     ep = _ep(9703)
     p = _tree(pn, *point)
@@ -589,10 +656,16 @@ def test_coefficient_derivatives_match_the_independent_sensitivity(
     hstep = 1e-6
     fwd = f(coeffs + hstep * jnp.asarray(direction, jnp.float64))
     fails, info = sensitivity_decision(name, val, jvp, ref_val, ref, fwd,
-                                       hstep, SENS64)
+                                       hstep, SENS64,
+                                       expected_zero=expected_zero)
     print(f"  {name}: jvp {float(jvp):.6e} reference {ref:.6e} {info}")
     assert not fails, fails
-    if info["resolvable"]:
+    if expected_zero:
+        print(f"  {name}: {info['verdict']} (production floor "
+              f"{info['production_floor']:.2e}, reference floor "
+              f"{info['reference_floor']:.2e}; forward-difference diagnostic "
+              f"{info['fd']:.3e})")
+    elif info["resolvable"]:
         assert abs(info["fd"] - float(jvp)) <= 1e-3 * max(abs(float(jvp)),
                                                           1e-12)
     else:
