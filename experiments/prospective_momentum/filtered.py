@@ -285,6 +285,77 @@ def repair(p, frozen=()):
     return out, tel
 
 
+# ------------------------------------------- corrected admissible domain ----
+# docs/PROSPECTIVE_COEFFICIENT_DOMAIN.md. The Jury conditions of
+# z^2 - a z + b are SIGN-AGNOSTIC in gamma once A > 0:
+#     A > 0,   gamma + T > 0,   4M + 2h(gamma+T) > h^2.
+# gamma >= 0 is a PASSIVITY condition, not a stability condition, and it
+# excludes the learned two-tap operator (M = 0, gamma = h(1-kappa) < 0 for
+# kappa > 1), which is an FIR filter (a = b = 0) and unconditionally stable.
+# The PASSIVE functions above are left exactly as the completed studies
+# executed them; the corrected ones are additive and used by later work.
+
+
+def admissible(M, gamma, T, h=H):
+    """The corrected admissible set, in exact float comparisons: nonnegative
+    mass and horizon (declared), a positive A, and the two remaining strict
+    Jury conditions. `gamma` may be negative."""
+    A = M + h * (gamma + T)
+    return bool(M >= 0.0 and T >= 0.0 and A > 0.0 and (gamma + T) > 0.0
+                and 4.0 * M + 2.0 * h * (gamma + T) > h * h)
+
+
+def repair_corrected(p, frozen=()):
+    """The deterministic feasibility repair under the corrected domain: clamp
+    M and T to zero below, then raise T minimally for the declared gaps.
+    gamma is NEVER clamped - its sign is free. A >= h G_MIN > 0 follows from
+    the gamma + T gap, whatever the sign of gamma."""
+    dt = p["fil_M"].dtype
+    h = jnp.asarray(H, dtype=dt)
+    gmin = jnp.asarray(G_MIN, dtype=dt) * h
+    delta = jnp.asarray(DELTA_FILTER, dtype=dt)
+    pre = {k: p[k][0] for k in LEAVES}
+    M = jnp.maximum(pre["fil_M"], 0.0)
+    gam = pre["fil_gamma"]                       # free sign
+    T = jnp.maximum(pre["fil_T"], 0.0)
+    T = jnp.maximum(T, gmin - gam)                                   # (N1)
+    T = jnp.maximum(T, ((h * h) * (1.0 + delta) - 4.0 * M)
+                    / (2.0 * h) - gam)                               # (N2)
+    post = {"fil_M": M, "fil_gamma": gam, "fil_T": T}
+    for name in frozen:
+        if name in post:
+            post[name] = pre[name]
+    out = dict(p, **{k: jnp.asarray([v], dtype=dt) for k, v in post.items()})
+    changed = sum(jnp.asarray(post[k] != pre[k], dtype=jnp.int32)
+                  for k in LEAVES)
+    tel = dict(n_repaired=changed,
+               overshoot=jnp.max(jnp.stack([jnp.abs(post[k] - pre[k])
+                                            for k in LEAVES])),
+               gap_gamma_plus_T=gam + T - gmin,
+               gap_filter=4.0 * M + 2.0 * h * (gam + T)
+               - (h * h) * (1.0 + delta))
+    for k in LEAVES:
+        tel[k + "_pre"] = pre[k]
+        tel[k + "_post"] = post[k]
+    return out, tel
+
+
+def filter_failure_corrected(rep):
+    """Acceptance under the corrected domain: the executed polynomial must be
+    finite and strictly stable, the mass and horizon nonnegative, and gamma
+    free. Same executed-coefficient gate, one condition removed."""
+    if not rep["all_finite"]:
+        return f"non-finite executed filter quantities {rep['executed']}"
+    if rep["M"] < 0.0 or rep["T"] < 0.0:
+        return (f"negative mass or horizon: M={rep['M']} T={rep['T']} "
+                "(gamma may be negative; M and T may not)")
+    if rep["classification"] != "stable":
+        return (f"executed filter polynomial not strictly stable: "
+                f"{rep['classification']} slacks {rep['jury_slacks_exact']} "
+                f"a={rep['a']} b={rep['b']} A={rep['A']}")
+    return None
+
+
 # ------------------------------------------------- reference recursions ----
 def filtered_reference(residuals, M, gamma, T, h=H):
     """CHECK-ONLY independent float64 host recursion of the processing state,
