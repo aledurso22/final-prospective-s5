@@ -129,14 +129,19 @@ def main(run_dir):
     print(f"  R_native {f(sel.get('r_native'))} C_native "
           f"{f(sel.get('c_native'))}")
     for row in sel.get("table", []) or []:
-        c = row.get("chosen", {})
+        # the feasibility flags live in `selected`, not in the table row;
+        # display only - nothing is recomputed
+        c = dict(row.get("chosen", {}),
+                 **((sel.get("selected") or {}).get(row.get("arm")) or {}))
         print(f"  {row.get('arm'):<24} update {c.get('update')} lr "
               f"{c.get('lr')} primary {f(c.get('primary'))} retention "
               f"{f(c.get('retention'))} recall {f(c.get('recall'))} "
               f"feasible={c.get('feasible')} diagnostic={c.get('diagnostic')} "
               f"tree {c.get('params_file')} "
-              f"({row.get('n_feasible')} of {row.get('n_candidates')} "
-              f"feasible)")
+              + (f"({row.get('n_feasible')} of {row.get('n_candidates')} "
+                 f"feasible)" if row.get("n_feasible") is not None else
+                 f"(native reference: selected unconstrained from "
+                 f"{row.get('n_candidates')} checkpoints)"))
         print(f"  {'':<24} selected under: {c.get('selected_under')}")
     print(f"  selection unchanged through finals: "
           f"{st.get('selection_frozen') == sel.get('selected')}")
@@ -245,10 +250,14 @@ def main(run_dir):
             print(f"      {cf.get('scope_note')}")
         elif cf.get("table_transition"):
             t = cf["table_transition"]
-            print(f"      OPERATOR TABLE transitions {t.get('classification')}"
+            label = ("OPERATOR" if r.get("law") == "ordinary_prospective"
+                     else "NATIVE MOMENTUM")
+            print(f"      {label} frozen-token TABLE transitions "
+                  f"{t.get('classification')}"
                   f" kappa {f(t.get('kappa'), 6)} kappa/bound "
                   f"{f(t.get('kappa_over_bound'), 4)}")
-            print(f"      {cf.get('containment_note')}")
+            if cf.get("containment_note"):
+                print(f"      {cf.get('containment_note')}")
         hist = r.get("coefficient_history") or []
         for h in hist[::25] + hist[-1:]:
             print(f"      history {h}")

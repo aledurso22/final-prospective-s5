@@ -346,8 +346,10 @@ the reference to about 1e-15.
 With matched (zero) initialization `y = R_prev` holds on every token by
 induction, so the entire trajectory is native for EVERY fixed `T` on this
 line, and `dL/dT = 0` exactly for any data. That direction was added in the
-correction of 7613c86 without checking it; neither processing arm starts or is
-evaluated at the native point.
+correction of 7613c86 without checking it. Neither processing arm starts
+training at the native point, but the start-point recovery checks do evaluate
+it. The all-`T` identity on this line is exact mathematically; numerical
+recovery is checked within the declared tolerance.
 
 **Amendment (tests and documentation only; approved before this patch).**
 - The fixture is marked `expected_zero` by declaration from the identity
@@ -369,4 +371,9 @@ evaluated at the native point.
 Unchanged: model and study code, equation, arms, sources, streams, loss,
 selection, performance criteria, all other tolerances and the 600-second cap.
 The relaunch is a single normal launch after static confirmation.
+
+## 13. Outcome
+
+Run `20260917-154035` (commit `073af37`): operational **PASS**. Results and
+verdicts: `docs/PROSPECTIVE_TSS_CONTAINMENT_REPORT.md`.
 
