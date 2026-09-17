@@ -20,6 +20,7 @@ from experiments.nested_memory import model as NM
 from experiments.nested_memory.task import WRITE
 
 from . import dynamics as PD
+from . import ordinary as OD
 
 D_K, D_V = NM.D_K, NM.D_V
 COMMON = MM.COMMON
@@ -28,8 +29,12 @@ MOMENTUM_LEAVES = ("key_raw", "value_table", "readout_W", "readout_b",
                    "dt_bias", "mu_bias", "log_factor")
 
 
+#: rules executed by THIS module's shell; every other rule is delegated
+SHELL_RULES = ("prospective_momentum", "gain_momentum", OD.ORDINARY)
+
+
 def rollout(rule, p, ep, dtype=None, carry0=None):
-    if rule not in ("prospective_momentum", "gain_momentum"):
+    if rule not in SHELL_RULES:
         return MM.rollout(rule, p, ep, dtype=dtype, carry0=carry0)
     if dtype is None:
         dtype = p["key_raw"].dtype
@@ -50,6 +55,11 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
     if rule == "prospective_momentum":
         scalar, step_fn = p["kappa"][0], PD.prospective_step
         coeff = dict(kappa=p["kappa"][0])
+    elif rule == OD.ORDINARY:
+        # same shell, same gates; only the per-token update differs. Its carry
+        # adds the previous residual (192 real numbers, counted as such).
+        scalar, step_fn = p["kappa"][0], OD.ordinary_step
+        coeff = dict(kappa=p["kappa"][0])
     else:
         scalar, step_fn = PD.executed_gain(p), PD.gain_step
         coeff = dict(raw_log_g=p["log_g"][0], g=scalar)
@@ -63,7 +73,11 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
                        jnp.sqrt(jnp.sum(carry[1] ** 2)))
 
     z = jnp.zeros((D_V, D_K), dtype=dtype)
-    carry = (z, z) if carry0 is None else carry0
+    n_carry = 3 if rule == OD.ORDINARY else 2
+    carry = (z,) * n_carry if carry0 is None else carry0
+    if len(carry) != n_carry:
+        raise ValueError(f"{rule} needs {n_carry} carry matrices, "
+                         f"got {len(carry)}")
     for c in carry:
         if c.dtype != dtype:
             raise TypeError(f"carry dtype {c.dtype} != executed dtype {dtype}")
@@ -72,6 +86,13 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
     return dict(logits=logits, w_norm=w_norm, aux_norm=aux_norm,
                 gates=(alpha, beta, mu, eta), final_carry=carry, dtype=dtype,
                 weights=None, coeff=coeff)
+
+
+def add_extension(p_native, rule):
+    """The documented map from a saved native Momentum tree to an extension.
+    `ordinary_prospective` takes the same single scalar kappa = 0 as the
+    candidate, so all three start as exactly the native function."""
+    return convert_momentum(p_native, rule)
 
 
 def convert_momentum(p_native, rule):
@@ -88,7 +109,11 @@ def convert_momentum(p_native, rule):
     dt = p_native["A_log"].dtype
     if rule == "momentum_delta":
         return dict(p_native)
-    return dict(p_native, **{PD.EXTRA_LEAF[rule]: jnp.zeros((1,), dtype=dt)})
+    leaf = (PD.EXTRA_LEAF[rule] if rule in PD.EXTRA_LEAF
+            else ("kappa" if rule == OD.ORDINARY else None))
+    if leaf is None:
+        raise ValueError(f"no extension leaf for {rule!r}")
+    return dict(p_native, **{leaf: jnp.zeros((1,), dtype=dt)})
 
 
 def parameter_counts(rule, p):

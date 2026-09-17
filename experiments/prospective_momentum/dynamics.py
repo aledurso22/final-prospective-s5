@@ -83,6 +83,10 @@ CARRY = {"prospective_momentum": 128, "momentum_delta": 128,
          "tss_eq17": 128}
 #: the scalar each extension adds to the native tree
 EXTRA_LEAF = {"prospective_momentum": "kappa", "gain_momentum": "log_g"}
+# The same-backbone study registers its ordinary-operator rule here
+# (`experiments.prospective_momentum.ordinary`). These are ADDITIVE dictionary
+# entries only: RULES, MOMENTUM_FAMILY and LITERATURE are unchanged, so no
+# completed study's arm list, projection or report changes.
 
 
 # ------------------------------------------------------------ updates ------
