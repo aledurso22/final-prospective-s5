@@ -267,10 +267,43 @@ def test_readout_never_feeds_back_into_the_backbone():
 
 
 # ===================== 4. the probe's measurement ==========================
+#: Half-ulp relative error of rounding a float64 scalar to float32. This is
+#: what roll_forward does to the three idle gates, deliberately, so that the
+#: target is the recurrence the PRODUCTION (float32) path would execute.
+GATE_DELTA = 2.0 ** -24
+
+
+def _idle_bound(step, delta=GATE_DELTA):
+    """DERIVED, not fitted. Rolling k idle steps gives
+
+        w_k = alpha^k W_0 - beta * sum_(j=1..k) alpha^(k-j) mu^j U_0,
+
+    so every term is a product of at most k+1 gate factors. Perturbing each
+    gate by a relative delta perturbs each term by at most
+    (1+delta)^(k+1) - 1, hence |w_k(gates32) - w_k(gates64)| is at most that
+    factor times the sum of the term magnitudes. That sum is accumulated
+    exactly as `scale` below, so the bound holds under cancellation too."""
+    return (1.0 + delta) ** (step + 1) - 1.0
+
+
+def _accumulation_bound(step, dtype):
+    """DERIVED. With the SAME constants, the two iterations differ only by
+    float rounding of 2 multiplies and 1 add per step, each at most half an
+    ulp relative, bounded again against the sum of term magnitudes."""
+    return (3 * step + 1) * float(onp.finfo(dtype).eps) / 2.0
+
+
 def test_roll_forward_target_is_the_native_idle_recurrence():
     """The primary target rolls (W_t, U_t) forward over IDLE tokens only.
     Where an episode's next k tokens really are idle, it must reproduce the
-    actual trajectory."""
+    actual trajectory.
+
+    roll_forward casts the gates to production precision; this fixture is a
+    separately written recurrence, so review R3 applies: the comparison is at
+    DECLARED, DERIVED bounds, never bitwise. The two error sources are
+    separated - gate rounding against _idle_bound, arithmetic accumulation
+    against _accumulation_bound - so a real algebraic error cannot hide
+    inside a tolerance."""
     pn = _source_native_f64()
     batch = TT.generate_batch(991_104, 4)
     fails, tr = RB.trajectories(pn, batch)
@@ -278,12 +311,34 @@ def test_roll_forward_target_is_the_native_idle_recurrence():
     targets = RB.roll_forward(tr)
     g = tr["idle_gates"]
     W, U = tr["W"], tr["U"]
-    u, w = U.copy(), W.copy()
+    # the same recurrence at BOTH gate precisions, and the running sum of
+    # term magnitudes that both bounds are stated against
+    al32, be32 = onp.float32(g["alpha"]), onp.float32(g["beta"])
+    mu32 = onp.float32(g["mu"])
+    u64, w64 = U.copy(), W.copy()
+    u32, w32 = U.copy(), W.copy()
+    su = float(onp.max(onp.abs(onp.asarray(U, F64))))
+    sw = float(onp.max(onp.abs(onp.asarray(W, F64))))
     for step in range(1, max(RB.K_OFFSETS) + 1):
-        u = g["mu"] * u
-        w = g["alpha"] * w - g["beta"] * u
-        if step in RB.K_OFFSETS:
-            assert onp.allclose(targets[step], w, rtol=0, atol=0)
+        u64 = g["mu"] * u64
+        w64 = g["alpha"] * w64 - g["beta"] * u64
+        u32 = mu32 * u32
+        w32 = al32 * w32 - be32 * u32
+        su = abs(float(g["mu"])) * su
+        sw = abs(float(g["alpha"])) * sw + abs(float(g["beta"])) * su
+        if step not in RB.K_OFFSETS:
+            continue
+        got = onp.asarray(targets[step], F64)
+        assert onp.all(onp.isfinite(got)), step
+        assert onp.all(onp.isfinite(w32)) and onp.all(onp.isfinite(w64))
+        # (a) same constants as the code: only accumulation may differ
+        acc = _accumulation_bound(step, targets[step].dtype) * sw
+        assert float(onp.max(onp.abs(got - onp.asarray(w32, F64)))) <= acc, (
+            step, acc)
+        # (b) the float32 gate cast, against its derived bound
+        dev = float(onp.max(onp.abs(onp.asarray(w32, F64)
+                                    - onp.asarray(w64, F64))))
+        assert dev <= _idle_bound(step) * sw, (step, dev)
     ev = onp.asarray(batch["event"])
     from experiments.nested_memory.task import IDLE
     checked = 0
@@ -543,14 +598,19 @@ def test_indeterminate_offsets_do_not_become_a_stop():
     ov = RB.overall_verdict({"500": seed("indeterminate"),
                              "501": seed("indeterminate"),
                              "502": seed("pass"), "503": seed("fail")})
-    assert not ov["interior_beats_baseline"]
-    assert "INDETERMINATE" in ov["verdict"] and "STOP" not in ov["verdict"]
+    # structural, not a substring of prose: the declared INDETERMINATE
+    # wording itself contains the phrase "not a STOP"
+    assert ov["interior_beats_baseline"] is False
+    assert ov["verdict"].startswith("INDETERMINATE")
     assert ov["checkpoints_indeterminate"] == ["500", "501"]
     assert ov["checkpoints_failed"] == ["503"]
+    assert ov["checkpoints_passed"] == ["502"]
+    assert ov["outcome_by_checkpoint"]["500"] == "indeterminate"
     ov2 = RB.overall_verdict({"500": seed("fail"), "501": seed("fail"),
                               "502": seed("fail"),
                               "503": seed("indeterminate")})
-    assert "STOP" in ov2["verdict"]
+    assert ov2["verdict"].startswith("STOP")
+    assert ov2["interior_beats_baseline"] is False
 
 
 def test_cells_report_their_power():

@@ -286,7 +286,14 @@ def roll_forward(tr):
     over IDLE tokens only, k steps ahead. This is what a prospective readout
     is entitled to anticipate: the transient already in flight, with no
     unobserved future write. On an idle token R = 0, so
-    U <- mu U and W <- alpha W - beta U."""
+    U <- mu U and W <- alpha W - beta U.
+
+    The three gates are cast to PRODUCTION precision before iterating - an
+    identity on the float32 production path, deliberate elsewhere - so the
+    target is the recurrence the production path would execute. A float64
+    reference run therefore differs from an unrounded float64 roll-forward at
+    gate-rounding level; the checks bound that difference explicitly rather
+    than asserting bitwise equality."""
     g = tr["idle_gates"]
     al = onp.float32(g["alpha"]); be = onp.float32(g["beta"])
     mu = onp.float32(g["mu"])

@@ -295,3 +295,76 @@ model, arms, grids, budget, margin, counts or the 600-second cap.
    `indeterminate` rather than a STOP. This changes what a noisy offset is
    allowed to claim; it does not loosen the margin, the counts or any
    criterion.
+
+## 12. Failed dispatch 20260917-232635 and the check-suite amendment
+
+**Dispatch (preserved).** Commit `b926b6f`, run stamp `20260917-232635`, logs
+`/Users/durso/s5-runs/prospective-readout-probe/logs/20260917-232635`.
+Terminal verdict `FAILED 4`, reason "checks exited with 1", 85 s of 600 s.
+
+**What did and did not happen.** The backend stage completed, the 64 law
+checks passed, and source and checkpoint integrity verified OK both before
+and after (`manifest.json`, `SHA256SUMS`, the four `src50x` sources, and the
+four declared native endpoints under `20260917-163003`). The run stopped in
+the **check suite**: 34 passed, 2 failed. **No training and no probe
+execution occurred**, no `status.json` was produced, and the digest was
+omitted. Nothing scientific is superseded by this failure, and no earlier
+result is affected.
+
+**Both failures were assertion errors, not arithmetic errors.**
+
+1. `test_roll_forward_target_is_the_native_idle_recurrence` demanded bitwise
+   equality (`rtol=0, atol=0`) between `roll_forward`, which casts the idle
+   gates to production precision, and a fixture that re-iterated the same
+   recurrence with unrounded float64 gates. Same algebra, same operation
+   order, constants at different precision: the arrays agreed to about 1e-9
+   relative and could never agree bitwise. This is the class review R3 already
+   ruled on - bitwise assertions belong to unchanged stored leaves and
+   genuinely shared executed operations. The companion check
+   `test_closed_form_of_the_idle_roll_forward`, which compares the same target
+   against the closed form at 1e-4 relative, passed: the target itself is
+   correct.
+2. `test_indeterminate_offsets_do_not_become_a_stop` asserted `"STOP" not in
+   verdict`, while the declared INDETERMINATE wording required by s11 itself
+   contains the phrase "not a STOP". The behaviour was as specified.
+
+**The amendment (checks, fixtures and one docstring only).**
+
+- The roll-forward check now compares at **declared, derived** bounds and
+  separates the two error sources, so a real algebraic error cannot hide
+  inside a tolerance. With `delta = 2^-24`, the half-ulp relative error of
+  rounding a float64 scalar to float32:
+  - *gate rounding.* `w_k = alpha^k W_0 - beta * sum_(j=1..k) alpha^(k-j)
+    mu^j U_0`, so every term is a product of at most `k+1` gate factors and
+    is perturbed by at most `(1+delta)^(k+1) - 1`. The bound is stated against
+    the accumulated **sum of term magnitudes**, which the fixture carries
+    alongside the iteration, so it holds under cancellation. At `k = 16` this
+    is about `1.0e-6` relative - a derivation, not a fitted number.
+  - *arithmetic accumulation.* With the **same** constants the two iterations
+    differ only by rounding of 2 multiplies and 1 add per step, bounded by
+    `(3k+1) * eps/2` at the executed dtype, against the same sum.
+  The observed deviation is asserted to sit below each bound; finiteness is
+  checked first.
+- The verdict checks are structural (`verdict.startswith("INDETERMINATE")`,
+  `startswith("STOP")`, the `checkpoints_*` lists and
+  `outcome_by_checkpoint`) rather than substring matches on prose.
+- One docstring in `roll_forward` records that the gate cast to production
+  precision is deliberate.
+
+**The probe's arithmetic is byte-identical to the failed dispatch.** The only
+change under `experiments/prospective_momentum/readout_probe.py` is that
+docstring: the module's executable AST, with docstrings stripped, is
+identical to `b926b6f`. The relaunch is the same experiment under the same
+protocol.
+
+**Preflight is unchanged and still refuses rather than trims.** The probe's
+timing is still unmeasured - the first dispatch died in checks - so the arm
+count remains an estimate. After one arm of every structural class has run,
+the projection `need = sum over arms of the per-class second count, times the
+remaining checkpoints` is compared with `deadline - now - reserve`; if
+`need > left` the run records "projected Ns > remaining Ns; not started,
+nothing reduced" and returns `INCOMPLETE`. No arm, seed, offset or check is
+dropped to make it fit.
+
+**Relaunch.** One second dispatch, on a new commit, under the unchanged
+600-second cap. No retries beyond it.
