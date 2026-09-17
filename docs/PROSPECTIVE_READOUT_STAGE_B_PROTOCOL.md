@@ -178,13 +178,39 @@ Declared here, before execution:
 > confirmation number is at least **0.01** below the baseline's. The
 > checkpoint passes if the interior wins **at least 3 of the 5** offsets.
 >
-> **Target:** whichever the declared closed-form test of s3 selects for that
-> checkpoint; the rule on the other target is computed and reported too.
+> **Power, read before the verdict:** the observed standard error of the
+> **pooled** primary metric (all query kinds, both fill conditions,
+> confirmation half) is reported **per offset** for both compared arms,
+> before any offset is called a win or a loss. If that standard error
+> exceeds the decision margin of **0.01** at an offset — or is unavailable —
+> that offset cannot resolve a 0.01 difference in either direction. Its
+> contribution to the 3-of-5 count is reported as **indeterminate**: it is
+> not counted as a pass and not counted as a fail. Indeterminate offsets
+> never enter the won count. If, after removing them, the count can no
+> longer be reached in either direction, the **checkpoint's** outcome is
+> itself `indeterminate`, and an overall verdict that rests on such
+> checkpoints is reported as a failure of resolution — not as a STOP. (The
+> separate `underpowered` flag, standard error above half the margin, stays
+> as a reporting flag and does not change any count.)
+>
+> **Target:** whichever the declared closed-form test of s3 selects **for
+> that checkpoint** — the branch is evaluated per checkpoint, on that
+> checkpoint's own idle gates and its own selection-half numbers, never
+> globally, because ᾱ differs across the four. The branch **reorders the
+> headline; it never discards a result.** Both rules are computed and
+> printed for every checkpoint, the decisive one labelled as such and the
+> other labelled "reported beside it, not discarded", with the full primary
+> numbers still shown. When the branch fires, the report states: *primary
+> was near-exactly predictable (best lookahead error X at these offsets), so
+> the verdict is taken on the secondary target.*
 >
 > **Overall:** the interior helps only if it passes on **at least 3 of the 4
 > checkpoints** — not on a pooled mean. Otherwise: **STOP.** Given that we
 > hold the ground truth, the added freedom does not help on the read path for
 > **the seven declared interior points**, and no trained comparison follows.
+> A STOP is reported only when the 3-of-4 count is actually out of reach; if
+> indeterminate checkpoints leave it reachable, the overall verdict is
+> `INDETERMINATE`.
 
 Passing authorizes **nothing** by itself: a trained comparison remains a
 separate decision after Stage B reports.
@@ -242,3 +268,30 @@ These change the decision procedure, not the placement or the equations. With
 5. **The gate is exercised on the production float32 path for `gamma < 0`**,
    and the rounded classification is compared with the float64 one.
 
+
+## 11. Third amendment (coordinator review, 17 September 2026)
+
+Two reporting changes, declared before the single launch; no change to the
+model, arms, grids, budget, margin, counts or the 600-second cap.
+
+1. **The 0.05 branch reports both targets.** The threshold and the
+   `>= 3 of 5` near-exact condition are unchanged, and the branch is
+   evaluated **per checkpoint** (confirmed in code: `closed_form_diagnostic`
+   is called inside the per-checkpoint loop, on that checkpoint's own gates
+   and selection half; `overall_verdict` records the decisive target per
+   checkpoint). It no longer replaces one target's rule with the other's:
+   both rules are computed and reported for every checkpoint, and when the
+   switch fires the report says "primary was near-exactly predictable (best
+   lookahead error X at offsets …), so the verdict is taken on the secondary
+   target", with the primary numbers still printed. A branch that discards a
+   result is one a future reader cannot check; this one only reorders which
+   target carries the verdict.
+
+2. **Indeterminate offsets.** The observed standard error of the pooled
+   primary metric is reported per offset before the verdict is interpreted.
+   An offset whose standard error exceeds the 0.01 margin contributes
+   `indeterminate` to the 3-of-5 count rather than a pass or a fail, and a
+   checkpoint whose count becomes unreachable either way is itself
+   `indeterminate` rather than a STOP. This changes what a noisy offset is
+   allowed to claim; it does not loosen the margin, the counts or any
+   criterion.

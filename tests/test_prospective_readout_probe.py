@@ -353,11 +353,13 @@ def test_component_split_is_exact_and_budgets_are_matched():
     assert RB.K_OFFSETS == (1, 2, 4, 8, 16)
 
 
-def _rec(family, sel, conf):
+def _rec(family, sel, conf, sem=0.001, n=400):
     m = {}
     for k in RB.K_OFFSETS:
-        m[RB.primary_key(half="selection", k=k)] = dict(mean=sel)
-        m[RB.primary_key(half="confirmation", k=k)] = dict(mean=conf)
+        m[RB.primary_key(half="selection", k=k)] = dict(
+            mean=sel, sem=sem, n=n, underpowered=False)
+        m[RB.primary_key(half="confirmation", k=k)] = dict(
+            mean=conf, sem=sem, n=n, underpowered=False)
     return dict(family=family, metrics=m)
 
 
@@ -440,9 +442,9 @@ def _rec_t(family, sel, conf, target=RB.PRIMARY_TARGET):
             v_sel = sel if tgt == target else 0.99
             v_conf = conf if tgt == target else 0.99
             m[RB.primary_key(half="selection", k=k, target=tgt)] = dict(
-                mean=v_sel, underpowered=False)
+                mean=v_sel, sem=0.001, n=400, underpowered=False)
             m[RB.primary_key(half="confirmation", k=k, target=tgt)] = dict(
-                mean=v_conf, underpowered=False)
+                mean=v_conf, sem=0.001, n=400, underpowered=False)
     return dict(family=family, metrics=m)
 
 
@@ -460,6 +462,12 @@ def test_declared_branch_moves_to_the_secondary_target_when_trivial():
         pytest.approx(0.9)
     assert d["closed_form_coefficients"]["k1"]["coefficient_on_U"] == \
         pytest.approx(0.5 * 0.6)
+    assert "primary was near-exactly predictable" in d["branch_statement"]
+    assert "0.0100" in d["branch_statement"]        # the observed error
+    assert str(list(RB.K_OFFSETS)) in d["branch_statement"]
+    assert "NOT" in d["branch_statement"]           # the primary is kept
+    assert "PER CHECKPOINT" in d["branch_scope"]
+    assert d["near_exact_offsets"] == list(RB.K_OFFSETS)
     far = {"lookahead@lambda=1.0": _rec_t("lookahead", 0.60, 0.60),
            "tss@T=1.0": _rec_t("literal_tss", 0.80, 0.80),
            "generalized@x": _rec_t("generalized_interior", 0.50, 0.50)}
@@ -470,6 +478,79 @@ def test_declared_branch_moves_to_the_secondary_target_when_trivial():
     assert sr["target"] == RB.PRIMARY_TARGET and sr["passes"]
     sr2 = RB.stopping_rule(far, RB.SECONDARY_TARGET)
     assert sr2["target"] == RB.SECONDARY_TARGET and not sr2["passes"]
+    # the branch that did not fire still says so, and still names the other
+    dfar = RB.closed_form_diagnostic(_fake_tr(), far)
+    assert "did not fire" in dfar["branch_statement"]
+    assert "reported beside it" in dfar["branch_statement"]
+
+
+def test_an_offset_whose_standard_error_exceeds_the_margin_is_indeterminate():
+    """DECLARED: an offset whose observed pooled standard error is above the
+    decision margin can neither pass nor fail. It is excluded from the won
+    count and reported as indeterminate - never silently as a loss."""
+    noisy = RB.SE_INDETERMINATE * 2
+    # the interior genuinely beats the baseline, but nothing is resolvable
+    rule = RB.stopping_rule({
+        "tss@T=1.0": _rec("literal_tss", 0.95, 0.95, sem=noisy),
+        "lookahead@lambda=1.0": _rec("lookahead", 0.92, 0.92, sem=noisy),
+        "generalized@x": _rec("generalized_interior", 0.50, 0.50, sem=noisy)})
+    assert rule["offsets_won"] == 0 and rule["offsets_lost"] == 0
+    assert rule["offsets_indeterminate"] == len(RB.K_OFFSETS)
+    assert rule["outcome"] == "indeterminate" and not rule["passes"]
+    for row in rule["per_offset"].values():
+        assert row["status"] == "indeterminate" and row["wins"] is False
+        assert row["worst_pooled_sem"] == pytest.approx(noisy)
+        assert row["difference"] < 0            # the numbers are still shown
+    # exactly at the margin the offset still decides; just above it does not
+    at = RB.stopping_rule({
+        "tss@T=1.0": _rec("literal_tss", 0.95, 0.95, sem=RB.SE_INDETERMINATE),
+        "lookahead@lambda=1.0": _rec("lookahead", 0.92, 0.92,
+                                     sem=RB.SE_INDETERMINATE),
+        "generalized@x": _rec("generalized_interior", 0.50, 0.50,
+                              sem=RB.SE_INDETERMINATE)})
+    assert at["offsets_won"] == len(RB.K_OFFSETS) and at["passes"]
+    # a missing standard error is indeterminate too, never a pass
+    miss = RB.stopping_rule({
+        "tss@T=1.0": _rec("literal_tss", 0.95, 0.95, sem=None),
+        "lookahead@lambda=1.0": _rec("lookahead", 0.92, 0.92, sem=None),
+        "generalized@x": _rec("generalized_interior", 0.50, 0.50, sem=None)})
+    assert miss["outcome"] == "indeterminate" and miss["offsets_won"] == 0
+
+
+def test_indeterminate_offsets_do_not_become_a_stop():
+    """A checkpoint that cannot reach the count either way is indeterminate,
+    and an overall verdict resting on such checkpoints is not a STOP."""
+    losing = _rec("generalized_interior", 0.94, 0.94)
+    clear = {"tss@T=1.0": _rec("literal_tss", 0.95, 0.95),
+             "lookahead@lambda=1.0": _rec("lookahead", 0.92, 0.92),
+             "generalized@x": losing}
+    assert RB.stopping_rule(clear)["outcome"] == "fail"
+    noisy = RB.SE_INDETERMINATE * 2
+    mixed = dict(clear)
+    # three noisy offsets leave at most two decidable: the count is
+    # unreachable, so the checkpoint resolves to neither pass nor fail
+    for name, rec in mixed.items():
+        for k in RB.K_OFFSETS[:3]:
+            for half in ("selection", "confirmation"):
+                rec["metrics"][RB.primary_key(half=half, k=k)]["sem"] = noisy
+    rule = RB.stopping_rule(mixed)
+    assert rule["offsets_indeterminate"] == 3 and rule["outcome"] == \
+        "indeterminate"
+
+    def seed(outcome):
+        return dict(stopping_rule=dict(passes=outcome == "pass",
+                                       outcome=outcome, target="rollforward"))
+    ov = RB.overall_verdict({"500": seed("indeterminate"),
+                             "501": seed("indeterminate"),
+                             "502": seed("pass"), "503": seed("fail")})
+    assert not ov["interior_beats_baseline"]
+    assert "INDETERMINATE" in ov["verdict"] and "STOP" not in ov["verdict"]
+    assert ov["checkpoints_indeterminate"] == ["500", "501"]
+    assert ov["checkpoints_failed"] == ["503"]
+    ov2 = RB.overall_verdict({"500": seed("fail"), "501": seed("fail"),
+                              "502": seed("fail"),
+                              "503": seed("indeterminate")})
+    assert "STOP" in ov2["verdict"]
 
 
 def test_cells_report_their_power():

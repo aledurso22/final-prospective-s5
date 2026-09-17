@@ -67,6 +67,15 @@ STOP_MARGIN = 0.01
 STOP_MIN_OFFSETS = 3
 #: how many of the four checkpoints must pass the rule (no pooled mean)
 STOP_MIN_CHECKPOINTS = 3
+#: DECLARED BEFORE THE RUN. The observed standard error of the POOLED primary
+#: metric is reported per offset BEFORE the verdict is read. An offset whose
+#: pooled standard error exceeds the decision margin cannot resolve a
+#: STOP_MARGIN difference in either direction: its contribution to the
+#: >= STOP_MIN_OFFSETS count is reported as INDETERMINATE, not as a pass and
+#: not as a fail. Indeterminate offsets are never counted as wins; if they
+#: leave the count unreachable in either direction the checkpoint's outcome is
+#: itself indeterminate, and so is any overall verdict that depends on it.
+SE_INDETERMINATE = STOP_MARGIN
 #: DECLARED BEFORE THE RUN. The idle roll-forward is closed form:
 #: target_k = alpha^k W_t - c_k U_t, c_k = beta mu (alpha^k - mu^k)/(alpha-mu),
 #: so the U-lookahead family contains its U part exactly and differs only by
@@ -432,10 +441,32 @@ def closed_form_diagnostic(tr, metrics_by_arm):
         best[f"k{k}"] = (dict(arm=min(vals, key=lambda x: x[1])[0],
                               selection=min(v for _, v in vals))
                          if vals else None)
-    near = sum(1 for v in best.values()
-               if v is not None and v["selection"] <= NEAR_EXACT)
+    near_offsets = [k for k in K_OFFSETS
+                    if best[f"k{k}"] is not None
+                    and best[f"k{k}"]["selection"] <= NEAR_EXACT]
+    near = len(near_offsets)
     decisive = (SECONDARY_TARGET if near >= NEAR_EXACT_MIN_OFFSETS
                 else PRIMARY_TARGET)
+    if decisive == SECONDARY_TARGET:
+        worst = max(best[f"k{k}"]["selection"] for k in near_offsets)
+        statement = (
+            "primary was near-exactly predictable (best lookahead error "
+            f"{worst:.4f} or below at offsets {near_offsets}, threshold "
+            f"{NEAR_EXACT}), so the VERDICT is taken on the secondary "
+            "target, the actual W_(t+k). The primary numbers are NOT "
+            "discarded: the primary rule is computed and reported in full "
+            "beside the secondary one, and the reader can check it.")
+    else:
+        worst_near = (max(best[f"k{k}"]["selection"] for k in near_offsets)
+                      if near_offsets else None)
+        statement = (
+            f"the branch did not fire on this checkpoint: the best lookahead "
+            f"arm was within {NEAR_EXACT} of the primary target at {near} of "
+            f"{len(K_OFFSETS)} offsets ({near_offsets}"
+            + (f", best error {worst_near:.4f}" if near_offsets else "")
+            + f"), fewer than the declared {NEAR_EXACT_MIN_OFFSETS}. The "
+            "VERDICT is taken on the primary target; the secondary rule is "
+            "reported beside it.")
     return dict(
         idle_gates=g, closed_form_coefficients=coeffs,
         gate_variation={n: dict(mean=float(onp.mean(tr[n])),
@@ -444,7 +475,14 @@ def closed_form_diagnostic(tr, metrics_by_arm):
                                 max=float(onp.max(tr[n])))
                         for n in ("alpha", "beta")},
         best_lookahead_on_primary=best, near_exact_threshold=NEAR_EXACT,
-        offsets_near_exact=near, decisive_target=decisive,
+        offsets_near_exact=near, near_exact_offsets=near_offsets,
+        decisive_target=decisive, branch_statement=statement,
+        branch_scope=("the branch is evaluated PER CHECKPOINT, on this "
+                      "checkpoint's own idle gates and its own selection-half "
+                      "numbers, because alpha-bar differs across the four; it "
+                      "is never decided globally, and it reorders which "
+                      "target carries the verdict without removing the "
+                      "other from the report"),
         note=("the idle roll-forward is an exact linear function of "
               "(W_t, U_t): alpha^k W_t - c_k U_t. The U-lookahead family "
               "contains its U part exactly and differs only by the decay "
@@ -569,54 +607,122 @@ def stopping_rule(metrics_by_arm, target=PRIMARY_TARGET):
                 best = (n, v, rec["metrics"][conf]["mean"])
         return (dict(arm=best[0], selection=best[1], confirmation=best[2])
                 if best else None)
-    per_k, wins = {}, 0
+    def pooled(name, k):
+        """the POOLED primary cell for one arm at one offset: every query
+        kind, both fill conditions, confirmation half."""
+        return metrics_by_arm[name]["metrics"][
+            primary_key(half="confirmation", k=k, target=target)]
+
+    per_k, wins, losses, indeterminate = {}, 0, 0, 0
     for k in K_OFFSETS:
         gi = pick(("generalized_interior",), k)
         base = pick(BASELINE_FAMILIES, k)
         if (gi is None or base is None or gi["confirmation"] is None
                 or base["confirmation"] is None):
-            per_k[f"k{k}"] = dict(interior=gi, baseline=base, wins=False)
+            indeterminate += 1
+            per_k[f"k{k}"] = dict(
+                interior=gi, baseline=base, wins=False,
+                status="indeterminate", pooled_sem=None,
+                reason="a compared cell is empty at this offset")
             continue
+        sem = {"interior": pooled(gi["arm"], k)["sem"],
+               "baseline": pooled(base["arm"], k)["sem"]}
+        worst = (None if any(v is None for v in sem.values())
+                 else max(sem.values()))
+        resolvable = worst is not None and worst <= SE_INDETERMINATE
         win = bool(gi["confirmation"] <= base["confirmation"] - STOP_MARGIN)
-        wins += int(win)
-        conf_key = primary_key(half="confirmation", k=k, target=target)
+        if not resolvable:
+            indeterminate += 1
+            status_k = "indeterminate"
+        elif win:
+            wins += 1
+            status_k = "win"
+        else:
+            losses += 1
+            status_k = "loss"
         under = [n for n in (gi["arm"], base["arm"])
-                 if metrics_by_arm[n]["metrics"][conf_key]["underpowered"]]
-        per_k[f"k{k}"] = dict(interior=gi, baseline=base,
-                              difference=gi["confirmation"]
-                              - base["confirmation"], wins=win,
-                              underpowered_arms=under)
+                 if pooled(n, k)["underpowered"]]
+        per_k[f"k{k}"] = dict(
+            interior=gi, baseline=base, status=status_k,
+            difference=gi["confirmation"] - base["confirmation"],
+            pooled_sem=sem, worst_pooled_sem=worst,
+            pooled_n={"interior": pooled(gi["arm"], k)["n"],
+                      "baseline": pooled(base["arm"], k)["n"]},
+            wins=bool(status_k == "win"), underpowered_arms=under,
+            reason=(None if resolvable else
+                    "the observed pooled standard error exceeds the decision "
+                    "margin, so this offset can neither pass nor fail and is "
+                    "reported as indeterminate"))
+    reachable = wins + indeterminate
+    outcome = ("pass" if wins >= STOP_MIN_OFFSETS else
+               "fail" if reachable < STOP_MIN_OFFSETS else "indeterminate")
     return dict(target=target, margin=STOP_MARGIN,
+                se_indeterminate_above=SE_INDETERMINATE,
                 offsets_required=STOP_MIN_OFFSETS, offsets_won=wins,
+                offsets_lost=losses, offsets_indeterminate=indeterminate,
                 per_offset=per_k, baseline_families=list(BASELINE_FAMILIES),
-                passes=bool(wins >= STOP_MIN_OFFSETS))
+                passes=bool(wins >= STOP_MIN_OFFSETS), outcome=outcome,
+                outcome_note=("indeterminate offsets are excluded from the "
+                              "won count; an outcome is 'indeterminate' when "
+                              "the remaining offsets cannot reach "
+                              "STOP_MIN_OFFSETS either way"))
 
 
 def overall_verdict(per_seed):
-    """The rule is evaluated PER CHECKPOINT, on that checkpoint's DECLARED
-    decisive target; the interior helps only if it passes on at least
-    STOP_MIN_CHECKPOINTS of the four."""
-    passed = [s for s, r in per_seed.items() if r["stopping_rule"]["passes"]]
+    """The rule is evaluated PER CHECKPOINT, on that checkpoint's own
+    DECLARED decisive target (the branch is per checkpoint, never global);
+    the interior helps only if it passes on at least STOP_MIN_CHECKPOINTS of
+    the four. A checkpoint whose offsets are too noisy to reach the count
+    either way is INDETERMINATE and counts as neither a pass nor a fail."""
+    out_by = {s: r["stopping_rule"].get("outcome",
+                                        "pass" if r["stopping_rule"]["passes"]
+                                        else "fail")
+              for s, r in per_seed.items()}
+    passed = sorted(s for s, o in out_by.items() if o == "pass")
+    failed = sorted(s for s, o in out_by.items() if o == "fail")
+    unresolved = sorted(s for s, o in out_by.items() if o == "indeterminate")
     helped = len(passed) >= STOP_MIN_CHECKPOINTS
-    return dict(checkpoints_passed=sorted(passed),
+    reachable = len(passed) + len(unresolved) >= STOP_MIN_CHECKPOINTS
+    if helped:
+        verdict = ("the generalized interior beats the best carry-free "
+                   "or one-matrix control at predicting the rolled-forward "
+                   "fast weight")
+    elif reachable:
+        verdict = ("INDETERMINATE: too few offsets resolve at the declared "
+                   "margin to reach the per-checkpoint count either way. "
+                   "This is not a pass and not a STOP; it is reported as a "
+                   "failure of resolution, with the observed standard errors")
+    else:
+        verdict = ("STOP: no generalized-interior member beats the best of "
+                   "the literal-TSS line and the U-lookahead; the added "
+                   "freedom does not help on the read path")
+    return dict(checkpoints_passed=passed, checkpoints_failed=failed,
+                checkpoints_indeterminate=unresolved,
                 checkpoints_required=STOP_MIN_CHECKPOINTS,
+                outcome_by_checkpoint=out_by,
                 decisive_target={s: r["stopping_rule"]["target"]
-                                 for s, r in per_seed.items()},
-                interior_beats_baseline=helped,
-                verdict=("the generalized interior beats the best carry-free "
-                         "or one-matrix control at predicting the rolled-"
-                         "forward fast weight" if helped else
-                         "STOP: no generalized-interior member beats the best "
-                         "of the literal-TSS line and the U-lookahead; the "
-                         "added freedom does not help on the read path"),
+                                 for s, r in per_seed.items()
+                                 if "target" in r["stopping_rule"]},
+                branch_statement={s: r["closed_form"]["branch_statement"]
+                                  for s, r in per_seed.items()
+                                  if "closed_form" in r},
+                outcome_on_both_targets={
+                    s: {t: v["outcome"] for t, v in (r.get("rules") or {}
+                                                     ).items()}
+                    for s, r in per_seed.items()},
+                interior_beats_baseline=helped, verdict=verdict,
                 scope=("a negative verdict is a statement about the SEVEN "
                        "DECLARED interior points, on this task, these "
                        "checkpoints and these offsets - not about the "
                        "interior of the family as a whole"),
                 note=("declared before execution: targets and the rule for "
                       "choosing between them, projection, baseline, matched "
-                      "budget, selection/confirmation split, margin and the "
-                      "per-checkpoint requirement. Grids and categories are "
+                      "budget, selection/confirmation split, margin, the "
+                      "per-checkpoint requirement and the standard-error "
+                      "rule that makes an offset indeterminate. BOTH targets "
+                      "are computed and reported for every checkpoint; the "
+                      "branch decides which one carries the verdict, it does "
+                      "not delete the other. Grids and categories are "
                       "not widened or re-cut afterwards, and passing "
                       "authorizes no trained comparison."))
 
@@ -797,16 +903,23 @@ def run_probe(args, status, arm_list, deadline, save):
         matched = {n: m for n, m in metrics.items()
                    if m["family"] in MATCHED_FAMILIES}
         closed = closed_form_diagnostic(tr, matched)
-        sr = stopping_rule(matched, closed["decisive_target"])
+        # BOTH targets are always computed; the declared per-checkpoint
+        # branch only decides which one carries the verdict.
+        rules = {t: stopping_rule(matched, t)
+                 for t in (PRIMARY_TARGET, SECONDARY_TARGET)}
+        sr = rules[closed["decisive_target"]]
         other_target = (SECONDARY_TARGET
                         if closed["decisive_target"] == PRIMARY_TARGET
                         else PRIMARY_TARGET)
-        other = stopping_rule(matched, other_target)
+        other = rules[other_target]
         cells = {key: metrics["native_identity"]["metrics"][key]
                  for key in primary}
         under = sorted(key for key, v in cells.items() if v["underpowered"])
         per_seed[str(seed)] = dict(
-            stopping_rule=sr, rule_on_the_other_target=other,
+            stopping_rule=sr, rules=rules,
+            rule_on_the_other_target=other,
+            decisive_target=closed["decisive_target"],
+            branch_statement=closed["branch_statement"],
             closed_form=closed, underpowered_cells=under,
             cell_counts={key: dict(n=v["n"], sem=v["sem"])
                          for key, v in cells.items()},
@@ -822,11 +935,20 @@ def run_probe(args, status, arm_list, deadline, save):
                                  secondary=secondary)
         status["per_seed"] = per_seed
         save()
-        print(f"[seed {seed}] decisive target {closed['decisive_target']} "
-              f"(lookahead near-exact at {closed['offsets_near_exact']} of "
-              f"{len(K_OFFSETS)}); passes {sr['passes']} (won "
-              f"{sr['offsets_won']}); underpowered cells {len(under)} of "
-              f"{len(primary)}")
+        print(f"[seed {seed}] {closed['branch_statement']}")
+        for tname in (PRIMARY_TARGET, SECONDARY_TARGET):
+            rr = rules[tname]
+            mark = "DECISIVE" if tname == closed["decisive_target"] else "also"
+            ses = ", ".join(
+                f"k{k}:" + ("n/a" if rr["per_offset"][f"k{k}"].get(
+                    "worst_pooled_sem") is None else
+                    f"{rr['per_offset'][f'k{k}']['worst_pooled_sem']:.4f}")
+                for k in K_OFFSETS)
+            print(f"  [{mark}] target {tname}: pooled SE per offset ({ses}); "
+                  f"won {rr['offsets_won']}, lost {rr['offsets_lost']}, "
+                  f"indeterminate {rr['offsets_indeterminate']} of "
+                  f"{len(K_OFFSETS)} -> outcome {rr['outcome']}")
+        print(f"  underpowered cells {len(under)} of {len(primary)}")
     ST.write(os.path.join(status["out"], "metrics.json"), detail)
     status["overall"] = overall_verdict(per_seed)
     status["work_completed"] = dict(seeds=len(SEEDS), arms=len(arm_list),
@@ -834,8 +956,10 @@ def run_probe(args, status, arm_list, deadline, save):
                                     offsets=list(K_OFFSETS), updates=0)
     ov = status["overall"]
     print(f"[stopping rule] interior_beats_baseline="
-          f"{ov['interior_beats_baseline']} checkpoints passed "
-          f"{ov['checkpoints_passed']}")
+          f"{ov['interior_beats_baseline']} passed {ov['checkpoints_passed']} "
+          f"failed {ov['checkpoints_failed']} indeterminate "
+          f"{ov['checkpoints_indeterminate']}")
+    print(f"[stopping rule] {ov['verdict']}")
     status["complete"] = True
     return 0, "PASS"
 

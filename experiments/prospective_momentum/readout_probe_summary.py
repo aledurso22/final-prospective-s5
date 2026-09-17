@@ -80,9 +80,17 @@ def main(run_dir):
     ov = st.get("overall") or {}
     print("\n=== PREDECLARED VERDICT ===")
     print(f"  checkpoints passed {ov.get('checkpoints_passed')} of "
-          f"{ov.get('checkpoints_required')} required -> "
+          f"{ov.get('checkpoints_required')} required, failed "
+          f"{ov.get('checkpoints_failed')}, indeterminate "
+          f"{ov.get('checkpoints_indeterminate')} -> "
           f"interior_beats_baseline={ov.get('interior_beats_baseline')}")
     print(f"  {ov.get('verdict')}")
+    print(f"  decisive target per checkpoint {ov.get('decisive_target')}")
+    print(f"  outcome on BOTH targets per checkpoint "
+          f"{ov.get('outcome_on_both_targets')}")
+    for seed, stmt in (ov.get("branch_statement") or {}).items():
+        print(f"  branch, checkpoint {seed}: {stmt}")
+    print(f"  {ov.get('scope')}")
     print(f"  {ov.get('note')}")
     proj = st.get("projection") or {}
     print(f"\nprojection {proj.get('seconds_per_arm_by_class')} -> "
@@ -106,23 +114,48 @@ def main(run_dir):
         print(f"  best lookahead on the primary target (selection half) "
               f"{cf.get('best_lookahead_on_primary')}")
         print(f"  near-exact at {cf.get('offsets_near_exact')} offsets "
-              f"(threshold {cf.get('near_exact_threshold')}) -> DECISIVE "
-              f"TARGET {cf.get('decisive_target')}")
+              f"{cf.get('near_exact_offsets')} (threshold "
+              f"{cf.get('near_exact_threshold')}) -> DECISIVE TARGET "
+              f"{cf.get('decisive_target')}")
+        print(f"  BRANCH: {cf.get('branch_statement')}")
+        print(f"  {cf.get('branch_scope')}")
         print(f"  {cf.get('note')}")
-        other = r.get("rule_on_the_other_target") or {}
-        print(f"  rule on the other target ({other.get('target')}): passes="
-              f"{other.get('passes')} offsets won {other.get('offsets_won')}")
         und = r.get("underpowered_cells") or []
         print(f"  underpowered cells: {len(und)}"
               + (f" (first: {und[:3]})" if und else ""))
-        print(f"  stopping rule: offsets won {sr.get('offsets_won')} of "
-              f"{sr.get('offsets_required')} required -> passes="
-              f"{sr.get('passes')} (margin {sr.get('margin')}, baseline "
-              f"{sr.get('baseline_families')})")
-        for key, row in (sr.get("per_offset") or {}).items():
-            print(f"    {key}: interior {row.get('interior')}")
-            print(f"        baseline {row.get('baseline')} difference "
-                  f"{fmt(row.get('difference'))} wins {row.get('wins')}")
+        # BOTH target rules, always, decisive one first and labelled
+        rules = r.get("rules") or {}
+        if not rules:                      # older records: rebuild the pair
+            other = r.get("rule_on_the_other_target") or {}
+            rules = {x.get("target"): x for x in (sr, other) if x}
+        order = [t for t in (cf.get("decisive_target"),) if t in rules]
+        order += [t for t in sorted(rules) if t not in order]
+        for tname in order:
+            row = rules[tname] or {}
+            mark = ("DECISIVE, carries the verdict"
+                    if tname == cf.get("decisive_target")
+                    else "reported beside it, not discarded")
+            print(f"  --- rule on target '{tname}' [{mark}] ---")
+            print(f"    observed pooled standard error per offset "
+                  "(read BEFORE the verdict; an offset with SE above the "
+                  f"margin {row.get('se_indeterminate_above')} is "
+                  "INDETERMINATE, neither pass nor fail):")
+            for key, o in (row.get("per_offset") or {}).items():
+                print(f"      {key}: SE {fmt(o.get('worst_pooled_sem'))} "
+                      f"per-arm {o.get('pooled_sem')} n {o.get('pooled_n')} "
+                      f"-> {o.get('status')}")
+            print(f"    offsets won {row.get('offsets_won')} of "
+                  f"{row.get('offsets_required')} required, lost "
+                  f"{row.get('offsets_lost')}, indeterminate "
+                  f"{row.get('offsets_indeterminate')} -> outcome "
+                  f"{row.get('outcome')} (passes={row.get('passes')}, margin "
+                  f"{row.get('margin')}, baseline "
+                  f"{row.get('baseline_families')})")
+            for key, o in (row.get("per_offset") or {}).items():
+                print(f"      {key}: interior {o.get('interior')}")
+                print(f"          baseline {o.get('baseline')} difference "
+                      f"{fmt(o.get('difference'))} status {o.get('status')}"
+                      + (f" [{o.get('reason')}]" if o.get("reason") else ""))
         print(f"  dW components: {r.get('component_split')}")
         for key, v in (r.get("argmins_matched") or {}).items():
             if key.endswith("/confirmation/k4") or key.endswith(
