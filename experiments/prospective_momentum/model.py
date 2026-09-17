@@ -58,12 +58,12 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
         scalar, step_fn = p["kappa"][0], PD.prospective_step
         coeff = dict(kappa=p["kappa"][0])
     elif rule == FL.FILTERED:
-        # the master law applied to a residual-processing state; the Momentum
-        # update below it is unchanged. Its coefficients are formed ONCE here
-        # (`FL.coefficients`), and the acceptance gate reads exactly these.
+        # the master law applied to a residual-processing state, executed in
+        # its coefficient form; the Momentum update below it is unchanged. The
+        # coefficients are formed ONCE here and RETURNED, so acceptance can
+        # classify exactly the rounded values this program multiplied by.
         scalar, step_fn = FL.coefficients(p), FL.filtered_step
-        M, gam, T, A = (x for x in scalar)
-        coeff = dict(M=M, gamma=gam, T=T, A=A)
+        coeff = dict(zip(FL.COEFF_NAMES, scalar))
     elif rule == OD.ORDINARY:
         # same shell, same gates; only the per-token update differs. Its carry
         # adds the previous residual (192 real numbers, counted as such).
@@ -78,8 +78,15 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
                         mu[t], eta[t], scalar)
         W = carry[0]
         logits = p["readout_W"] @ (W @ keys[t]) + p["readout_b"]
-        return carry, (logits, jnp.sqrt(jnp.sum(W ** 2)),
-                       jnp.sqrt(jnp.sum(carry[1] ** 2)))
+        outs = (logits, jnp.sqrt(jnp.sum(W ** 2)),
+                jnp.sqrt(jnp.sum(carry[1] ** 2)))
+        if rule == FL.FILTERED:
+            # processing-state diagnostic: max |entry| of y, y_prev, R_prev
+            # (max-abs cannot overflow while the entries are finite)
+            outs = outs + (jnp.maximum(jnp.maximum(
+                jnp.max(jnp.abs(carry[2])), jnp.max(jnp.abs(carry[3]))),
+                jnp.max(jnp.abs(carry[4]))),)
+        return carry, outs
 
     z = jnp.zeros((D_V, D_K), dtype=dtype)
     n_carry = {OD.ORDINARY: 3, FL.FILTERED: 5}.get(rule, 2)
@@ -90,11 +97,14 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
     for c in carry:
         if c.dtype != dtype:
             raise TypeError(f"carry dtype {c.dtype} != executed dtype {dtype}")
-    carry, (logits, w_norm, aux_norm) = jax.lax.scan(
-        step, carry, jnp.arange(key_id.shape[0]))
-    return dict(logits=logits, w_norm=w_norm, aux_norm=aux_norm,
-                gates=(alpha, beta, mu, eta), final_carry=carry, dtype=dtype,
-                weights=None, coeff=coeff)
+    carry, outs = jax.lax.scan(step, carry, jnp.arange(key_id.shape[0]))
+    logits, w_norm, aux_norm = outs[:3]
+    ret = dict(logits=logits, w_norm=w_norm, aux_norm=aux_norm,
+               gates=(alpha, beta, mu, eta), final_carry=carry, dtype=dtype,
+               weights=None, coeff=coeff)
+    if rule == FL.FILTERED:
+        ret["proc_max_abs"] = outs[3]
+    return ret
 
 
 def add_extension(p_native, rule):

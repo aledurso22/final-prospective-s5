@@ -1,10 +1,10 @@
 """Residual-processing placement of the master law, with its exact literal
 TSS boundary.
 
-Specification, frozen for review before any execution:
-docs/PROSPECTIVE_TSS_CONTAINMENT_SPEC.md (commit d95266d, corrected for the
-static review of bdc1c19) and docs/PROSPECTIVE_TSS_CONTAINMENT_PROTOCOL.md.
-Clearance: PROSPECTIVE_TSS_IMPLEMENTATION_CLEARANCE_d95266d_2026_09_17.md.
+Specification: docs/PROSPECTIVE_TSS_CONTAINMENT_SPEC.md. Frozen protocol:
+docs/PROSPECTIVE_TSS_CONTAINMENT_PROTOCOL.md. Clearance:
+PROSPECTIVE_TSS_IMPLEMENTATION_CLEARANCE_d95266d_2026_09_17.md; implementation
+review: PROSPECTIVE_TSS_IMPLEMENTATION_REVIEW_7613c86_2026_09_17.md (R2).
 
 A processing state y is driven by the masked associative residual, and its
 NEWLY COMPUTED output enters the UNCHANGED Momentum update:
@@ -15,49 +15,56 @@ NEWLY COMPUTED output enters the UNCHANGED Momentum update:
     U_next  = mu_t U_prev + eta_t y_next
     W_next  = alpha_t W_prev - beta_t U_next
 
-h = 1 token. Every right-hand side uses the OLD states. Carry:
-(W, U, y, y_prev, R_prev) = 320 real numbers as executed; a law with M fixed
-at zero needs only 256, and both numbers are reported (`CARRY_EXECUTED`,
-`CARRY_MINIMAL_M_ZERO`).
+h = 1 token; every right-hand side uses the OLD states.
 
-Exact points, proved by hand in the specification and checked numerically on
-the cluster:
+EXECUTED FORM (review R2). The same equation is executed in its explicit,
+algebraically equivalent coefficient form
 
-  * M = gamma = 0, T > 0:  y_next = y + (h/T)(R_t - y) + R_t - R_prev, which
-    is literal TSS Eq. (17) driven by R at the same clock, initialization,
-    same-token output convention and downstream gates;
-  * M = 0, T = 0, gamma = h:  y_next = R_t, exactly the native Momentum
-    update in real arithmetic (the executed float form is y + (R - y), so
-    this recovery is checked at trajectory tolerances, never bitwise);
-  * M = 0, gamma + T = h:  y_next = R_t + (T/h)(R_t - R_prev), the ordinary
-    two-tap operator with kappa = T/h, so gamma = h(1 - kappa). kappa > 1
-    needs gamma < 0 and is therefore OUTSIDE this nonnegative-gamma family:
-    the learned two-tap operator stays a separate comparator.
+    a = [2M + h(gamma+T) - h^2] / A     b = M / A
+    c = [h^2 + hT] / A                  d = hT / A
+    y_next = a y - b y_prev + c R_t - d R_prev,
 
-Domain. The derivation requires M >= 0, gamma >= 0, T >= 0, gamma + T > 0,
-A > 0 and 4M + 2h(gamma+T) > h^2 (the strict Jury conditions of the isolated
-filter). The executed arithmetic uses declared positive gaps G_MIN and
-DELTA_FILTER instead of strict comparisons; these are a NUMERICAL ROBUSTNESS
-POLICY, not part of the physical derivation, and they do not by themselves
-certify the rounded recurrence. Acceptance is the executed gate below.
+whose normalized coefficients are formed ONCE per compiled program by
+`coefficients`, inside the rollout, with no parameter-dependent branch; the
+derivatives with respect to M, gamma and T flow through them everywhere,
+including on the boundaries. The rollout returns exactly those rounded values,
+and acceptance classifies exactly those values (not basis responses of the
+step, which floating-point non-linearity does not turn into coefficients).
+The original-law form survives only in separately coded references
+(`filtered_reference` here, the sensitivity recursions in the checks).
 
-Executed acceptance gate (clearance s1). The rounded normalized recurrence
-coefficients are obtained by applying the PRODUCTION step to basis carries
-with no residual, so they are exactly the coefficients the rollout executes:
+Exact points (hand-proved in the specification, checked on the cluster):
 
-    executed 2x2 = [[c1, -c0], [1, 0]],  polynomial z^2 - c1 z + c0.
+  * M = gamma = 0, T > 0: a = 1 - h/T, b = 0, c = 1 + h/T, d = 1, i.e.
+    y_next = y + (h/T)(R_t - y) + R_t - R_prev, literal TSS Eq. (17) driven by R;
+  * (M, gamma, T) = (0, h, 0): a = b = d = 0, c = 1, so y_next = R_t and the
+    Momentum update is native. The executed form avoids the y + (R - y)
+    cancellation of the original form;
+  * M = 0, gamma + T = h: the two-tap operator with kappa = T/h and
+    gamma = h(1 - kappa); kappa > 1 needs gamma < 0 and is OUTSIDE this
+    nonnegative-gamma family.
 
-Finiteness and all three strict Jury conditions of THAT rounded polynomial
-are required, in the loop (executed dtype) and at every validation point
-(exact rational classification). A violating update or run is refused; no
-algebraically equivalent pre-rounding expression is substituted. This
-certifies the isolated executed filter only - not the closed-loop associative
-memory, not switching across tokens, and not the downstream Momentum block.
+Carry (W, U, y, y_prev, R_prev) = 320 real numbers as IMPLEMENTED, in both
+processing arms. 256 is only the theoretical minimum of a law with M fixed at
+zero; it is not the implemented cost.
+
+Acceptance. The derivation's domain is M, gamma, T >= 0, gamma + T > 0, A > 0,
+4M + 2h(gamma+T) > h^2. The declared gaps G_MIN and DELTA_FILTER are a
+numerical robustness policy enforced by the repair, without any universal
+rounding guarantee. The GATE is: every executed quantity (M, gamma, T, A, a,
+b, c, d) finite, and the three strict Jury conditions of the rounded
+homogeneous polynomial z^2 - a z + b,
+
+    1 - a + b > 0,   1 + a + b > 0,   1 - b > 0,
+
+in the executed dtype after every update and by exact rational classification
+at every checkpoint. This is a result about those rounded coefficients only:
+not a theorem about every floating-point trajectory, the closed-loop memory,
+switching across tokens, or the Momentum block below.
 """
 
 from fractions import Fraction
 
-import jax
 import jax.numpy as jnp
 import numpy as onp
 
@@ -96,21 +103,31 @@ def initial_leaves(dtype, T_value=T0):
             "fil_T": jnp.full((1,), T_value, dtype=dtype)}
 
 
+#: the executed quantities, in the order `coefficients` returns them
+COEFF_NAMES = ("M", "gamma", "T", "A", "a", "b", "c", "d")
+
+
 def coefficients(p):
-    """(M, gamma, T, A) in the leaves' dtype, with A formed ONCE here and
-    used by the step, the telemetry and the acceptance gate."""
+    """The executed coefficients, formed ONCE from the stored leaves in their
+    dtype, with no branch on their values. Returned as a tuple in COEFF_NAMES
+    order; the rollout multiplies by exactly these values and returns them."""
     M, gam, T = (p[k][0] for k in LEAVES)
     h = jnp.asarray(H, dtype=M.dtype)
-    return M, gam, T, M + h * (gam + T)
+    hh = h * h
+    A = M + h * (gam + T)
+    a = (2.0 * M + h * (gam + T) - hh) / A
+    b = M / A
+    c = (hh + h * T) / A
+    d = (h * T) / A
+    return M, gam, T, A, a, b, c, d
 
 
 # ------------------------------------------------------------- updates -----
 def filtered_update(Wb, U, y, y_prev, Rprev, beta, mu, eta, coeff, R):
-    """One step given Wbar and the masked residual R (open-loop form)."""
-    M, gam, T, A = coeff
-    h = jnp.asarray(H, dtype=jnp.asarray(A).dtype)
-    y_new = y + (M * (y - y_prev) + (h * h) * (R - y)
-                 + (h * T) * (R - Rprev)) / A
+    """One step given Wbar and the masked residual R, in the executed
+    coefficient form."""
+    _, _, _, _, a, b, c, d = coeff
+    y_new = a * y - b * y_prev + c * R - d * Rprev
     U_new = mu * U + eta * y_new
     return Wb - beta * U_new, U_new, y_new, y, R
 
@@ -123,66 +140,65 @@ def filtered_step(carry, k, v, m, alpha, beta, mu, eta, coeff):
 
 
 # ------------------------------------------------- executed filter gate ----
-def executed_filter_transition(coeff, dtype):
-    """The rounded 2x2 (y, y_prev) transition of the PRODUCTION step, taken
-    with an inactive write (m = 0, so R = 0) from basis carries. These are
-    exactly the coefficients the rollout executes; nothing is recomputed from
-    an algebraically equivalent expression."""
-    d_k, d_v = NM.D_K, NM.D_V
-    k = jnp.zeros((d_k,), dtype=dtype).at[0].set(1)
-    v = jnp.zeros((d_v,), dtype=dtype)
-    e = jnp.zeros((d_v, d_k), dtype=dtype).at[0, 0].set(1)
-    z = jnp.zeros((d_v, d_k), dtype=dtype)
-    one = jnp.ones((), dtype=dtype)
-    zero = jnp.zeros((), dtype=dtype)
-
-    def col(y, y_prev):
-        _, _, y_new, y_prev_new, _ = filtered_step(
-            (z, z, y, y_prev, z), k, v, zero, one, zero, one, zero, coeff)
-        return y_new[0, 0], y_prev_new[0, 0]
-
-    (a11, a21), (a12, a22) = col(e, z), col(z, e)
-    return jnp.stack([jnp.stack([a11, a12]), jnp.stack([a21, a22])])
+def jury_slacks(a, b):
+    """(1 - a + b, 1 + a + b, 1 - b) of z^2 - a z + b, in the dtype of a, b.
+    All three strictly positive is Schur stability of the quadratic
+    (b > -1 follows from the sum of the first two)."""
+    return 1.0 - a + b, 1.0 + a + b, 1.0 - b
 
 
-def jury_slacks(A2):
-    """(1 - tr + det, 1 + tr + det, 1 - det) of a rounded 2x2, in ITS dtype.
-    All three strictly positive is Schur stability for a real 2x2."""
-    tr = A2[0, 0] + A2[1, 1]
-    det = A2[0, 0] * A2[1, 1] - A2[0, 1] * A2[1, 0]
-    return 1.0 - tr + det, 1.0 + tr + det, 1.0 - det
-
-
-def in_loop_guard(coeff, dtype):
-    """Executed-dtype telemetry and guard for ONE update: the rounded
-    transition's entries and its three Jury slacks. `ok` is False if any
-    quantity is non-finite or any slack is not strictly positive."""
-    A2 = executed_filter_transition(coeff, dtype)
-    s1, s2, s3 = jury_slacks(A2)
+def in_loop_guard(coeff):
+    """Executed-dtype guard for coefficients a compiled program actually
+    used. `ok` is False if ANY executed quantity is non-finite or any slack is
+    not strictly positive."""
+    M, gam, T, A, a, b, c, d = coeff
+    s1, s2, s3 = jury_slacks(a, b)
     smin = jnp.minimum(jnp.minimum(s1, s2), s3)
-    finite = jnp.all(jnp.isfinite(A2)) & jnp.isfinite(smin)
-    M, gam, T, A = coeff
-    return dict(c1=A2[0, 0], c0=-A2[0, 1], A=A, M=M, gamma=gam, T=T,
-                jury_1=s1, jury_2=s2, jury_3=s3, jury_min=smin,
-                ok=finite & (smin > 0))
+    finite = jnp.all(jnp.isfinite(jnp.stack(
+        [jnp.asarray(x) for x in coeff] + [s1, s2, s3])))
+    return dict(zip(COEFF_NAMES, coeff), jury_1=s1, jury_2=s2, jury_3=s3,
+                jury_min=smin, finite=finite, ok=finite & (smin > 0))
 
 
-def filter_report(p):
-    """Host-side acceptance report for a parameter tree: the SAME executed
-    rounded transition, classified exactly over the rationals, plus the
-    declared numerical gaps' achieved slacks (reported, never substituted for
-    the executed gate)."""
-    dtype = p["fil_M"].dtype
-    coeff = coefficients(p)
-    A2 = onp.asarray(executed_filter_transition(coeff, dtype))
-    label, slacks = PD.classify(A2)
-    M, gam, T, A = (float(onp.asarray(x)) for x in coeff)
+def classify_quadratic(a, b):
+    """Exact rational classification of the ROUNDED coefficients a, b.
+    stable: all three slacks > 0; neutral: none negative, one zero;
+    unstable: any negative; nonfinite: a or b non-finite."""
+    if not (onp.isfinite(a) and onp.isfinite(b)):
+        return "nonfinite", None
+    fa, fb = Fraction(float(a)), Fraction(float(b))
+    J = (1 - fa + fb, 1 + fa + fb, 1 - fb)
+    if min(J) < 0:
+        return "unstable", tuple(float(j) for j in J)
+    if min(J) == 0:
+        return "neutral", tuple(float(j) for j in J)
+    return "stable", tuple(float(j) for j in J)
+
+
+def coefficient_values(coeff):
+    """Host floats of an executed coefficient tuple or mapping, WITHOUT any
+    recomputation (a scalar per name; batched rollout copies are checked equal
+    by the caller)."""
+    if isinstance(coeff, dict):
+        return {k: float(onp.asarray(coeff[k]).ravel()[0])
+                for k in COEFF_NAMES}
+    return {k: float(onp.asarray(v).ravel()[0])
+            for k, v in zip(COEFF_NAMES, coeff)}
+
+
+def filter_report(executed, source="executed by the evaluation rollout"):
+    """Acceptance report for EXECUTED coefficient values (a mapping from
+    COEFF_NAMES to host floats taken from a compiled program). The declared
+    gaps are reported alongside; they are never the certificate."""
+    v = dict(executed)
+    label, slacks = classify_quadratic(v["a"], v["b"])
+    M, gam, T = v["M"], v["gamma"], v["T"]
     h = H
-    return dict(rule=FILTERED, executed_dtype=str(A2.dtype),
-                M=M, gamma=gam, T=T, A=A,
-                executed_c1=float(A2[0, 0]), executed_c0=float(-A2[0, 1]),
-                executed_transition=[[float(x) for x in row] for row in A2],
-                classification=label,
+    finite = all(onp.isfinite(v[k]) for k in COEFF_NAMES)
+    return dict(rule=FILTERED, source=source, executed=v,
+                all_finite=bool(finite),
+                M=M, gamma=gam, T=T, A=v["A"], a=v["a"], b=v["b"],
+                c=v["c"], d=v["d"], classification=label,
                 jury_slacks_exact=(list(slacks) if slacks is not None
                                    else None),
                 min_jury_expression=(min(slacks) if slacks is not None
@@ -193,19 +209,27 @@ def filter_report(p):
                 nonnegative=bool(M >= 0.0 and gam >= 0.0 and T >= 0.0),
                 at_tss_boundary=bool(M == 0.0 and gam == 0.0),
                 at_native_point=bool(M == 0.0 and T == 0.0 and gam == h),
-                two_tap_kappa=(T / h if (M == 0.0 and abs(gam + T - h)
-                                         <= 0.0) else None),
-                note=("acceptance is the exact classification of the rounded "
-                      "executed transition; the declared gaps G_MIN and "
-                      "DELTA_FILTER are a numerical policy and are reported, "
-                      "not used as the certificate. Isolated filter only."))
+                note=("acceptance classifies the rounded coefficients a, b "
+                      "that the named compiled program executed; the gaps "
+                      "G_MIN and DELTA_FILTER are a robustness policy, "
+                      "reported, not certified. A coefficient-polynomial "
+                      "result for the isolated filter only."))
+
+
+def report_from_tree(p):
+    """DIAGNOSTIC/TEST helper: recompute the coefficients from a tree in THIS
+    context and report them. Not the study's acceptance record, which always
+    uses values returned by the compiled evaluation rollout."""
+    return filter_report(coefficient_values(coefficients(p)),
+                         source="recomputed from the stored leaves "
+                                "(diagnostic, not the executed record)")
 
 
 def filter_failure(rep):
-    """None if acceptable; anything but a strictly stable, finite executed
-    filter with nonnegative coefficients is refused."""
-    if not all(onp.isfinite([rep["M"], rep["gamma"], rep["T"], rep["A"]])):
-        return f"non-finite filter coefficients {rep}"
+    """None if acceptable; any non-finite executed quantity, a negative
+    coefficient, or a rounded polynomial that is not strictly stable fails."""
+    if not rep["all_finite"]:
+        return f"non-finite executed filter quantities {rep['executed']}"
     if not rep["nonnegative"]:
         return (f"negative coefficient: M={rep['M']} gamma={rep['gamma']} "
                 f"T={rep['T']} (the family is nonnegative; kappa > 1 of the "
@@ -213,7 +237,7 @@ def filter_failure(rep):
     if rep["classification"] != "stable":
         return (f"executed filter polynomial not strictly stable: "
                 f"{rep['classification']} slacks {rep['jury_slacks_exact']} "
-                f"c1={rep['executed_c1']} c0={rep['executed_c0']} A={rep['A']}")
+                f"a={rep['a']} b={rep['b']} A={rep['A']}")
     return None
 
 
@@ -299,13 +323,3 @@ def native_point(h=H):
 def tss_boundary(T_value=T0):
     """(M, gamma, T) on the literal TSS boundary."""
     return 0.0, 0.0, T_value
-
-
-def exact_rational_polynomial(p):
-    """The executed polynomial's exact rational coefficients, for reports."""
-    A2 = onp.asarray(executed_filter_transition(coefficients(p),
-                                                p["fil_M"].dtype),
-                     onp.float64)
-    c1 = Fraction(float(A2[0, 0]))
-    c0 = Fraction(float(-A2[0, 1]))
-    return c1, c0

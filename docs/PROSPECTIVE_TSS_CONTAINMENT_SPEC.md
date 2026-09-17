@@ -122,17 +122,19 @@ the executed values and the achieved slacks.
 gaps do **not** certify strict stability of the *rounded* recurrence: for
 unbounded `M`, `A = M + h(gamma+T)` can round to `M`, `M/A` can round to one,
 and a slack can vanish when the actual coefficients are formed - e.g.
-`M = 1e18, gamma = 0, T = g_min` meets both gaps yet executes `c0 = 1`. What
-the gaps do give is a positive gap *in exact arithmetic* for every repaired
-point; no universal rounding guarantee is claimed. Acceptance is therefore a
-**gate on the executed coefficients**: the production step is applied to basis
-carries with no residual, which yields exactly the rounded normalized
-coefficients it executes, `[[c1, -c0], [1, 0]]`; finiteness and all three
-strict Jury conditions of that rounded polynomial are required after every
-update (in the executed dtype) and at every validation point (exact rational
-classification). A violation refuses the update and fails the run; no
-algebraically equivalent pre-rounding expression is substituted. This
-certifies only the isolated executed filter, not the closed-loop memory.
+`M = 1e18, gamma = 0, T = g_min` meets both gaps yet executes `b = M/A = 1`.
+What the gaps do give is a positive gap *in exact arithmetic* for every
+repaired point; no universal rounding guarantee is claimed. Acceptance is
+therefore a **gate on the executed coefficients** (as corrected for the
+review of 7613c86): the law is executed in its algebraically equivalent
+coefficient form `y_next = a y - b y_prev + c R - d R_prev`, whose rounded
+coefficients each compiled program forms once and returns; every executed
+`M, gamma, T, A, a, b, c, d` must be finite and `1 - a + b`, `1 + a + b`,
+`1 - b` strictly positive for the rounded `a, b` of `z^2 - a z + b` - for each
+update's own forward pass (executed dtype) and at every checkpoint (exact
+rational classification). A violation refuses the update and fails the run.
+This is a result about those rounded coefficients of the isolated filter, not
+a theorem about every floating-point trajectory or the closed-loop memory.
 
 Both exact points survive the executed set: literal TSS `M = gamma = 0`,
 `T = h` has `gamma + T = h`, slack `2h^2 - h^2(1+delta) > 0`; native
@@ -452,8 +454,17 @@ verdict wording separates the scientific generalized-versus-literal-TSS
 comparison from deployment selections; (s3) every family's final endpoint is
 fixed now by the feasible-then-diagnostic rule, inside the existing slots.
 Implementation note: both processing arms execute the same five-carry step, so
-the **executed** carry is 320 reals in both; the 256-real figure for
-`tss_processing` is the minimal carry its law needs, and both are reported.
+the **implemented** carry is 320 reals in both; 256 is only the theoretical
+minimum of a law with `M` fixed at zero, not the implemented cost.
+
+Implementation review of 7613c86: the law is executed in its algebraically
+equivalent coefficient form `y_next = a y - b y_prev + c R - d R_prev`
+(`a = [2M + h(gamma+T) - h^2]/A`, `b = M/A`, `c = [h^2 + hT]/A`, `d = hT/A`),
+and the acceptance gate classifies the rounded `a, b` each compiled program
+returns (`z^2 - a z + b`; slacks `1 - a + b`, `1 + a + b`, `1 - b`), which
+replaces the basis-response extraction; the native-point recovery is decided
+by direct trajectory agreement at TRAJ32, not by the withdrawn 1e-3 metric
+tolerance. Dispositions: protocol s11.
 
 
 - **R1** - `gamma + T > 0` was derived in §4 but missing from the declared

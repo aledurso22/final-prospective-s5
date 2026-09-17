@@ -48,7 +48,9 @@ def main(run_dir):
     print(f"streams {st.get('streams')} ranges {st.get('stream_ranges')}")
     print(f"arm law {st.get('arm_law')}")
     print(f"frozen coefficient leaves {st.get('arm_frozen_leaves')}")
+    print(f"executed form: {st.get('executed_form')}")
     print(f"filter constants {st.get('filter_constants')}")
+    print(f"recovery policy {st.get('recovery_policy')}")
     print(f"acceptance gate: {st.get('acceptance_gate')}")
     print(f"carry {st.get('carry')}")
 
@@ -60,30 +62,39 @@ def main(run_dir):
               f"{f(e.get('metrics_end'))}")
 
     sp = st.get("start_points", {})
-    print("\n--- declared start points and the exact-point recoveries ---")
+    print("\n--- start points (each check labelled with its scope) ---")
+    for k, v in (sp.get("scope") or {}).items():
+        print(f"  scope {k}: {v}")
     print(f"  tolerances {sp.get('tolerances')}")
     for seed, r in (sp.get("rows") or {}).items():
-        ef = (r.get("start_filter") or {})
-        nf = (r.get("native_point_filter") or {})
-        print(f"  seed {seed}: arms start identical="
-              f"{r.get('processing_arms_start_identical')} native-point "
-              f"recovery failures={r.get('native_point_recovery')} "
-              f"(strict-identity diagnostic "
-              f"{r.get('native_point_recovery_strict_identity_diagnostic')})")
-        print(f"    start filter M={f(ef.get('M'))} gamma={f(ef.get('gamma'))}"
-              f" T={f(ef.get('T'))} c1={f(ef.get('executed_c1'))} c0="
-              f"{f(ef.get('executed_c0'))} {ef.get('classification')}")
-        print(f"    native point   M={f(nf.get('M'))} gamma="
-              f"{f(nf.get('gamma'))} T={f(nf.get('T'))} "
-              f"{nf.get('classification')}")
-    print(f"  {sp.get('note')}")
+        print(f"  seed {seed}: storage identity="
+              f"{r.get('storage_identity_of_the_two_processing_start_trees')}"
+              f" DECISIVE direct recovery failures="
+              f"{r.get('direct_native_point_recovery_failures')}")
+        for row in r.get("direct_native_point_recovery") or []:
+            print(f"    episode {row.get('episode')} relative errors "
+                  f"{row.get('relative_errors')}")
+        agg = r.get("aggregate_native_point_differences") or {}
+        print(f"    aggregate (diagnostic): malformed={agg.get('malformed')} "
+              f"identical={agg.get('identical_within_declared_identity_tolerance')}")
+        for name, d in (agg.get("per_category") or {}).items():
+            print(f"      {name}: count difference {d.get('count_difference')}"
+                  f" CE rel {d.get('cross_entropy_relative')}")
+        for ef in r.get("start_executed_filter") or []:
+            print(f"    start executed a={f(ef.get('a'), 6)} b="
+                  f"{f(ef.get('b'), 6)} c={f(ef.get('c'), 6)} d="
+                  f"{f(ef.get('d'), 6)} {ef.get('classification')}")
+        print(f"    acceptance failures: start "
+              f"{r.get('start_acceptance_failure')} native point "
+              f"{r.get('native_point_acceptance_failure')}")
 
     pf = st.get("preflight", {})
     print("\n--- preflight (disposable state) ---")
     for r in pf.get("rows", []):
         print(f"  {r.get('arm'):<24} step {f(1e3 * r.get('step_s', 0), 2)}ms "
-              f"eval {f(1e3 * r.get('eval_s', 0), 1)}ms report "
-              f"{f(r.get('report_s', 0), 2)}s compile "
+              f"checkpoint {f(r.get('checkpoint_s', 0), 2)}s evaluation "
+              f"{f(r.get('evaluation_s', 0), 2)}s steps checked "
+              f"{r.get('measured_steps_checked')} compile "
               f"{f(r.get('compile_s_incurred'), 1)}s stored "
               f"{g(r, 'params', 'stored')} trainable "
               f"{g(r, 'params', 'trainable')} carry {r.get('carry')} failure "
@@ -102,7 +113,10 @@ def main(run_dir):
         for v in r.get("validation", []):
             print(f"  {'':<24}   update {v['update']:>3} primary "
                   f"{f(v['primary'])} revision_ce {f(v['revision_ce'], 4)} "
-                  f"retention {f(v['retention'])} recall {f(v['recall'])}")
+                  f"retention {f(v['retention'])} recall {f(v['recall'])} "
+                  f"accepted={v.get('accepted')} saved {v.get('params_file')}")
+            if v.get("failure"):
+                print(f"  {'':<24}     FAILURE {v['failure']}")
         print(f"  {'':<24} invalid={r['invalid']} gains "
               f"{r.get('training_gain')}")
         if r.get("frozen_leaf_differences"):
@@ -120,6 +134,7 @@ def main(run_dir):
               f"{c.get('lr')} primary {f(c.get('primary'))} retention "
               f"{f(c.get('retention'))} recall {f(c.get('recall'))} "
               f"feasible={c.get('feasible')} diagnostic={c.get('diagnostic')} "
+              f"tree {c.get('params_file')} "
               f"({row.get('n_feasible')} of {row.get('n_candidates')} "
               f"feasible)")
         print(f"  {'':<24} selected under: {c.get('selected_under')}")
@@ -129,7 +144,10 @@ def main(run_dir):
     print("\n--- deployment plan (separate from the scientific comparison) ---")
     for arm, pl in (st.get("deployment_plan") or {}).items():
         print(f"  {arm:<24} choice={pl.get('choice')} evaluate="
-              f"{pl.get('evaluate_arm')} trained development primary "
+              f"{pl.get('evaluate_arm')} family {pl.get('executed_family')} "
+              f"map: {pl.get('parameter_map')}")
+        print(f"  {'':<24} checkpoint {pl.get('chosen_checkpoint')}")
+        print(f"  {'':<24} trained development primary "
               f"{f(pl.get('trained_development_primary'))} feasible="
               f"{pl.get('trained_feasible')} best fallback "
               f"{pl.get('best_fallback')}")
@@ -155,7 +173,8 @@ def main(run_dir):
                 continue
             hs.append(h)
             print(f"  {a:<24} {s} {metrics_line(h)} updates "
-                  f"{r.get('updates')} wall {f(r['wall_s'], 1)}s source "
+                  f"{r.get('updates')} ({r.get('endpoint_kind')}) wall "
+                  f"{f(r['wall_s'], 1)}s source "
                   f"{r.get('source')}")
             print(f"  {'':<24}    {categories_full(h)}")
             print(f"  {'':<24}    state norms {h.get('state_norms')}")
@@ -178,7 +197,8 @@ def main(run_dir):
                   f"no_measured_decrease={c.get('no_measured_decrease')} "
                   f"safeguard(-1pp)={c.get('safeguard_passed_minus_one_pp')} "
                   f"constrained_screen_available="
-                  f"{c.get('constrained_screen_available')}")
+                  f"{c.get('constrained_screen_available')} endpoint kinds "
+                  f"{c.get('endpoint_kinds')}")
             print(f"    mean primary {f(c['mean_primary_difference'])} paired "
                   f"{c['paired_primary_differences']} all-positive "
                   f"{c['positive_in_all_seeds']}")
@@ -201,22 +221,26 @@ def main(run_dir):
     print("\n--- final runs: executed coefficients, gate and repair ---")
     for r in rows:
         cf = r.get("coefficients_final") or {}
-        ef = cf.get("executed_filter")
+        efs = cf.get("executed_filter")
         print(f"  {r['rule']:<24} seed {r['seed']} {r['config']} law "
-              f"{r.get('law')} stored {g(r, 'params', 'stored')} trainable "
+              f"{r.get('law')} {r.get('endpoint_kind')} stored "
+              f"{g(r, 'params', 'stored')} trainable "
               f"{g(r, 'params', 'trainable')} carry {r['carry']} invalid "
-              f"{r['invalid']}")
-        if ef:
-            print(f"      M {f(ef.get('M'), 6)} gamma {f(ef.get('gamma'), 6)} "
-                  f"T {f(ef.get('T'), 6)} A {f(ef.get('A'), 6)}")
-            print(f"      executed c1 {f(ef.get('executed_c1'), 6)} c0 "
-                  f"{f(ef.get('executed_c0'), 6)} {ef.get('classification')} "
-                  f"Jury slacks {ef.get('jury_slacks_exact')}")
-            print(f"      declared gaps: gamma+T {f(ef.get('gap_gamma_plus_T'), 6)}"
-                  f" filter {f(ef.get('gap_filter'), 6)}; at TSS boundary="
-                  f"{ef.get('at_tss_boundary')} at native point="
-                  f"{ef.get('at_native_point')}")
-            print(f"      {ef.get('note')}")
+              f"{r['invalid']} endpoint tree {r.get('endpoint_params_file')}")
+        if efs:
+            for ef in efs:
+                print(f"      executed M {f(ef.get('M'), 6)} gamma "
+                      f"{f(ef.get('gamma'), 6)} T {f(ef.get('T'), 6)} A "
+                      f"{f(ef.get('A'), 6)} a {f(ef.get('a'), 6)} b "
+                      f"{f(ef.get('b'), 6)} c {f(ef.get('c'), 6)} d "
+                      f"{f(ef.get('d'), 6)}")
+                print(f"      {ef.get('classification')} Jury slacks "
+                      f"{ef.get('jury_slacks_exact')}; declared gaps gamma+T "
+                      f"{f(ef.get('gap_gamma_plus_T'), 6)} filter "
+                      f"{f(ef.get('gap_filter'), 6)}; TSS boundary="
+                      f"{ef.get('at_tss_boundary')} native point="
+                      f"{ef.get('at_native_point')}")
+            print(f"      {efs[0].get('note')}")
             print(f"      {cf.get('carry_note')}")
             print(f"      {cf.get('scope_note')}")
         elif cf.get("table_transition"):

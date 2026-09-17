@@ -1,28 +1,31 @@
 """Focused checks for the TSS containment study. CLUSTER-ONLY.
 
-Scope: the new residual-processing law, its two exact points, the executed
-filter gate, the feasibility repair, the coefficient gradients and the frozen
-selection/deployment logic. The completed studies' suites are not re-run.
+Scope: the processing law in its executed coefficient form, its exact points
+against separately coded original-law references, the executed-coefficient
+gate, the feasibility repair, coefficient gradients against an independent
+sensitivity, checkpoint validation and persistence in the actual runner
+(including zero-update endpoints and an invalid intermediate checkpoint), and
+the frozen selection/deployment logic. The completed studies' suites are not
+re-run.
 
 PREDECLARED TOLERANCES, unchanged from the completed studies:
     ID64    1e-9   relative: float64 identities between recurrences
-    GRAD64  1e-8   relative per leaf, absolute floor 1e3 eps64 G
     SENS64  1e-6   relative: coefficient derivative vs the INDEPENDENT
                    sequential float64 sensitivity
-    EXACT64 1e-12  relative: executed transition versus its analytic form
+    EXACT64 1e-12  relative: coefficients recomputed in another context
 
-Comparison policy (review R3): bitwise equality is asserted only for stored
-leaves that must not change and for genuinely shared executed operations.
-Everything computed by two separately compiled recurrences is compared
-finite-first at the tolerances above. Derivatives are NOT required to be
-nonzero: they must AGREE with the independent sensitivity, including
-legitimate zeros, and a fixture that is analytically degenerate is reported
-as a fixture defect.
+Comparison policy (review R3 of bdc1c19 and R2/R5 of 7613c86): bitwise
+equality only for stored leaves that must not change, genuinely shared
+executed operations, and coefficients whose IEEE arithmetic is exact at the
+named points. Everything else is compared FINITE FIRST at the tolerances
+above. Derivatives are not required to be nonzero: they must agree with the
+independent sensitivity; a degenerate analytic fixture is a fixture defect.
 
 PM_SOURCE_RUN must point at the completed replication run (read-only); a
 missing source is a FAILURE, never a skip.
 """
 
+import json
 import math
 import os
 import sys
@@ -47,10 +50,14 @@ from experiments.prospective_momentum import replication_sources as RS  # noqa
 from experiments.prospective_momentum import study as ST          # noqa: E402
 from experiments.prospective_momentum import tss_containment as TC  # noqa
 
-ID64, GRAD64, SENS64, EXACT64 = 1e-9, 1e-8, 1e-6, 1e-12
+ID64, SENS64, EXACT64 = 1e-9, 1e-6, 1e-12
 F64 = onp.float64
 EPS64 = float(onp.finfo(F64).eps)
 H = FL.H
+
+
+def _all_finite(*xs):
+    return all(bool(onp.all(onp.isfinite(onp.asarray(x, F64)))) for x in xs)
 
 
 def _finite_tree(*trees):
@@ -91,7 +98,6 @@ def _source_native_f64():
     run = os.environ.get("PM_SOURCE_RUN", TC.SOURCE_RUN)
     assert os.path.isdir(RS.sources_dir(run)), \
         f"read-only source run {run} is REQUIRED"
-    import json
     with open(os.path.join(RS.sources_dir(run), "manifest.json")) as fh:
         manifest = json.load(fh)
     e = RS.find_entry(manifest, TC.SOURCE_DEV, TC.SOURCE_FAMILY)
@@ -104,11 +110,20 @@ def _ep(seed, i=0):
                                               "label")}
 
 
+def _leaves(M, gam, T, dtype=jnp.float64):
+    return {"fil_M": jnp.full((1,), M, dtype=dtype),
+            "fil_gamma": jnp.full((1,), gam, dtype=dtype),
+            "fil_T": jnp.full((1,), T, dtype=dtype)}
+
+
 def _tree(pn, M, gam, T):
-    dt = pn["A_log"].dtype
-    return dict(pn, fil_M=jnp.full((1,), M, dtype=dt),
-                fil_gamma=jnp.full((1,), gam, dtype=dt),
-                fil_T=jnp.full((1,), T, dtype=dt))
+    return dict(pn, **_leaves(M, gam, T, pn["A_log"].dtype))
+
+
+def _executed(p):
+    """Coefficients of a tree recomputed in this context (a diagnostic
+    stand-in where no compiled program's record is at hand)."""
+    return [FL.coefficient_values(FL.coefficients(p))]
 
 
 def _schedule(rs, n, dv=3, dk=4):
@@ -121,10 +136,9 @@ def _schedule(rs, n, dv=3, dk=4):
 
 
 def _run_filtered(sched, M, gam, T, dv=3, dk=4):
-    """The PRODUCTION step over a schedule, returning W, U, y and the masked
-    residuals it actually formed (closed loop: R depends on W)."""
-    A = M + H * (gam + T)
-    coeff = tuple(jnp.asarray(x, jnp.float64) for x in (M, gam, T, A))
+    """The PRODUCTION coefficient-form step over a schedule, returning W, U,
+    y and the masked residuals it actually formed (closed loop)."""
+    coeff = FL.coefficients(_leaves(M, gam, T))
     carry = tuple(jnp.zeros((dv, dk), jnp.float64) for _ in range(5))
     W, U, Y, R = [], [], [], []
     for t in range(len(sched["k"])):
@@ -162,62 +176,75 @@ def _native_run(sched, dv=3, dk=4):
     return onp.array(W), onp.array(U)
 
 
-# ======================= 1. the exact points of the placement ===============
+# ======================= 1. the executed form and the exact points ==========
+@pytest.mark.parametrize("M,gam,T", [(0.0, 0.0, 0.6), (0.0, 0.0, 4.0),
+                                     (0.5, 0.3, 2.0), (2.0, 0.0, 0.7),
+                                     (0.0, 1.0, 0.0), (0.3, 0.25, 0.75)])
+def test_coefficient_form_is_the_original_law(M, gam, T):
+    """Algebraic equivalence, checked against the SEPARATELY CODED original
+    form `FL.filtered_reference` on the same closed-loop residuals."""
+    rs = onp.random.RandomState(1)
+    s = _schedule(rs, 40)
+    _, _, Y, R, _ = _run_filtered(s, M, gam, T)
+    ref = FL.filtered_reference(list(R), M, gam, T, h=H)
+    assert _rel(Y, onp.array(ref)) < ID64, (M, gam, T)
+    A = M + H * (gam + T)
+    c = FL.coefficient_values(FL.coefficients(_leaves(M, gam, T)))
+    _close("a", c["a"], (2 * M + H * (gam + T) - H * H) / A, EXACT64)
+    _close("b", c["b"], M / A, EXACT64)
+    _close("c", c["c"], (H * H + H * T) / A, EXACT64)
+    _close("d", c["d"], H * T / A, EXACT64)
+
+
 @pytest.mark.parametrize("T", [0.6, 1.0, 4.0])
 def test_boundary_is_literal_tss_processing(T):
-    """M = gamma = 0: the executed processing state equals literal TSS Eq.
-    (17) driven by the SAME closed-loop masked residuals, at the same clock,
-    initialization and same-token output convention."""
-    rs = onp.random.RandomState(1)
+    rs = onp.random.RandomState(2)
     s = _schedule(rs, 40)
     _, _, Y, R, _ = _run_filtered(s, 0.0, 0.0, T)
     ref = OD.tss_processing_reference(list(R), tau=T, h=H)
     assert _rel(Y, onp.array(ref)) < ID64, T
 
 
-def test_native_point_is_exactly_native_momentum():
-    """(M, gamma, T) = (0, h, 0): y_next = R_t, so the Momentum update below
-    is the native one. Separately compiled recurrences, so this is the
-    declared float64 identity tolerance, never bitwise."""
-    rs = onp.random.RandomState(2)
+def test_exact_coefficients_at_the_two_points():
+    """IEEE arithmetic is exact at these points, so bitwise equality is a
+    valid expectation here (not a cross-compilation claim)."""
+    nat = FL.coefficient_values(FL.coefficients(_leaves(*FL.native_point())))
+    assert (nat["a"], nat["b"], nat["c"], nat["d"]) == (0.0, 0.0, 1.0, 0.0)
+    tss = FL.coefficient_values(FL.coefficients(_leaves(0.0, 0.0, H)))
+    assert (tss["a"], tss["b"], tss["c"], tss["d"]) == (0.0, 0.0, 2.0, 1.0)
+
+
+def test_native_point_is_native_momentum():
+    rs = onp.random.RandomState(3)
     s = _schedule(rs, 45)
-    M, gam, T = FL.native_point()
-    Wf, Uf, Y, R, _ = _run_filtered(s, M, gam, T)
+    Wf, Uf, Y, R, _ = _run_filtered(s, *FL.native_point())
     Wn, Un = _native_run(s)
-    assert _rel(Wf, Wn) < ID64
-    assert _rel(Uf, Un) < ID64
-    assert _rel(Y, R) < ID64                   # y_next = R_t
+    assert _rel(Wf, Wn) < ID64 and _rel(Uf, Un) < ID64
+    assert _rel(Y, R) < ID64
 
 
 @pytest.mark.parametrize("kappa", [0.0, 0.5, 1.0])
 def test_two_tap_mapping_inside_the_family(kappa):
-    """M = 0, gamma + T = h reproduces the two-tap operator with kappa = T/h,
-    for kappa <= 1 (gamma >= 0)."""
-    rs = onp.random.RandomState(3)
+    rs = onp.random.RandomState(4)
     s = _schedule(rs, 35)
     M, gam, T = FL.two_tap_mapping(kappa)
     assert gam >= 0.0 and FL.mapping_admissible(kappa)
     Wf, Uf, _, _, _ = _run_filtered(s, M, gam, T)
     Wo, Uo, _ = _run_other(OD.ordinary_step, s, kappa, 3)
-    assert _rel(Wf, Wo) < ID64, kappa
-    assert _rel(Uf, Uo) < ID64, kappa
+    assert _rel(Wf, Wo) < ID64 and _rel(Uf, Uo) < ID64
 
 
 @pytest.mark.parametrize("kappa", [1.87, 2.14, 2.61])
 def test_learned_operator_horizons_are_outside_the_family(kappa):
-    """The completed study learned kappa in 1.87-2.61; those map to negative
-    gamma and are REFUSED, not silently accepted: the operator stays a
-    separate comparator, outside the containment claim."""
     M, gam, T = FL.two_tap_mapping(kappa)
     assert gam < 0.0 and not FL.mapping_admissible(kappa)
     pn = _source_native_f64()
     bad = _tree(pn, M, gam, T)
-    assert FL.filter_failure(FL.filter_report(bad)) is not None
+    assert FL.filter_failure(FL.report_from_tree(bad)) is not None
     repaired, tel = FL.repair(bad)
-    assert float(repaired["fil_gamma"][0]) == 0.0       # clamped, not learned
+    assert float(repaired["fil_gamma"][0]) == 0.0
     assert int(tel["n_repaired"]) >= 1
-    # the repaired point is NOT the two-tap operator any more
-    rs = onp.random.RandomState(4)
+    rs = onp.random.RandomState(5)
     s = _schedule(rs, 20)
     Wf, _, _, _, _ = _run_filtered(
         s, *(float(repaired[k][0]) for k in FL.LEAVES))
@@ -225,21 +252,7 @@ def test_learned_operator_horizons_are_outside_the_family(kappa):
     assert _rel(Wf, Wo) > 1e-3
 
 
-def test_T_equals_h_is_both_tss_and_the_kappa_one_operator():
-    rs = onp.random.RandomState(5)
-    s = _schedule(rs, 25)
-    _, _, Y, R, _ = _run_filtered(s, 0.0, 0.0, H)
-    prev = onp.zeros_like(R[0])
-    for t in range(len(R)):
-        assert _rel(Y[t], 2.0 * R[t] - prev) < ID64, t
-        prev = R[t]
-    assert _rel(Y, onp.array(OD.tss_processing_reference(list(R), tau=H,
-                                                         h=H))) < ID64
-
-
 def test_episode_start_values():
-    """y = y_prev = R_prev = 0 at episode start, so the first token gives
-    (h^2 + hT)/A R_0, i.e. (1 + h/T) R_0 on the boundary and 2 R_0 at T = h."""
     rs = onp.random.RandomState(6)
     s = _schedule(rs, 3)
     s["m"][0] = 1.0
@@ -251,8 +264,8 @@ def test_episode_start_values():
     assert _rel(Y[0], 2.0 * R[0]) < ID64
 
 
-# ======================= 2. rollout, streaming and counts ===================
-def test_rollout_streaming_and_carry_counts():
+# ======================= 2. rollout, streaming, counts and loss =============
+def test_rollout_streaming_carries_and_counts():
     pn = _source_native_f64()
     p = PM.add_extension(pn, FL.FILTERED)
     ep = _ep(9700)
@@ -260,20 +273,41 @@ def test_rollout_streaming_and_carry_counts():
     a = PM.rollout(FL.FILTERED, p, {k: v[:29] for k, v in ep.items()})
     b = PM.rollout(FL.FILTERED, p, {k: v[29:] for k, v in ep.items()},
                    carry0=a["final_carry"])
+    assert _all_finite(full["logits"], *full["final_carry"],
+                       full["proc_max_abs"])
     assert _rel(jnp.concatenate([a["logits"], b["logits"]]),
                 full["logits"]) < ID64
     for x, y in zip(b["final_carry"], full["final_carry"]):
         assert _rel(x, y) < ID64
     assert len(full["final_carry"]) == 5
+    assert set(full["coeff"]) == set(FL.COEFF_NAMES)
     assert FL.CARRY_EXECUTED == 320 == PD.CARRY[FL.FILTERED]
-    assert FL.CARRY_MINIMAL_M_ZERO == 256
     counts = TC.parameter_counts(TC.GEN, p)
     assert counts["stored"] == 572 and counts["trainable"] == 572
+    assert counts["carry_real_numbers_implemented"] == 320
     tss = TC.parameter_counts(TC.TSS, p)
     assert tss["stored"] == 572 and tss["trainable"] == 570
-    assert tss["frozen_constants"] == 2
-    assert counts["carry_real_numbers_executed"] == 320
-    assert counts["carry_real_numbers_minimal_if_M_zero"] == 256
+    assert tss["carry_real_numbers_implemented"] == 320
+
+
+def test_other_rules_keep_their_rollout_outputs():
+    pn = _source_native_f64()
+    ep = _ep(9704)
+    for law in ("prospective_momentum", OD.ORDINARY):
+        out = PM.rollout(law, PM.add_extension(pn, law), ep)
+        assert "proc_max_abs" not in out
+        assert out["logits"].shape[0] == ep["key_id"].shape[0]
+
+
+def test_study_loss_is_the_unchanged_loss():
+    pn = _source_native_f64()
+    p = _tree(pn, 0.3, 0.1, 1.4)
+    eps = {k: jnp.asarray(v) for k, v in TK.generate_batch(9705, 2).items()
+           if k in ("key_id", "val_id", "event", "label")}
+    lf, auxf = TC.batch_loss_f(FL.FILTERED, p, eps)
+    ls, _ = ST.batch_loss(FL.FILTERED, p, eps)
+    _close("study loss vs the shared loss", lf, ls, ID64)
+    assert _all_finite(*auxf["coeff"], auxf["proc_max_abs"])
 
 
 def test_declared_start_is_literal_tss_not_native():
@@ -282,70 +316,99 @@ def test_declared_start_is_literal_tss_not_native():
     assert float(p["fil_M"][0]) == 0.0 and float(p["fil_gamma"][0]) == 0.0
     assert float(p["fil_T"][0]) == FL.T0 == H
     ep = _ep(9701)
-    start = PM.rollout(FL.FILTERED, p, ep)["logits"]
     native = PM.rollout("momentum_delta", pn, ep)["logits"]
-    assert _rel(start, native) > 1e-4, ("the TSS start must NOT be the native "
-                                        "function")
-    nat_pt = TC.native_point_tree(pn)
-    assert _rel(PM.rollout(FL.FILTERED, nat_pt, ep)["logits"], native) < ID64
+    assert _rel(PM.rollout(FL.FILTERED, p, ep)["logits"], native) > 1e-4
+    assert _rel(PM.rollout(FL.FILTERED, TC.native_point_tree(pn),
+                           ep)["logits"], native) < ID64
 
 
-def test_recovery_tolerance_policy_is_finite_first_and_bounded():
-    def metrics(acc, ce):
-        cat = {c: dict(accuracy=acc, cross_entropy=ce, n=100)
+def test_count_differences_use_integer_counts():
+    def metrics(correct, n, ce):
+        cat = {c: dict(accuracy=correct / n, cross_entropy=ce, n=n)
                for c in TK.CATEGORIES}
         return {f: dict(by_category=cat) for f in TK.FAMILIES}
-    base = metrics(0.5, 1.0)
-    assert TC.recovery_differences(base, metrics(0.5, 1.0))[0] == []
-    ok = metrics(0.5 + TC.RECOVERY_QUERY_TOL / 100.0,
-                 1.0 * (1 + TC.RECOVERY_CE_REL / 2))
-    assert TC.recovery_differences(base, ok)[0] == []
-    bad = metrics(0.5 + 5.0 / 100.0, 1.0)
-    assert TC.recovery_differences(base, bad)[0]
-    nan = metrics(float("nan"), 1.0)
-    assert TC.recovery_differences(base, nan)[0]
+    base = metrics(50, 100, 1.0)
+    same = TC.count_differences(base, metrics(50, 100, 1.0))
+    assert same["identical_within_declared_identity_tolerance"]
+    assert same["decisive"] is False and not same["malformed"]
+    # the review's case: 0.5 vs 0.51 at n = 100 is exactly ONE count
+    one = TC.count_differences(base, metrics(51, 100, 1.0))
+    assert not one["malformed"]
+    assert all(v["count_difference"] == 1
+               for v in one["per_category"].values())
+    assert not one["identical_within_declared_identity_tolerance"]
+    two = TC.count_differences(base, metrics(52, 100, 1.0))
+    assert all(v["count_difference"] == 2
+               for v in two["per_category"].values())
+    assert TC.count_differences(base, metrics(50, 100,
+                                              float("nan")))["malformed"]
+    assert TC.count_differences(base, metrics(50, 99, 1.0))["malformed"]
+    broken = metrics(50, 100, 1.0)
+    for c in TK.CATEGORIES:
+        broken["recall"]["by_category"][c]["accuracy"] = 0.505
+    assert TC.count_differences(base, broken)["malformed"]
 
 
-# ======================= 3. the executed filter gate ========================
+# ======================= 3. the executed-coefficient gate ===================
 @pytest.mark.parametrize("M,gam,T", [(0.0, 0.0, 1.0), (0.0, 1.0, 0.0),
                                      (0.5, 0.3, 2.0), (2.0, 0.0, 0.7),
-                                     (0.0, 0.25, 0.75)])
-def test_executed_transition_is_the_declared_polynomial(M, gam, T):
-    pn = _source_native_f64()
-    rep = FL.filter_report(_tree(pn, M, gam, T))
+                                     (0.0, 0.25, 0.75), (1.0, 0.0, 0.0),
+                                     (0.0, 0.2, 0.2)])
+def test_classification_matches_the_strict_conditions(M, gam, T):
+    rep = FL.report_from_tree(_leaves(M, gam, T))
     A = M + H * (gam + T)
-    assert abs(rep["A"] - A) <= EXACT64 * max(1.0, A)
-    _close("c1", rep["executed_c1"], 1.0 + (M - H * H) / A, EXACT64)
-    _close("c0", rep["executed_c0"], M / A, EXACT64)
-    strict = (A > 0 and gam + T > 0
-              and 4 * M + 2 * H * (gam + T) > H * H)
+    strict = (A > 0 and gam + T > 0 and 4 * M + 2 * H * (gam + T) > H * H)
     assert (rep["classification"] == "stable") == strict, rep
 
 
 def test_missing_damping_counterexample_is_refused_and_repaired():
-    """h = 1, M = 1, gamma = T = 0 passes A > 0 and 4M + 2h(gamma+T) > h^2,
-    but gamma + T = 0 gives z^2 - z + 1: roots on the unit circle."""
-    pn = _source_native_f64()
-    bad = _tree(pn, 1.0, 0.0, 0.0)
-    rep = FL.filter_report(bad)
-    assert rep["A"] > 0 and 4 * rep["M"] + 2 * H * (rep["gamma"] + rep["T"]) \
-        > H * H
-    assert rep["classification"] != "stable"
+    rep = FL.report_from_tree(_leaves(1.0, 0.0, 0.0))
+    assert rep["A"] > 0 and 4 * rep["M"] > H * H
+    assert (rep["a"], rep["b"]) == (1.0, 1.0)           # z^2 - z + 1
+    assert rep["classification"] == "neutral"
     assert FL.filter_failure(rep) is not None
-    fixed, tel = FL.repair(bad)
+    fixed, tel = FL.repair(_leaves(1.0, 0.0, 0.0))
     assert float(fixed["fil_gamma"][0] + fixed["fil_T"][0]) > 0.0
-    assert float(tel["gap_gamma_plus_T"]) >= 0.0
-    good = FL.filter_report(fixed)
-    assert good["classification"] == "stable", good
+    good = FL.report_from_tree(fixed)
+    assert good["classification"] == "stable"
     assert FL.filter_failure(good) is None
 
 
-def test_repair_clamps_restores_and_is_idempotent():
+def test_gate_refuses_rounded_coefficients_the_gaps_would_accept():
+    rep = FL.report_from_tree(_leaves(1e18, 0.0, FL.G_MIN))
+    assert rep["gap_gamma_plus_T"] >= 0.0 and rep["gap_filter"] >= 0.0
+    assert rep["b"] == 1.0
+    assert rep["classification"] != "stable"
+    assert FL.filter_failure(rep) is not None
+
+
+def test_nonfinite_executed_quantities_are_refused():
+    base = FL.coefficient_values(FL.coefficients(_leaves(0.2, 0.1, 1.0)))
+    for k in FL.COEFF_NAMES:
+        bad = dict(base, **{k: float("nan")})
+        assert FL.filter_failure(FL.filter_report(bad)) is not None, k
+        g = FL.in_loop_guard(tuple(jnp.asarray(bad[n]) for n in
+                                   FL.COEFF_NAMES))
+        assert not bool(g["ok"]), k
+
+
+def test_guard_and_report_classify_the_rollouts_own_values():
+    """The acceptance record is taken from the coefficients a compiled
+    program RETURNED; the host guard and the exact report agree on them."""
     pn = _source_native_f64()
+    ep = _ep(9702)
+    for M, gam, T in ((0.0, 0.0, 1.0), (0.4, 0.1, 1.2), (1.0, 0.0, 0.0)):
+        out = TC.rollout_outputs(FL.FILTERED, _tree(pn, M, gam, T), ep)
+        vals = FL.coefficient_values(out["coeff"])
+        g = FL.in_loop_guard(out["coeff"])
+        rep = FL.filter_report(vals)
+        assert bool(g["ok"]) == (FL.filter_failure(rep) is None), (M, gam, T)
+
+
+def test_repair_clamps_restores_and_is_idempotent():
     rs = onp.random.RandomState(7)
     for _ in range(12):
-        p = _tree(pn, rs.uniform(-1, 2), rs.uniform(-1, 1),
-                  rs.uniform(-1, 3))
+        p = _leaves(rs.uniform(-1, 2), rs.uniform(-1, 1), rs.uniform(-1, 3))
         once, tel = FL.repair(p)
         twice, tel2 = FL.repair(once)
         for k in FL.LEAVES:
@@ -355,67 +418,39 @@ def test_repair_clamps_restores_and_is_idempotent():
         assert int(tel2["n_repaired"]) == 0
         assert float(tel["gap_gamma_plus_T"]) >= 0.0
         assert float(tel["gap_filter"]) >= 0.0
-        assert FL.filter_failure(FL.filter_report(once)) is None
+        assert FL.filter_failure(FL.report_from_tree(once)) is None
 
 
-def test_repair_fixes_the_two_exact_points_and_respects_frozen_leaves():
-    pn = _source_native_f64()
+def test_repair_fixes_the_exact_points_and_respects_frozen_leaves():
     for M, gam, T in (FL.tss_boundary(), FL.native_point()):
-        p = _tree(pn, M, gam, T)
+        p = _leaves(M, gam, T)
         out, tel = FL.repair(p)
         for k in FL.LEAVES:
-            assert onp.array_equal(onp.asarray(out[k]), onp.asarray(p[k])), k
+            assert onp.array_equal(onp.asarray(out[k]), onp.asarray(p[k]))
         assert int(tel["n_repaired"]) == 0
-    # a frozen leaf is restored bitwise even when the proposal is negative
-    p = _tree(pn, -0.5, -0.25, 0.9)
-    out, _ = FL.repair(p, frozen=("fil_M", "fil_gamma"))
+    out, _ = FL.repair(_leaves(-0.5, -0.25, 0.9),
+                       frozen=("fil_M", "fil_gamma"))
     assert float(out["fil_M"][0]) == -0.5
     assert float(out["fil_gamma"][0]) == -0.25
 
 
-def test_gate_refuses_a_mass_that_rounds_the_filter_onto_the_circle():
-    """Clearance s1: an unbounded M makes A round to M and M/A round to one.
-    The executed polynomial is then refused; the declared gaps alone would
-    not have caught it."""
+def test_validate_requires_executed_records_and_the_boundary():
     pn = _source_native_f64()
-    huge = _tree(pn, 1e18, 0.0, FL.G_MIN)
-    rep = FL.filter_report(huge)
-    assert rep["gap_gamma_plus_T"] >= 0.0        # the declared gap holds
-    assert rep["executed_c0"] == 1.0             # but the rounded det is one
-    assert rep["classification"] != "stable"
-    assert FL.filter_failure(rep) is not None
-
-
-def test_in_loop_guard_reads_the_same_executed_coefficients():
-    """Genuinely shared executed operation: the guard and the report call the
-    same `executed_filter_transition` on the same coefficients, so equality
-    here is exact by construction (not a cross-compilation claim)."""
-    pn = _source_native_f64()
-    for M, gam, T in ((0.0, 0.0, 1.0), (0.4, 0.1, 1.2), (1.0, 0.0, 0.0)):
-        p = _tree(pn, M, gam, T)
-        g = FL.in_loop_guard(FL.coefficients(p), p["fil_M"].dtype)
-        rep = FL.filter_report(p)
-        assert float(g["c1"]) == rep["executed_c1"]
-        assert float(g["c0"]) == rep["executed_c0"]
-        assert bool(g["ok"]) == (FL.filter_failure(rep) is None)
-
-
-def test_validate_refuses_an_unstable_arm_and_a_moved_stored_constant():
-    pn = _source_native_f64()
-    assert TC.validate(TC.GEN, _tree(pn, 0.0, 0.0, 1.0)) is None
-    assert TC.validate(TC.TSS, _tree(pn, 0.0, 0.0, 1.0)) is None
-    assert TC.validate(TC.GEN, _tree(pn, 1.0, 0.0, 0.0)) is not None
-    moved = TC.validate(TC.TSS, _tree(pn, 0.2, 0.0, 1.0))
-    assert moved is not None and "boundary" in moved
+    ok = _tree(pn, 0.0, 0.0, 1.0)
+    assert TC.validate(TC.GEN, ok, _executed(ok)) is None
+    assert TC.validate(TC.TSS, ok, _executed(ok)) is None
+    assert "no executed" in TC.validate(TC.GEN, ok, None)
+    bad = _tree(pn, 1.0, 0.0, 0.0)
+    assert TC.validate(TC.GEN, bad, _executed(bad)) is not None
+    moved = _tree(pn, 0.2, 0.0, 1.0)
+    msg = TC.validate(TC.TSS, moved, _executed(moved))
+    assert msg is not None and "boundary" in msg
 
 
 # ======================= 4. gradients against an independent reference ======
 def _independent_sensitivity(p, ep, direction):
-    """INDEPENDENTLY CODED sequential float64 forward sensitivity of the query
-    cross-entropy with respect to (M, gamma, T) in the given direction. It
-    reimplements the rollout's recurrence and its tangent; only the
-    coefficient-independent inputs (preprocessing, gates, readout) are shared.
-    `direction` is (dM, dgamma, dT)."""
+    """INDEPENDENTLY CODED sequential float64 forward sensitivity in the
+    ORIGINAL form of the law. Returns (loss, dloss, final W, U, y)."""
     from experiments.adaptive_memory import model as AM
     e = AM.sanitize_episode(ep)
     key_id, val_id, event = e["key_id"], e["val_id"], e["event"]
@@ -434,9 +469,8 @@ def _independent_sensitivity(p, ep, direction):
     qq = (onp.asarray(e["event"]) == TK.QUERY).astype(F64)
     M, gam, T = (float(onp.asarray(p[k]).ravel()[0]) for k in FL.LEAVES)
     dM, dgam, dT = direction
-    h = H
-    A = M + h * (gam + T)
-    dA = dM + h * (dgam + dT)
+    A = M + H * (gam + T)
+    dA = dM + H * (dgam + dT)
     d_v, d_k = vals.shape[1], keys.shape[1]
     Z = lambda: onp.zeros((d_v, d_k))                          # noqa: E731
     W, U, y, y_prev, Rp = Z(), Z(), Z(), Z(), Z()
@@ -449,10 +483,9 @@ def _independent_sensitivity(p, ep, direction):
         Wb, dWb = al[t] * W, al[t] * dW
         R = m * onp.outer(Wb @ k - v, k)
         dR = m * onp.outer(dWb @ k, k)
-        N = M * (y - y_prev) + h * h * (R - y) + h * T * (R - Rp)
-        dN = (dM * (y - y_prev) + M * (dy - dy_prev)
-              + h * h * (dR - dy) + h * dT * (R - Rp)
-              + h * T * (dR - dRp))
+        N = M * (y - y_prev) + H * H * (R - y) + H * T * (R - Rp)
+        dN = (dM * (y - y_prev) + M * (dy - dy_prev) + H * H * (dR - dy)
+              + H * dT * (R - Rp) + H * T * (dR - dRp))
         y_new = y + N / A
         dy_new = dy + dN / A - N * dA / (A * A)
         U_new = mu[t] * U + eta[t] * y_new
@@ -468,10 +501,9 @@ def _independent_sensitivity(p, ep, direction):
     logp = z - onp.log(onp.exp(z).sum(axis=1))[:, None]
     pr = onp.exp(logp)
     ce = -logp[onp.arange(L), lab] * qq
-    dce = -(dlogits[onp.arange(L), lab]
-            - (pr * dlogits).sum(axis=1)) * qq
+    dce = -(dlogits[onp.arange(L), lab] - (pr * dlogits).sum(axis=1)) * qq
     n = max(qq.sum(), 1.0)
-    return float(ce.sum() / n), float(dce.sum() / n)
+    return float(ce.sum() / n), float(dce.sum() / n), W, U, y
 
 
 def _loss_fn(p, ep):
@@ -489,75 +521,89 @@ def _loss_fn(p, ep):
     return f
 
 
+def sensitivity_decision(label, val, jvp, ref_val, ref_deriv, fwd_val, hstep,
+                         rel_tol):
+    """Finite FIRST for every piece of evidence (review R5), then the
+    decisive analytic comparison, then the diagnostic forward difference."""
+    fails = []
+    pieces = dict(loss=val, jvp=jvp, reference_loss=ref_val,
+                  reference_derivative=ref_deriv, perturbed_loss=fwd_val)
+    nonfinite = [k for k, x in pieces.items() if not _all_finite(x)]
+    if nonfinite:
+        return [f"{label}: non-finite {nonfinite}"], None
+    fd = (float(fwd_val) - float(val)) / hstep
+    err = abs(float(jvp) - ref_deriv) / max(abs(ref_deriv), 1e-30)
+    if not _all_finite(fd, err):
+        return [f"{label}: non-finite FD or error"], None
+    if abs(float(val) - ref_val) > ID64 * max(abs(ref_val), 1.0):
+        fails.append(f"{label}: reference primal loss differs")
+    if abs(ref_deriv) <= 1e-12:
+        fails.append(f"FIXTURE DEFECT: degenerate sensitivity for {label}")
+    elif err > rel_tol:
+        fails.append(f"{label}: derivative error {err:.2e}")
+    resolvable = abs(float(jvp)) >= 100 * EPS64 * max(abs(float(val)),
+                                                      1.0) / hstep
+    return fails, dict(fd=fd, err=err, resolvable=bool(resolvable))
+
+
+def test_sensitivity_decision_rejects_nan_evidence():
+    nan = float("nan")
+    assert sensitivity_decision("x", 1.0, 0.5, 1.0, nan, 1.0, 1e-6,
+                                SENS64)[0]
+    assert sensitivity_decision("x", 1.0, 0.5, nan, 0.5, 1.0, 1e-6,
+                                SENS64)[0]
+    assert sensitivity_decision("x", 1.0, 0.5, 1.0, 0.5, nan, 1e-6,
+                                SENS64)[0]
+    fails, info = sensitivity_decision("x", 1.0, 0.5, 1.0, 0.5,
+                                       1.0 + 0.5e-6, 1e-6, SENS64)
+    assert not fails and info is not None
+
+
 @pytest.mark.parametrize("point,direction,name", [
     ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), "M inward at the TSS boundary"),
     ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0), "gamma inward at the TSS boundary"),
     ((0.0, 0.0, 1.0), (0.0, 0.0, 1.0), "T on the TSS boundary"),
+    ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), "M inward at the native point"),
+    ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), "T inward at the native point"),
     ((0.4, 0.3, 1.5), (1.0, 0.0, 0.0), "M at an interior point"),
     ((0.4, 0.3, 1.5), (0.0, 1.0, 0.0), "gamma at an interior point"),
     ((0.4, 0.3, 1.5), (0.0, 0.0, 1.0), "T at an interior point"),
 ])
 def test_coefficient_derivatives_match_the_independent_sensitivity(
         point, direction, name):
-    """Agreement with the independent sensitivity is the criterion; a zero is
-    accepted when the reference is zero too. At the boundary the derivative is
-    taken INWARD and analytically: no differentiation through the feasibility
-    repair, and no finite-difference point with negative mass or damping."""
-    pn = _source_native_f64()
-    ep = _ep(9702)
-    p = _tree(pn, *point)
-    fval, ref = _independent_sensitivity(p, ep, direction)
-    coeffs = jnp.asarray(point, jnp.float64)
-    f = _loss_fn(p, ep)
-    val, jvp = jax.jvp(f, (coeffs,), (jnp.asarray(direction, jnp.float64),))
-    assert onp.isfinite(float(val)) and onp.isfinite(float(jvp))
-    _close(f"loss ({name})", val, fval, ID64)
-    assert abs(ref) > 1e-12, (f"FIXTURE DEFECT: the analytic sensitivity for "
-                              f"{name} is degenerate ({ref}); choose another "
-                              f"episode, not a looser test")
-    _close(f"dL/d({name})", jvp, ref, SENS64)
-    # inward forward difference, admissible points only
-    hstep = 1e-6
-    inward = jnp.asarray(point, jnp.float64) + hstep * jnp.asarray(
-        direction, jnp.float64)
-    fd = (float(f(inward)) - float(val)) / hstep
-    resolvable = abs(jvp) >= 100 * EPS64 * max(abs(float(val)), 1.0) / hstep
-    print(f"  {name}: jvp {float(jvp):.6e} reference {ref:.6e} inward FD "
-          f"{fd:.6e} resolvable={bool(resolvable)}")
-    if resolvable:
-        assert abs(fd - float(jvp)) <= 1e-3 * max(abs(float(jvp)), 1e-12)
-    else:
-        print("  LIMITATION: finite but below float64 forward-difference "
-              "resolvability; the independent sensitivity above is the "
-              "evidence, not a dead parameter")
-
-
-def test_backbone_gradients_are_finite_and_flow_with_full_bptt():
+    """Derivatives flow through the coefficients with no boundary branch;
+    at the boundaries they are taken INWARD, never through the repair and
+    never at a negative-mass or negative-damping point."""
     pn = _source_native_f64()
     ep = _ep(9703)
-    p = PM.add_extension(pn, FL.FILTERED)
+    p = _tree(pn, *point)
+    ref_val, ref, Wr, Ur, yr = _independent_sensitivity(p, ep, direction)
+    out = PM.rollout(FL.FILTERED, p, ep)
+    for label, got, want in (("W", out["final_carry"][0], Wr),
+                             ("U", out["final_carry"][1], Ur),
+                             ("y", out["final_carry"][2], yr)):
+        assert _rel(got, want) < ID64, (name, label)
+    f = _loss_fn(p, ep)
+    coeffs = jnp.asarray(point, jnp.float64)
+    val, jvp = jax.jvp(f, (coeffs,), (jnp.asarray(direction, jnp.float64),))
+    hstep = 1e-6
+    fwd = f(coeffs + hstep * jnp.asarray(direction, jnp.float64))
+    fails, info = sensitivity_decision(name, val, jvp, ref_val, ref, fwd,
+                                       hstep, SENS64)
+    print(f"  {name}: jvp {float(jvp):.6e} reference {ref:.6e} {info}")
+    assert not fails, fails
+    if info["resolvable"]:
+        assert abs(info["fd"] - float(jvp)) <= 1e-3 * max(abs(float(jvp)),
+                                                          1e-12)
+    else:
+        print("  LIMITATION: finite but below float64 forward-difference "
+              "resolvability; the independent sensitivity is the evidence")
 
-    def loss(pp):
-        q = (ep["event"] == TK.QUERY)
-        lab = jnp.maximum(ep["label"], 0)
-        out = PM.rollout(FL.FILTERED, pp, ep)
-        ce = optax.softmax_cross_entropy(
-            out["logits"], jax.nn.one_hot(lab, TK.N_VALUES,
-                                          dtype=out["logits"].dtype)) * q
-        return jnp.sum(ce) / jnp.maximum(jnp.sum(q), 1.0)
-    g = jax.grad(loss)(p)
-    assert _finite_tree(g)
-    G = math.sqrt(sum(float(onp.sum(onp.asarray(v, F64) ** 2))
-                      for v in g.values()))
-    assert onp.isfinite(G) and G > 0.0
-    for k in ("key_raw", "value_table", "readout_W", "a_proj", "e_proj"):
-        assert onp.all(onp.isfinite(onp.asarray(g[k], F64)))
 
-
-# ======================= 5. the training step and its freezing ==============
-def test_train_step_freezes_stored_constants_and_moves_the_rest():
+# ======================= 5. training step, freezing and the runner ==========
+def test_train_step_freezes_constants_and_gates_the_forward_pass():
     pn = _source_native_f64()
-    eps = {k: jnp.asarray(v) for k, v in TK.generate_batch(9704, 2).items()
+    eps = {k: jnp.asarray(v) for k, v in TK.generate_batch(9706, 2).items()
            if k in ("key_id", "val_id", "event", "label")}
     lr = jnp.asarray(0.01, dtype=jnp.float64)
     for arm in (TC.TSS, TC.GEN):
@@ -568,14 +614,12 @@ def test_train_step_freezes_stored_constants_and_moves_the_rest():
                                    eps, lr)
         p2, opt2, tel, grads = o[0], o[1], o[8], o[9]
         assert _finite_tree(p2, opt2), arm
-        for x in list(o[2:8]):
-            assert onp.isfinite(float(x)), arm
-        assert bool(tel["guard_ok"]), arm
+        assert _all_finite(*o[2:8], *grads.values())
+        assert bool(tel["gate_ok"]), arm
         assert TC.frozen_leaf_differences(p2, p, arm) == {}
         if arm == TC.TSS:
             for k in ("fil_M", "fil_gamma"):
                 assert onp.array_equal(onp.asarray(p2[k]), onp.asarray(p[k]))
-            assert onp.isfinite(float(grads["fil_T"]))
             assert _moved_finite(p2["fil_T"][0], p["fil_T"][0])
         else:
             assert any(_moved_finite(p2[k][0], p[k][0]) for k in FL.LEAVES)
@@ -585,17 +629,103 @@ def test_train_step_freezes_stored_constants_and_moves_the_rest():
         assert all(float(mask[k]) == 0.0 for k in TC.FROZEN_LEAVES[arm])
         assert all(float(mask[k]) == 1.0 for k in p
                    if k not in TC.FROZEN_LEAVES[arm])
+    # the gate is on the FORWARD pass: an unstable tree is refused
+    bad = _tree(pn, 1.0, 0.0, 0.0)
+    o = TC.train_step_filtered(FL.FILTERED, (), bad, ST.TX.init(bad), eps, lr)
+    assert not bool(o[8]["gate_ok"])
 
 
-def test_nan_updates_are_rejected_not_counted_as_movement():
-    assert not _moved_finite(float("nan"), 0.3)
-    assert not _moved_finite(0.3, 0.3)
-    assert _moved_finite(0.4, 0.3)
-    assert not _finite_tree({"a": jnp.asarray([jnp.nan])})
+def test_step_failure_is_checked_at_every_step():
+    rec = dict(update=3, executed_filter_ok=True, jury_min=0.5,
+               proc_max_abs=1.0, executed={},
+               **{k: 0.1 for k in FL.LEAVES},
+               **{"grad_" + k: 0.0 for k in FL.LEAVES})
+    good = {k: 0.1 for k in ST.SCALAR_NAMES}
+    assert TC.step_failure(TC.GEN, good, rec) is None
+    assert TC.step_failure(TC.GEN, dict(good, **{ST.SCALAR_NAMES[0]:
+                                                 float("nan")}), rec)
+    assert TC.step_failure(TC.GEN, good, dict(rec, executed_filter_ok=False))
+    assert TC.step_failure(TC.GEN, good, dict(rec, grad_fil_T=float("inf")))
+
+
+def _small_val():
+    return TK.generate_batch(9707, 4)
+
+
+def _runner(arm, source_p, updates, out, val_at=None, status=None):
+    status = {"incomplete": []} if status is None else status
+    return TC.run_one(arm, "A", 0.003, TC.SOURCE_DEV, source_p, _small_val(),
+                      updates, str(out), 1e18, 30.0, status, "fixture",
+                      "fixture-source", None, val_at), status
+
+
+@pytest.mark.parametrize("arm", [TC.TSS, TC.GEN, TC.NATIVE, TC.OPERATOR])
+def test_zero_update_endpoint_is_valid(arm, tmp_path):
+    """Review R1: a selected update-zero endpoint is a valid named-family
+    endpoint - evaluated, validated and persisted - not a failure and not a
+    frozen-source anchor."""
     pn = _source_native_f64()
-    nan_tree = _tree(pn, float("nan"), 0.0, 1.0)
-    assert FL.filter_failure(FL.filter_report(nan_tree)) is not None
-    assert TC.validate(TC.GEN, nan_tree) is not None
+    (rec, p), status = _runner(arm, TC.start_tree(arm, pn), 0, tmp_path)
+    assert rec["invalid"] is None, rec["invalid"]
+    assert rec["updates"] == 0
+    assert rec["endpoint_kind"] == "zero_update_named_family_endpoint"
+    assert rec["regime"] == "full"
+    assert len(rec["validation"]) == 1 and rec["validation"][0]["accepted"]
+    assert os.path.isfile(rec["validation"][0]["params_file"])
+    assert rec["validation"][0]["opt_file"] is not None
+
+
+def test_zero_update_endpoint_with_nonfinite_state_fails(tmp_path):
+    pn = _source_native_f64()
+    bad = dict(TC.start_tree(TC.GEN, pn),
+               readout_b=jnp.full_like(pn["readout_b"], jnp.nan))
+    (rec, _), _ = _runner(TC.GEN, bad, 0, tmp_path)
+    assert rec["invalid"] is not None
+
+
+def test_every_checkpoint_is_validated_persisted_and_reproducible(tmp_path):
+    """Review R3: each selectable checkpoint is accepted and saved before
+    the next update, and an earlier checkpoint's saved tree reproduces its
+    recorded metrics."""
+    pn = _source_native_f64()
+    start = TC.start_tree(TC.GEN, pn)
+    (rec, _), status = _runner(TC.GEN, start, 2, tmp_path, val_at=(0, 1, 2))
+    assert rec["invalid"] is None, rec["invalid"]
+    assert [v["update"] for v in rec["validation"]] == [0, 1, 2]
+    assert all(v["accepted"] for v in rec["validation"])
+    assert len(status["checkpoint_log"]) == 3
+    v1 = rec["validation"][1]
+    p1 = TC.load_params(v1["params_file"], start)
+    m, sets = TC.evaluate_arm(TC.GEN, p1, _small_val())
+    for key, got in (("primary", m["primary"]),
+                     ("revision_ce", m["revision_ce"]),
+                     ("retention", m["retention_revision_untouched"]),
+                     ("recall", m["recall_overall"])):
+        _close(f"saved update-1 checkpoint {key}", got, v1[key], ID64)
+    assert TC.validate(TC.GEN, p1, sets) is None
+
+
+def test_an_invalid_intermediate_checkpoint_cannot_be_hidden(tmp_path,
+                                                            monkeypatch):
+    pn = _source_native_f64()
+    real = TC.evaluate_arm
+    calls = {"n": 0}
+
+    def flaky(arm, p, eps_np):
+        m, sets = real(arm, p, eps_np)
+        calls["n"] += 1
+        if calls["n"] == 2:                       # the update-1 checkpoint
+            m = dict(m, primary=float("nan"))
+            m["revision"] = dict(m["revision"], macro_accuracy=float("nan"),
+                                 accuracy=float("nan"))
+        return m, sets
+    monkeypatch.setattr(TC, "evaluate_arm", flaky)
+    (rec, _), status = _runner(TC.GEN, TC.start_tree(TC.GEN, pn), 2,
+                               tmp_path, val_at=(0, 1, 2))
+    assert rec["invalid"] is not None and "update 1" in rec["invalid"]
+    assert [v["update"] for v in rec["validation"]] == [0, 1]
+    assert rec["final_validation"] is None
+    assert status["checkpoint_log"][-1]["accepted"] is False
 
 
 # ======================= 6. protocol wiring: work, streams, selection =======
@@ -603,29 +733,24 @@ def test_streams_are_fresh_and_work_fits_the_declared_budget():
     assert TC.stream_overlaps() == []
     w = TC.planned_work()
     assert w["trained_runs_development"] == 8
-    assert w["trained_runs_final"] == 12
+    assert w["named_family_final_endpoints"] == 12
     assert w["max_total_updates"] == 4000
     assert w["development_checkpoints_per_family"] == 9
     assert TC.VAL_AT == (0, 25, 50, 100, 200)
-    assert TC.UPDATES == 200 and dict(TC.LRS) == {"A": 0.003, "B": 0.01}
-    assert TC.LAW_OF[TC.TSS] == TC.LAW_OF[TC.GEN] == FL.FILTERED
     assert TC.FROZEN_LEAVES[TC.TSS] == ("fil_M", "fil_gamma")
-    assert TC.FROZEN_LEAVES[TC.GEN] == ()
     assert TC.LAW_OF[TC.OPERATOR] == OD.ORDINARY
 
 
-def _dev_row(arm, config, lr, vals):
-    return dict(rule=arm, config=config, lr=lr,
-                validation=[dict(update=u, primary=p, revision_ce=ce,
-                                 retention=rt, recall=rc)
-                            for u, p, ce, rt, rc in vals])
-
-
-def _dev_rows(spec):
+def _dev_rows(spec, reject=None):
     rows = []
     for arm, per_config in spec.items():
         for config, lr, vals in per_config:
-            rows.append(_dev_row(arm, config, lr, vals))
+            rows.append(dict(rule=arm, config=config, lr=lr, validation=[
+                dict(update=u, primary=p, revision_ce=ce, retention=rt,
+                     recall=rc,
+                     accepted=not (reject and (arm, config, u) == reject),
+                     params_file=f"{arm}_{config}_u{u}.msgpack")
+                for u, p, ce, rt, rc in vals]))
     return rows
 
 
@@ -633,12 +758,10 @@ def _uniform(primary, ce=1.0, ret=0.5, rec=0.5):
     return [(u, primary, ce, ret, rec) for u in TC.VAL_AT]
 
 
-def test_selection_is_native_first_then_matched_retention():
-    status = {}
-    spec = {
+def _spec():
+    return {
         TC.NATIVE: [("A", 0.003, _uniform(0.50, ret=0.60, rec=0.70)),
                     ("B", 0.01, _uniform(0.55, ret=0.58, rec=0.70))],
-        # feasible only at update 50, and worse elsewhere
         TC.GEN: [("A", 0.003, [(0, 0.40, 1.0, 0.58, 0.70),
                                (25, 0.60, 1.0, 0.50, 0.70),
                                (50, 0.58, 1.0, 0.60, 0.72),
@@ -650,88 +773,85 @@ def test_selection_is_native_first_then_matched_retention():
         TC.OPERATOR: [("A", 0.003, _uniform(0.80, ret=0.10, rec=0.10)),
                       ("B", 0.01, _uniform(0.79, ret=0.10, rec=0.10))],
     }
-    sel, plan = TC.select(_dev_rows(spec), status)
+
+
+def test_selection_is_native_first_then_matched_retention():
+    status = {}
+    sel, plan = TC.select(_dev_rows(_spec()), status)
     assert sel is not None
-    # native: highest primary regardless of retention
     assert sel[TC.NATIVE]["primary"] == 0.55 and sel[TC.NATIVE]["lr"] == 0.01
     assert status["selection"]["r_native"] == 0.58
-    assert status["selection"]["c_native"] == 0.70
-    # generalized: only the update-50 checkpoint is feasible
-    assert sel[TC.GEN]["feasible"] and not sel[TC.GEN]["diagnostic"]
-    assert sel[TC.GEN]["update"] == 50 and sel[TC.GEN]["primary"] == 0.58
-    # literal TSS: feasible, ties broken by fewer updates then lower lr
+    assert sel[TC.GEN]["feasible"] and sel[TC.GEN]["update"] == 50
+    assert sel[TC.GEN]["params_file"] == f"{TC.GEN}_A_u50.msgpack"
     assert sel[TC.TSS]["feasible"] and sel[TC.TSS]["update"] == 0
     assert sel[TC.TSS]["lr"] == 0.003
-    # the operator has no feasible checkpoint: flagged diagnostic, NOT dropped
-    assert not sel[TC.OPERATOR]["feasible"]
-    assert sel[TC.OPERATOR]["diagnostic"]
-    assert sel[TC.OPERATOR]["primary"] == 0.80
+    assert not sel[TC.OPERATOR]["feasible"] and sel[TC.OPERATOR]["diagnostic"]
+
+
+def test_an_unaccepted_intermediate_checkpoint_blocks_selection():
+    rows = _dev_rows(_spec(), reject=(TC.GEN, "B", 25))
+    assert TC.select(rows, {}) == (None, None)
 
 
 def test_update_zero_checkpoint_is_deduplicated():
-    spec = {TC.NATIVE: [("A", 0.003, _uniform(0.5)),
-                        ("B", 0.01, _uniform(0.5))]}
-    rows = _dev_rows(spec)
+    rows = _dev_rows({TC.NATIVE: [("A", 0.003, _uniform(0.5)),
+                                  ("B", 0.01, _uniform(0.5))]})
     cps = TC.checkpoints(rows, TC.NATIVE)
-    assert len(cps) == 9
-    assert sum(1 for c in cps if c["update"] == 0) == 1
+    assert len(cps) == 9 and sum(c["update"] == 0 for c in cps) == 1
     assert all("heldout" not in c for c in cps)
 
 
 def test_selection_refuses_non_finite_checkpoints():
-    spec = {
-        # the NaN sits at update 25, i.e. NOT on the deduplicated
-        # update-zero checkpoint, so it really reaches the ranking
-        TC.NATIVE: [("A", 0.003, _uniform(0.5)),
-                    ("B", 0.01, [(u, (float("nan") if u == 25 else 0.5),
-                                  1.0, 0.5, 0.5) for u in TC.VAL_AT])],
-        TC.GEN: [("A", 0.003, _uniform(0.5)), ("B", 0.01, _uniform(0.5))],
-        TC.TSS: [("A", 0.003, _uniform(0.5)), ("B", 0.01, _uniform(0.5))],
-        TC.OPERATOR: [("A", 0.003, _uniform(0.5)),
-                      ("B", 0.01, _uniform(0.5))],
-    }
-    sel, plan = TC.select(_dev_rows(spec), {})
-    assert sel is None and plan is None
+    spec = _spec()
+    spec[TC.NATIVE][1] = ("B", 0.01, [(u, (float("nan") if u == 25 else 0.5),
+                                       1.0, 0.5, 0.5) for u in TC.VAL_AT])
+    assert TC.select(_dev_rows(spec), {}) == (None, None)
 
 
-def test_deployment_fallbacks_are_explicit_and_never_relabelled():
-    # TSS infeasible: the generalized arm gets NO TSS fallback, and a native
-    # choice is never wrapped in an M = gamma = 0 map
-    sel = {TC.NATIVE: dict(primary=0.60, feasible=True, diagnostic=False),
-           TC.TSS: dict(primary=0.75, feasible=False, diagnostic=True),
-           TC.GEN: dict(primary=0.58, feasible=True, diagnostic=False),
-           TC.OPERATOR: dict(primary=0.90, feasible=False, diagnostic=True)}
-    status = {}
-    plan = TC.deployment_plan(sel, status)
+def _s(primary, feasible=True, ce=1.0, update=50, lr=0.003, config="A"):
+    return dict(primary=primary, feasible=feasible, diagnostic=not feasible,
+                revision_ce=ce, update=update, lr=lr, config=config,
+                params_file=f"p_{primary}_{update}.msgpack")
+
+
+def test_deployment_fallbacks_use_the_full_ordering_and_never_relabel():
+    sel = {TC.NATIVE: _s(0.60), TC.TSS: _s(0.75, feasible=False),
+           TC.GEN: _s(0.58), TC.OPERATOR: _s(0.90, feasible=False)}
+    plan = TC.deployment_plan(sel, {})
     assert [f["kind"] for f in plan[TC.GEN]["fallbacks"]] == ["native"]
-    # trained generalized (0.58) does NOT beat the native fallback (0.60)
     assert plan[TC.GEN]["choice"] == "native"
-    assert plan[TC.GEN]["evaluate_arm"] == TC.NATIVE
-    # an infeasible extension can never be deployed as itself
+    assert plan[TC.GEN]["executed_family"] == "momentum_delta"
+    assert plan[TC.GEN]["chosen_checkpoint"]["arm"] == TC.NATIVE
+    assert "NOT a point of the literal-TSS family" in \
+        plan[TC.TSS]["fallbacks"][0]["map"]
+    assert "(0, h, 0)" in plan[TC.GEN]["fallbacks"][0]["map"]
     assert plan[TC.OPERATOR]["choice"] == "native"
-    assert plan[TC.TSS]["choice"] == "native"
     out = TC.deployment_outcome(
-        [dict(rule=TC.NATIVE, heldout=dict(primary=0.6))], plan)
+        [dict(rule=TC.NATIVE, seed=501, heldout=dict(primary=0.6),
+              endpoint_params_file="x")], plan)
     assert out[TC.GEN]["counted_as_improvement"] is False
     assert "NOT literal TSS" in out[TC.GEN]["label"]
-    # now TSS is feasible and better: it becomes an available fallback
-    sel2 = dict(sel, **{TC.TSS: dict(primary=0.75, feasible=True,
-                                     diagnostic=False)})
+    assert out[TC.GEN]["chosen_checkpoint"]["arm"] == TC.NATIVE
+    # feasible TSS becomes a fallback; equal primary resolved by CE, not by
+    # insertion order
+    sel2 = dict(sel, **{TC.TSS: _s(0.60, ce=0.9, update=100)})
     plan2 = TC.deployment_plan(sel2, {})
-    assert [f["kind"] for f in plan2[TC.GEN]["fallbacks"]] == ["native", "tss"]
     assert plan2[TC.GEN]["choice"] == "tss"
-    assert plan2[TC.GEN]["evaluate_arm"] == TC.TSS
-    # a trained endpoint must beat the best fallback STRICTLY
-    sel3 = dict(sel2, **{TC.GEN: dict(primary=0.75, feasible=True,
-                                      diagnostic=False)})
-    assert TC.deployment_plan(sel3, {})[TC.GEN]["choice"] == "tss"
-    sel4 = dict(sel2, **{TC.GEN: dict(primary=0.76, feasible=True,
-                                      diagnostic=False)})
-    assert TC.deployment_plan(sel4, {})[TC.GEN]["choice"] == "trained"
+    assert plan2[TC.GEN]["executed_family"] == FL.FILTERED
+    sel3 = dict(sel, **{TC.TSS: _s(0.60, ce=1.1)})
+    assert TC.deployment_plan(sel3, {})[TC.GEN]["choice"] == "native"
+    # a full tie on all four keys uses the DECLARED tie rule
+    sel4 = dict(sel, **{TC.TSS: _s(0.60)})
+    assert TC.deployment_plan(sel4, {})[TC.GEN]["choice"] == "native"
+    # strict improvement over the best fallback
+    sel5 = dict(sel2, **{TC.GEN: _s(0.60)})
+    assert TC.deployment_plan(sel5, {})[TC.GEN]["choice"] == "tss"
+    sel6 = dict(sel2, **{TC.GEN: _s(0.61)})
+    assert TC.deployment_plan(sel6, {})[TC.GEN]["choice"] == "trained"
 
 
-def _final(arm, seed, primary, ret, rec):
-    return dict(rule=arm, seed=seed,
+def _final(arm, seed, primary, ret, rec, kind="trained_named_family_endpoint"):
+    return dict(rule=arm, seed=seed, endpoint_kind=kind,
                 heldout=dict(primary=primary,
                              retention_revision_untouched=ret,
                              recall_overall=rec))
@@ -741,41 +861,41 @@ def test_screen_labels_availability_and_requires_no_measured_decrease():
     rows = []
     for i, s in enumerate(TC.SOURCE_FINAL):
         rows += [_final(TC.GEN, s, 0.70 + 0.01 * i, 0.60, 0.70),
-                 _final(TC.TSS, s, 0.60 + 0.01 * i, 0.60, 0.70),
+                 _final(TC.TSS, s, 0.60 + 0.01 * i, 0.60, 0.70,
+                        kind="zero_update_named_family_endpoint"),
                  _final(TC.NATIVE, s, 0.55 + 0.01 * i, 0.605, 0.70),
                  _final(TC.OPERATOR, s, 0.72 + 0.01 * i, 0.50, 0.65),
-                 _final(TC.ANCHOR, s, 0.40, 0.62, 0.70)]
+                 _final(TC.ANCHOR, s, 0.40, 0.62, 0.70,
+                        kind="frozen_source_anchor")]
     sel = {a: dict(feasible=True, diagnostic=False)
            for a in (TC.NATIVE,) + TC.EXTENSION_ARMS}
-    sc = TC.screen(rows, sel)
-    by = {c["name"]: c for c in sc["comparisons"]}
+    by = {c["name"]: c for c in TC.screen(rows, sel)["comparisons"]}
     gt = by["extension_versus_literal_tss"]
     assert gt["promising_matched_retention"] is True
-    assert gt["constrained_screen_available"] is True
-    assert gt["kind"] == "scientific"
-    # retention loss against native: the -1 pp safeguard passes but this
-    # study's no-measured-decrease condition does not
+    assert gt["endpoint_kinds"][TC.TSS] == [
+        "zero_update_named_family_endpoint"]
     gn = by["generalized_versus_native"]
     assert gn["safeguard_passed_minus_one_pp"] is True
     assert gn["no_measured_decrease"] is False
     assert gn["promising_matched_retention"] is False
-    # a diagnostic endpoint makes the constrained screen unavailable
     sel2 = dict(sel, **{TC.TSS: dict(feasible=False, diagnostic=True)})
-    sc2 = TC.screen(rows, sel2)
-    g2 = {c["name"]: c for c in sc2["comparisons"]}[
+    g2 = {c["name"]: c for c in TC.screen(rows, sel2)["comparisons"]}[
         "extension_versus_literal_tss"]
     assert g2["constrained_screen_available"] is False
     assert g2["promising_matched_retention"] is False
-    assert TC.TSS in g2["constraint_failing_endpoints"]
     assert "INFEASIBLE" in g2["availability_note"]
     assert by["generalized_versus_learned_operator"]["kind"] == "outside_claim"
-    assert by["generalized_versus_frozen_source"]["kind"] == "descriptive"
 
 
-def test_declared_comparisons_and_scope_statements():
-    names = [c[0] for c in TC.COMPARISONS]
-    assert "extension_versus_literal_tss" in names
-    assert "generalized_versus_learned_operator" in names
-    assert TC.ABSENT_LITERATURE == ("gated_delta",)
-    rep = FL.filter_report(_tree(_source_native_f64(), 0.0, 0.0, 1.0))
-    assert "isolated" in rep["note"]
+def test_direct_recovery_policy_is_decisive_and_finite_first():
+    pn = _source_native_f64()
+    val = _small_val()
+    fails, rows = TC.direct_recovery(pn, val)
+    assert fails == [], fails
+    assert len(rows) == 2 * TC.RECOVERY_EPISODES_PER_FAMILY
+    for r in rows:
+        assert (r["executed"]["a"], r["executed"]["b"], r["executed"]["c"],
+                r["executed"]["d"]) == (0.0, 0.0, 1.0, 0.0)
+    broken = dict(pn, readout_b=jnp.full_like(pn["readout_b"], jnp.nan))
+    fails2, _ = TC.direct_recovery(broken, val)
+    assert fails2

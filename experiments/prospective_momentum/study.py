@@ -200,14 +200,20 @@ def host_step(rule, p, opt, seed, u, lr, hist, stream=None):
     return p, opt, scalars
 
 
-def evaluate(rule, p, eps_np, chunk=128):
+def evaluate(rule, p, eps_np, chunk=128, batch_fn=None, aux_sink=None):
+    # `batch_fn` and `aux_sink` are additive hooks (TSS containment study):
+    # a study may evaluate with its own compiled batch function and receive
+    # every chunk's aux, e.g. the coefficients that exact compiled program
+    # executed. Defaults leave every completed study's evaluation unchanged.
     n = eps_np["event"].shape[0]
     cat, fam = eps_np["category"], eps_np["family"]
     cs, ces, qs, wn, an, gs = [], [], [], [], [], []
     for i in range(0, n, chunk):
         sl = {k: jnp.asarray(v[i:i + chunk]) for k, v in eps_np.items()
               if k in ("key_id", "val_id", "event", "label")}
-        aux = eval_batch(rule, p, sl)
+        aux = (eval_batch if batch_fn is None else batch_fn)(rule, p, sl)
+        if aux_sink is not None:
+            aux_sink.append(aux)
         cs.append(onp.asarray(aux["correct"]))
         ces.append(onp.asarray(aux["ce"]))
         qs.append(onp.asarray(aux["q"]))

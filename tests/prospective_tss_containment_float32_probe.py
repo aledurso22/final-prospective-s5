@@ -2,10 +2,17 @@
 
 The focused-check module runs in float64, while the study refuses to start
 unless x64 is disabled. This probe exercises the NEW paths in the production
-precision: the five-carry processing rollout and its streaming, the two exact
-points, the executed filter gate (including a point the declared numerical
-gaps accept but the rounded polynomial must refuse), the feasibility repair
-and the masked optimizer path of both processing arms.
+precision: the five-carry processing rollout (executed coefficient form) and
+its streaming, the two exact points, the executed-coefficient gate (including
+points the declared numerical gaps accept but the rounded coefficients must
+refuse), the feasibility repair, coefficient derivatives against an
+independent float64 original-law reference whose PRIMAL carries and loss are
+also checked, and the masked optimizer path of both processing arms.
+
+Review R5 (7613c86): every piece of derivative evidence - production loss and
+JVP, reference loss, reference derivative, reference carries, perturbed loss,
+forward difference and error - must be finite BEFORE any tolerance or
+resolvability decision; injected-NaN regressions prove it.
 
 Declared constants, unchanged from the completed studies:
   TRAJ32 = 2e-5  relative: logits, carries and streaming;
@@ -171,21 +178,30 @@ close("TSS boundary at T = h vs the two-tap operator at kappa = 1",
 check("the TSS start is NOT the native function",
       rel(full["logits"], nat_logits) > 1e-4)
 
-print("--- 3. the executed filter gate in float32 ---")
+print("--- 3. the executed-coefficient gate in float32 ---")
+e3 = ep(9749)
 for M, gam, T, want in ((0.0, 0.0, H, True), (0.0, H, 0.0, True),
                         (0.4, 0.2, 1.1, True), (1.0, 0.0, 0.0, False),
                         (1e18, 0.0, FL.G_MIN, False),
                         (3.4e38, 0.0, 0.6, False)):
-    rep = FL.filter_report(tree(M, gam, T))
+    # the coefficients THIS compiled rollout executed, not a recomputation
+    out3 = TC.rollout_outputs(FL.FILTERED, tree(M, gam, T), e3)
+    rep = FL.filter_report(FL.coefficient_values(out3["coeff"]))
+    guard = FL.in_loop_guard(out3["coeff"])
     ok = FL.filter_failure(rep) is None
-    print(f"  (M={M:g}, gamma={gam:g}, T={T:g}) c1={rep['executed_c1']:.9g} "
-          f"c0={rep['executed_c0']:.9g} A={rep['A']:.9g} "
-          f"{rep['classification']} accepted={ok} gaps "
-          f"{rep['gap_gamma_plus_T']:.3e}/{rep['gap_filter']:.3e}")
+    print(f"  (M={M:g}, gamma={gam:g}, T={T:g}) a={rep['a']:.9g} "
+          f"b={rep['b']:.9g} c={rep['c']:.9g} d={rep['d']:.9g} "
+          f"{rep['classification']} accepted={ok} guard={bool(guard['ok'])} "
+          f"gaps {rep['gap_gamma_plus_T']:.3e}/{rep['gap_filter']:.3e}")
     check(f"executed gate verdict at (M={M:g}, gamma={gam:g}, T={T:g})",
-          ok == want)
+          ok == want and bool(guard["ok"]) == want)
+nat3 = FL.coefficient_values(TC.rollout_outputs(
+    FL.FILTERED, TC.native_point_tree(pn), e3)["coeff"])
+check("executed native-point coefficients are exactly a=b=d=0, c=1",
+      (nat3["a"], nat3["b"], nat3["c"], nat3["d"]) == (0.0, 0.0, 1.0, 0.0))
 check("the declared gaps alone would have accepted the refused large mass",
-      FL.filter_report(tree(1e18, 0.0, FL.G_MIN))["gap_gamma_plus_T"] >= 0.0)
+      FL.report_from_tree(tree(1e18, 0.0, FL.G_MIN))["gap_gamma_plus_T"]
+      >= 0.0)
 
 print("--- 4. the feasibility repair in float32 ---")
 rs = onp.random.RandomState(3)
@@ -200,7 +216,7 @@ for _ in range(8):
                                     onp.asarray(twice[k]))
                     for k in FL.LEAVES)
             and int(tel2["n_repaired"]) == 0
-            and FL.filter_failure(FL.filter_report(once)) is None):
+            and FL.filter_failure(FL.report_from_tree(once)) is None):
         fails.append(f"repair failed for {[float(p[k][0]) for k in FL.LEAVES]}"
                      f" -> {[float(once[k][0]) for k in FL.LEAVES]}")
 for M, gam, T in (FL.tss_boundary(), FL.native_point()):
@@ -212,7 +228,7 @@ for M, gam, T in (FL.tss_boundary(), FL.native_point()):
                   for k in FL.LEAVES))
 out, _ = FL.repair(tree(1.0, 0.0, 0.0))
 check("the missing-damping counterexample is repaired to a stable filter",
-      FL.filter_failure(FL.filter_report(out)) is None
+      FL.filter_failure(FL.report_from_tree(out)) is None
       and float(out["fil_gamma"][0] + out["fil_T"][0]) > 0.0)
 
 print("--- 5. coefficient sensitivity against an independent float64 "
@@ -220,9 +236,10 @@ print("--- 5. coefficient sensitivity against an independent float64 "
 
 
 def independent_sensitivity(p, ep_, direction):
-    """Independently coded sequential float64 forward sensitivity; only the
-    coefficient-independent inputs (preprocessing, gates, readout) are
-    shared."""
+    """Independently coded sequential float64 forward sensitivity of the
+    ORIGINAL form of the law; only the coefficient-independent inputs
+    (preprocessing, gates, readout) are shared. Returns the loss, the
+    derivative and the final W, U, y carries."""
     from experiments.adaptive_memory import model as AM
     e = AM.sanitize_episode(ep_)
     key_id, val_id, event = e["key_id"], e["val_id"], e["event"]
@@ -276,7 +293,7 @@ def independent_sensitivity(p, ep_, direction):
     ce = -logp[onp.arange(L), lab] * qq
     dce = -(dlogits[onp.arange(L), lab] - (pr * dlogits).sum(axis=1)) * qq
     n = max(qq.sum(), 1.0)
-    return float(ce.sum() / n), float(dce.sum() / n)
+    return float(ce.sum() / n), float(dce.sum() / n), W, U, y
 
 
 def loss_of(p, ep_):
@@ -294,42 +311,81 @@ def loss_of(p, ep_):
     return f
 
 
+def sensitivity_decision(label, val, jvp, ref_val, ref_deriv, ref_carries,
+                         prod_carries, fwd_val, hstep):
+    """FINITE FIRST for every piece of evidence, then the primal agreement
+    (TRAJ32, cross precision), then the DECISIVE analytic derivative
+    comparison (REF32), then the diagnostic forward difference, which must be
+    finite too. Returns (failures, info)."""
+    pieces = dict(loss=val, jvp=jvp, reference_loss=ref_val,
+                  reference_derivative=ref_deriv, perturbed_loss=fwd_val)
+    bad = [k for k, x in pieces.items() if not all_finite(x)]
+    bad += [f"reference carry {i}" for i, c in enumerate(ref_carries)
+            if not all_finite(c)]
+    bad += [f"production carry {i}" for i, c in enumerate(prod_carries)
+            if not all_finite(c)]
+    if bad:
+        return [f"{label}: non-finite evidence {bad}"], None
+    fd = (float(fwd_val) - float(val)) / hstep
+    err = abs(float(jvp) - ref_deriv) / max(abs(ref_deriv), 1e-30)
+    loss_err = abs(float(val) - ref_val) / max(abs(ref_val), 1e-30)
+    carry_err = [rel(pc, rc) for pc, rc in zip(prod_carries, ref_carries)]
+    if not all_finite(fd, err, loss_err, carry_err):
+        return [f"{label}: non-finite FD, error or primal error"], None
+    fails = []
+    if loss_err > TRAJ32 or max(carry_err) > TRAJ32:
+        fails.append(f"{label}: independent primal differs (loss "
+                     f"{loss_err:.2e}, carries {carry_err})")
+    if abs(ref_deriv) <= 1e-12:
+        fails.append(f"FIXTURE DEFECT: degenerate sensitivity for {label}")
+    elif err > REF32:
+        fails.append(f"{label}: derivative vs float64 reference {err:.2e}")
+    resolvable = abs(float(jvp)) >= 100 * eps32 * max(abs(float(val)),
+                                                      1.0) / hstep
+    return fails, dict(fd=fd, err=err, loss_err=loss_err,
+                       carry_err=carry_err, resolvable=bool(resolvable))
+
+
+# injected-NaN regressions for the decision itself
+_z = [onp.zeros((2, 2))] * 3
+_nan = float("nan")
+for what, args in (
+        ("reference derivative", (1.0, 0.5, 1.0, _nan, _z, _z, 1.0)),
+        ("reference primal loss", (1.0, 0.5, _nan, 0.5, _z, _z, 1.0)),
+        ("reference primal carry", (1.0, 0.5, 1.0, 0.5,
+                                    [onp.full((2, 2), _nan)] * 3, _z, 1.0)),
+        ("perturbed loss", (1.0, 0.5, 1.0, 0.5, _z, _z, _nan))):
+    f_, _ = sensitivity_decision("regression", *args, 1e-3)
+    check(f"NaN {what} is rejected, not accepted", bool(f_))
+f_, info_ = sensitivity_decision("regression", 1.0, 0.5, 1.0, 0.5, _z, _z,
+                                 1.0 + 0.5e-3, 1e-3)
+check("finite consistent evidence is accepted", not f_ and info_ is not None)
+
 e1 = ep(9751)
 for point, direction, name in (
         ((0.0, 0.0, H), (1.0, 0.0, 0.0), "M inward at the TSS boundary"),
         ((0.0, 0.0, H), (0.0, 1.0, 0.0), "gamma inward at the TSS boundary"),
         ((0.0, 0.0, H), (0.0, 0.0, 1.0), "T on the TSS boundary"),
+        ((0.0, H, 0.0), (0.0, 0.0, 1.0), "T inward at the native point"),
         ((0.4, 0.3, 1.5), (0.0, 0.0, 1.0), "T at an interior point")):
     p = tree(*point)
-    fval64, ref = independent_sensitivity(p, e1, direction)
+    ref_val, ref, Wr, Ur, yr = independent_sensitivity(p, e1, direction)
+    prod = PM.rollout(FL.FILTERED, p, e1)["final_carry"]
     f = loss_of(p, e1)
-    val, jvp = jax.jvp(f, (jnp.asarray(point, jnp.float32),),
-                       (jnp.asarray(direction, jnp.float32),))
-    if not all_finite(val, jvp):
-        fails.append(f"{name}: non-finite float32 loss or JVP")
-        continue
-    if abs(ref) <= 1e-12:
-        fails.append(f"FIXTURE DEFECT: degenerate analytic sensitivity for "
-                     f"{name} ({ref})")
-        continue
-    err = abs(float(jvp) - ref) / max(abs(ref), 1e-30)
+    c0 = jnp.asarray(point, jnp.float32)
+    dvec = jnp.asarray(direction, jnp.float32)
+    val, jvp = jax.jvp(f, (c0,), (dvec,))
     hstep = 1e-3
-    fwd = (float(f(jnp.asarray(point, jnp.float32)
-                   + hstep * jnp.asarray(direction, jnp.float32)))
-           - float(val)) / hstep
-    resolvable = abs(float(jvp)) >= 100 * eps32 * max(abs(float(val)),
-                                                      1.0) / hstep
+    fwd = f(c0 + hstep * dvec)                    # INWARD points only
+    f_, info = sensitivity_decision(name, val, jvp, ref_val, ref,
+                                    (Wr, Ur, yr), prod[:3], fwd, hstep)
     print(f"  {name}: float32 jvp {float(jvp):.6e} independent float64 "
-          f"{ref:.6e} rel {err:.2e} (REF32 {REF32}) inward FD {fwd:.6e} "
-          f"resolvable={bool(resolvable)}")
-    if err > REF32:
-        fails.append(f"{name}: derivative vs float64 reference {err:.2e}")
-    if not resolvable:
+          f"{ref:.6e} {info}")
+    fails.extend(f_)
+    if info is not None and not info["resolvable"]:
         print("  LIMITATION: finite but below float32 forward-difference "
-              "resolvability; the independent float64 reference above is the "
-              "evidence, not a dead parameter. Only INWARD points were "
-              "evaluated: negative mass or damping is not an admissible "
-              "model.")
+              "resolvability; the independent float64 reference is the "
+              "evidence, not a dead parameter")
 
 print("--- 6. the masked optimizer path of both processing arms (float32) ---")
 bt = {k: jnp.asarray(v) for k, v in TK.generate_batch(9752, 2).items()
@@ -348,8 +404,8 @@ for arm in (TC.TSS, TC.GEN):
         fails.append(f"{arm}: non-finite updated tree, optimizer state or "
                      f"returned scalars")
         continue
-    check(f"{arm}: the executed filter gate accepted the update",
-          bool(tel["guard_ok"]))
+    check(f"{arm}: the executed-coefficient gate accepted the forward pass",
+          bool(tel["gate_ok"]))
     check(f"{arm}: stored constants unchanged (bitwise)",
           TC.frozen_leaf_differences(p2, p, arm) == {})
     mask = TC.leaf_mask(p, TC.FROZEN_LEAVES[arm])
@@ -363,19 +419,23 @@ for arm in (TC.TSS, TC.GEN):
     check(f"{arm}: the backbone moved",
           moved_finite(onp.asarray(p2["a_proj"]).ravel()[0],
                        onp.asarray(p["a_proj"]).ravel()[0]))
-    bad = TC.validate(arm, p2)
-    check(f"{arm}: the updated tree validates ({bad})", bad is None)
+    m6, sets6 = TC.evaluate_arm(arm, p2, TK.generate_batch(9753, 4))
+    bad = TC.checkpoint_failure(arm, p2, opt2, p, m6, sets6)
+    check(f"{arm}: the updated tree passes checkpoint acceptance on the "
+          f"coefficients its evaluation executed ({bad})", bad is None)
     print(f"  {arm}: loss {float(o[2]):.6f} acc {float(o[3]):.4f} grads "
           f"{ {k: float(v) for k, v in grads.items()} } repaired "
           f"{int(tel['n_repaired'])} jury_min "
-          f"{float(tel['guard_jury_min']):.3e}")
+          f"{float(tel['gate_jury_min']):.3e}")
 
 print("--- 7. a NaN update is refused, not counted as movement ---")
 nan_tree = tree(float("nan"), 0.0, H)
+nan_exec = FL.coefficient_values(TC.rollout_outputs(FL.FILTERED, nan_tree,
+                                                    e0)["coeff"])
 check("a NaN coefficient fails the executed gate",
-      FL.filter_failure(FL.filter_report(nan_tree)) is not None)
+      FL.filter_failure(FL.filter_report(nan_exec)) is not None)
 check("a NaN coefficient fails arm validation",
-      TC.validate(TC.GEN, nan_tree) is not None)
+      TC.validate(TC.GEN, nan_tree, [nan_exec]) is not None)
 check("a NaN tree is not finite", not finite_tree(nan_tree))
 
 print()
