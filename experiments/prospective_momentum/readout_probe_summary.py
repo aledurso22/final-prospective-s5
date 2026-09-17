@@ -174,3 +174,7 @@ def main(run_dir):
                       f"{[round(x, 4) for x in sec['revised_label_probability'][:6]]}"
                       f" untouched "
                       f"{[round(x, 4) for x in sec['untouched_label_probability'][:6]]}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])
