@@ -598,74 +598,113 @@ def deployment_outcome_ra(rows, plan):
 
 
 # --------------------------------------------------------------- preflight --
-def preflight_ra(sources, refs, val_np, out, status):
-    """Times the ACTUAL retention-aware step (reference forward included) and
-    one full checkpoint per family; projects the worst case."""
+def _cache_size():
+    return train_step_ra._cache_size()
+
+
+def preflight_ra(sources, refs, val_np, out, status, step_factory=None,
+                 evaluate=None, checkpoint_failure=None, save_tree=None,
+                 cache_size=None, start_tree=None):
+    """Measures and validates EVERY (family, lambda slot) executable on
+    disposable production state before any training (review R1): the actual
+    host step (reference forward, synchronization and per-step acceptance),
+    its initial call, its steady step time and retrace behaviour, plus a full
+    checkpoint (evaluation, acceptance, persistence). A failure or retrace in
+    either slot is recorded under that slot and cannot be hidden by the other.
+    The projection uses the slot-specific measurements; both compilations are
+    already incurred here and are not charged again. The keyword arguments
+    exist only so the orchestration can be checked with stubs; production
+    uses the defaults."""
+    step_factory = step_factory or make_host_step
+    evaluate = evaluate or TR.evaluate_arm
+    checkpoint_failure = checkpoint_failure or TR.checkpoint_failure
+    save_tree = save_tree or ST.save_tree
+    cache_size = cache_size or _cache_size
+    start_tree = start_tree or TC.start_tree
     rows, failures, retraced_any = [], [], False
     p0 = sources[SOURCE_DEV]
     lr = jnp.asarray(LR, dtype=jnp.float32)
-    step = make_host_step(1.0, refs)
-    step_s, ckpt_s, eval_s, compile_s = {}, {}, {}, {}
     scratch = os.path.join(out, "preflight_disposable")
+    cost = {}
     for arm, rule, frozen, _ in TRAINED_ARMS:
-        p = TC.start_tree(arm, p0)
-        opt = ST.TX.init(p)
-        hist, acc_bad = [], None
-        t0 = time.time()
-        p2, opt2, sc, rec = step(arm, p, opt, SOURCE_DEV, 0, lr, hist)
-        compile_s[arm] = time.time() - t0
-        acc_bad = acc_bad or step_failure_ra(arm, sc, rec)
-        p2, opt2, sc, rec = step(arm, p2, opt2, SOURCE_DEV, 1, lr, hist)
-        acc_bad = acc_bad or step_failure_ra(arm, sc, rec)
-        n0 = train_step_ra._cache_size()
-        t1 = time.time()
-        for u in range(2, 7):
-            p2, opt2, sc, rec = step(arm, p2, opt2, SOURCE_DEV, u, lr, hist)
+        for tag, lam in LAMBDAS:
+            step = step_factory(lam, refs)
+            p = start_tree(arm, p0)
+            opt = ST.TX.init(p)
+            hist, acc_bad = [], None
+            t0 = time.time()
+            p2, opt2, sc, rec = step(arm, p, opt, SOURCE_DEV, 0, lr, hist)
+            warm_s = time.time() - t0
             acc_bad = acc_bad or step_failure_ra(arm, sc, rec)
-        step_s[arm] = (time.time() - t1) / 5.0
-        retraced_any |= train_step_ra._cache_size() != n0
-        TR.evaluate_arm(arm, p2, val_np)
-        t3 = time.time()
-        m, sets = TR.evaluate_arm(arm, p2, val_np)
-        eval_s[arm] = time.time() - t3
-        fail = TR.checkpoint_failure(arm, p2, opt2, p, m, sets)
-        ST.save_tree(os.path.join(scratch, f"{arm}.msgpack"), p2)
-        ST.save_tree(os.path.join(scratch, f"{arm}_opt.msgpack"), opt2)
-        ckpt_s[arm] = time.time() - t3
-        acc_bad = acc_bad or fail
-        if acc_bad:
-            failures.append(f"{arm}: {acc_bad}")
-        rows.append(dict(arm=arm, step_s=step_s[arm], checkpoint_s=ckpt_s[arm],
-                         evaluation_s=eval_s[arm],
-                         compile_s_incurred=compile_s[arm],
-                         measured_steps_checked=len(hist),
-                         last_terms=rec.get("terms"),
-                         acceptance_failure=acc_bad))
-        print(f"[preflight] {arm:<24} step {step_s[arm] * 1e3:6.2f}ms "
-              f"checkpoint {ckpt_s[arm]:5.2f}s compile {compile_s[arm]:4.1f}s "
-              f"failure {acc_bad}")
+            p2, opt2, sc, rec = step(arm, p2, opt2, SOURCE_DEV, 1, lr, hist)
+            acc_bad = acc_bad or step_failure_ra(arm, sc, rec)
+            n0 = cache_size()
+            t1 = time.time()
+            for u in range(2, 7):
+                p2, opt2, sc, rec = step(arm, p2, opt2, SOURCE_DEV, u, lr,
+                                         hist)
+                acc_bad = acc_bad or step_failure_ra(arm, sc, rec)
+            step_s = (time.time() - t1) / 5.0
+            retraced = bool(cache_size() != n0)
+            evaluate(arm, p2, val_np)                      # compile, once
+            t3 = time.time()
+            m, sets = evaluate(arm, p2, val_np)
+            eval_s = time.time() - t3
+            fail = checkpoint_failure(arm, p2, opt2, p, m, sets)
+            save_tree(os.path.join(scratch, f"{arm}_{tag}.msgpack"), p2)
+            save_tree(os.path.join(scratch, f"{arm}_{tag}_opt.msgpack"), opt2)
+            ckpt_s = time.time() - t3
+            acc_bad = acc_bad or fail
+            timings = dict(warmup_s=warm_s, step_s=step_s,
+                           evaluation_s=eval_s, checkpoint_s=ckpt_s)
+            bad_t = {k: v for k, v in timings.items()
+                     if not (onp.isfinite(v) and v >= 0)}
+            if bad_t:
+                acc_bad = acc_bad or f"non-finite or negative timing {bad_t}"
+            if acc_bad:
+                failures.append(f"{arm}/{tag}: {acc_bad}")
+            retraced_any |= retraced
+            cost[(arm, tag)] = timings
+            rows.append(dict(arm=arm, config=tag, lam=lam, **timings,
+                             retraced=retraced,
+                             measured_steps_checked=len(hist),
+                             last_terms=rec.get("terms"),
+                             acceptance_failure=acc_bad))
+            print(f"[preflight] {arm:<24} {tag:<7} warm {warm_s:5.1f}s "
+                  f"step {step_s * 1e3:6.2f}ms checkpoint {ckpt_s:5.2f}s "
+                  f"retraced {retraced} failure {acc_bad}")
     factor = HELDOUT_PER_FAMILY / VAL_PER_FAMILY
     total = 0.0
     for arm, _, _, _ in TRAINED_ARMS:
-        traj = UPDATES * step_s[arm] + len(VAL_AT) * ckpt_s[arm]
-        total += len(LAMBDAS) * traj                                 # dev
-        total += len(LAMBDAS) * len(SOURCE_FINAL) * traj             # finals
-        total += compile_s[arm]                    # the other lambda compile
-        total += len(ROLES) * len(SOURCE_FINAL) * factor * eval_s[arm]
-    total += (1 + len(SOURCE_FINAL)) * max(ckpt_s.values())          # anchor
-    total += len(SOURCE_FINAL) * factor * max(eval_s.values())
+        for tag, _ in LAMBDAS:
+            c = cost[(arm, tag)]
+            traj = UPDATES * c["step_s"] + len(VAL_AT) * c["checkpoint_s"]
+            total += traj                                        # development
+            total += len(SOURCE_FINAL) * traj                    # finals
+        worst_eval = max(cost[(arm, t)]["evaluation_s"] for t, _ in LAMBDAS)
+        total += len(ROLES) * len(SOURCE_FINAL) * factor * worst_eval
+    worst_ckpt = max(c["checkpoint_s"] for c in cost.values())
+    worst_eval = max(c["evaluation_s"] for c in cost.values())
+    total += (1 + len(SOURCE_FINAL)) * worst_ckpt + len(SOURCE_FINAL) * \
+        factor * worst_eval                                      # anchor
     host_s = 40.0
     total += host_s
+    if not onp.isfinite(total) or total < 0:
+        failures.append(f"non-finite or negative projection {total}")
     status["preflight"] = dict(
         rows=rows, retraced_any=bool(retraced_any), failures=failures,
         projected_remaining_s=total, host_allowance_s=host_s,
-        coverage=("worst case: both lambda slots of every family in "
+        slots_measured=[[r["arm"], r["config"]] for r in rows],
+        coverage=("both lambda slots of all four families measured and "
+                  "validated on disposable production state (actual host "
+                  "step with the reference forward, initial call, steady "
+                  "step, retrace, full checkpoint). Projection from those "
+                  "slot-specific costs at the worst case: both slots in "
                   "development and for every final seed, all five "
-                  "checkpoints each, the second lambda compilation, every "
-                  "endpoint role's held-out evaluation, and the anchor. The "
-                  "measured step includes the reference forward pass."))
-    if not onp.isfinite(total):
-        failures.append(f"non-finite projection {total}")
+                  "checkpoints each, every endpoint role's held-out "
+                  "evaluation (worst slot), the anchor and a 40 s host "
+                  "allowance. Both compilations were incurred here and are "
+                  "not charged again."))
     print(f"PREFLIGHT_PROJECTED_TOTAL_S={total:.1f}")
     return total, bool(retraced_any), failures
 

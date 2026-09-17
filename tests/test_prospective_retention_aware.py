@@ -310,3 +310,78 @@ def test_reference_mapping_is_derived_and_never_substituted(tmp_path):
     failed["study_status"] = "FAILED"
     with pytest.raises(RA.ReferenceRefusal):
         RA.reference_mapping(run, failed)
+
+
+# ============================ 7. preflight covers both slots (review R1) ====
+def _stub_preflight(tmp_path, fail=None, retrace=None):
+    """Runs the REAL preflight orchestration with stubbed numerics: every
+    (family, slot) must be exercised, and a lambda = 0 failure or retrace
+    must surface under that slot."""
+    calls, counter = [], {"n": 0}
+
+    def factory(lam, refs):
+        def step(arm, p, opt, seed, u, lr, hist):
+            calls.append((arm, lam, u))
+            if retrace == (arm, lam) and u >= 2:
+                counter["n"] += 1
+            terms = dict(base=1.0, ce_untouched=1.0, ce_recall=1.0,
+                         reference_untouched=1.0, reference_recall=1.0,
+                         penalty_untouched=0.0, penalty_recall=0.0,
+                         min_cell_count=4.0)
+            if fail == (arm, lam):
+                terms["penalty_recall"] = float("nan")
+            rec = dict(update=u, executed_filter_ok=True, jury_min=0.5,
+                       proc_max_abs=1.0, executed={}, terms=terms,
+                       **{k: 0.1 for k in FL.LEAVES},
+                       **{"grad_" + k: 0.0 for k in FL.LEAVES})
+            hist.append(rec)
+            return p, opt, {k: 0.5 for k in ST.SCALAR_NAMES}, rec
+        return step
+    status = {}
+    total, retraced, failures = RA.preflight_ra(
+        {RA.SOURCE_DEV: {}}, {}, None, str(tmp_path), status,
+        step_factory=factory, evaluate=lambda arm, p, v: ({}, None),
+        checkpoint_failure=lambda *a: None,
+        save_tree=lambda path, tree: None,
+        cache_size=lambda: counter["n"],
+        start_tree=lambda arm, p0: {"w": jnp.zeros((1,))})
+    return calls, status, total, retraced, failures
+
+
+def test_preflight_exercises_every_family_and_slot(tmp_path):
+    calls, status, total, retraced, failures = _stub_preflight(tmp_path)
+    seen = {(a, lam) for a, lam, _ in calls}
+    assert seen == {(a, lam) for a, _, _, _ in RA.TRAINED_ARMS
+                    for _, lam in RA.LAMBDAS}
+    assert all(sum(1 for c in calls if c[:2] == k) == 7 for k in seen)
+    assert len(status["preflight"]["rows"]) == 8
+    assert failures == [] and retraced is False and onp.isfinite(total)
+    assert "not charged again" in status["preflight"]["coverage"]
+
+
+def test_a_lambda_zero_failure_or_retrace_cannot_be_hidden(tmp_path):
+    _, status, _, _, failures = _stub_preflight(
+        tmp_path, fail=(RA.GEN, 0.0))
+    assert any(f.startswith(f"{RA.GEN}/lambda0") for f in failures)
+    assert not any(f.startswith(f"{RA.GEN}/lambda1") for f in failures)
+    _, status, _, retraced, failures = _stub_preflight(
+        tmp_path, retrace=(RA.NATIVE, 0.0))
+    assert retraced is True
+    rows = {(r["arm"], r["config"]): r for r in status["preflight"]["rows"]}
+    assert rows[(RA.NATIVE, "lambda0")]["retraced"] is True
+    assert rows[(RA.NATIVE, "lambda1")]["retraced"] is False
+
+
+# ============================ 8. digest pairing (review D1) =================
+def test_digest_pairs_saved_full_precision_values():
+    from experiments.prospective_momentum import retention_aware_summary as RS_
+    a = dict(primary=0.712345678, retention_revision_untouched=0.70001,
+             recall_overall=0.79)
+    b = dict(primary=0.702345678, retention_revision_untouched=0.70002,
+             recall_overall=0.79)
+    d = RS_.paired_differences({("x", 501): a, ("y", 501): b}, "x", "y",
+                               [501, 502])
+    assert d[501]["retention"] == a["retention_revision_untouched"] - \
+        b["retention_revision_untouched"]
+    assert d[501]["revision"] == a["primary"] - b["primary"]
+    assert d[502]["missing"] == ["x", "y"]

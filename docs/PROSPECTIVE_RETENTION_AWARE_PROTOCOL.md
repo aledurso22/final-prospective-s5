@@ -182,20 +182,35 @@ slots.
 7. training, held-out evaluation, source and reference integrity, digest and
    verdict.
 
-**Measured preflight** times the actual retention-aware step, including the
-reference forward, and one full checkpoint per family. It projects the worst
-case:
-- both slots for development and for every final seed, each with all
-  checkpoints;
-- the second slot's compilation;
-- the held-out evaluation of every endpoint role;
+**Measured preflight** (review of 73022f1, R1) exercises **both lambda slots
+of all four families**: eight executables, on disposable production float32
+state, before any training. For each (family, slot) it runs the actual host
+step (reference forward, host synchronization and per-step acceptance at
+every measured step) and records:
+- its initial-call time;
+- its steady step time;
+- whether it retraced;
+- one full checkpoint (evaluation, acceptance, persistence);
+- the acceptance result, with every timing required finite and non-negative.
+
+A failure or retrace in the `lambda = 0` slot is recorded under that slot and
+cannot be hidden by a passing `lambda = 1` slot.
+
+The projection uses those **slot-specific** measurements at the worst case:
+- both slots in development and for every final seed, each with all five
+  checkpoints (the 6,400-update maximum);
+- held-out evaluation of every endpoint role at the slower slot's evaluation
+  cost;
 - the anchor;
 - a recorded 40 s host allowance.
 
-It refuses as INCOMPLETE if that does not fit. There are no retries and no
+Both compilations are incurred inside preflight and are **not charged again**.
+Preflight refuses as FAILED on any acceptance failure and as INCOMPLETE on a
+retrace or if the projection does not fit. There are no retries and no
 trimming.
 
-**Budget estimate (not a measurement).** The earlier runs measured law checks
+**Budget estimate (not a measurement; preflight now also compiles the
+`lambda = 0` executables before deciding).** The earlier runs measured law checks
 at 76 s, the float32 probe at 42 s and temporal checks at 24 s. The targeted
 checks and study are estimated from those runs' step and checkpoint times
 (about 13–17 ms per step without the reference forward). Together they put
@@ -222,7 +237,13 @@ estimate.
   unconstrained and `lambda = 0` endpoints, update-0 sharing, unaccepted
   checkpoints, the final plan, and primary-verdict unavailability;
 - the reference mapping from saved status: derivation, a missing seed, a
-  swapped file, a changed frozen selection, a changed recipe, a failed run.
+  swapped file, a changed frozen selection, a changed recipe, a failed run;
+- preflight orchestration with stubbed numerics (R1): all eight (family,
+  slot) combinations are exercised with seven checked steps each; a
+  `lambda = 0` failure and a `lambda = 0` retrace surface under that slot and
+  are not hidden by `lambda = 1`;
+- digest pairing (D1): seed-keyed revision, retention and recall differences
+  come from the saved full-precision values, with a missing pair reported.
 
 ## 8. Reuse and shared-code change
 
@@ -232,3 +253,20 @@ estimate.
 ## 9. Launch (after static review only)
 
     bash bin/run_experiments/cluster_prospective_retention_aware.sh
+
+## 10. Amendment record (review of 73022f1)
+
+- **R1:** production preflight now measures and validates both lambda slots
+  for every family, and projects remaining work from the slot-specific costs
+  without re-charging completed compilations. A stubbed orchestration fixture
+  shows that all eight combinations are exercised and that a `lambda = 0`
+  failure or retrace cannot be hidden.
+- **D1:** the digest prints seed-keyed revision, retention and recall
+  differences for every comparison, computed from saved full-precision
+  held-out metrics before formatting, with missing pairs reported explicitly.
+  This is read-only reporting, not a new metric or criterion.
+
+Unchanged: loss, equations, arms, reference files, slots, learning rate,
+checkpoint schedule, streams, numerical tolerances, performance criteria, the
+6,400-update maximum and the single 600-second cap.
+

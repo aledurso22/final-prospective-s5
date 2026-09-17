@@ -13,7 +13,27 @@ from .summary import f
 from .temporal_response_summary import agg_line, delay_lines
 
 
-def comparison_lines(c):
+PAIRED_KEYS = (("revision", "primary"),
+               ("retention", "retention_revision_untouched"),
+               ("recall", "recall_overall"))
+
+
+def paired_differences(rows_by, candidate, against, seeds):
+    """Seed-keyed differences computed from the SAVED full-precision held-out
+    metrics, subtracted before any formatting (review D1). A missing pair is
+    reported explicitly, never skipped."""
+    out = {}
+    for s in seeds:
+        a, b = rows_by.get((candidate, s)), rows_by.get((against, s))
+        if a is None or b is None:
+            out[s] = dict(missing=[x for x, r in ((candidate, a),
+                                                   (against, b)) if r is None])
+            continue
+        out[s] = {name: a[key] - b[key] for name, key in PAIRED_KEYS}
+    return out
+
+
+def comparison_lines(c, rows_by=None, seeds=()):
     if c.get("available") is False:
         print(f"  [{c['name']}] {c['candidate']} vs {c['against']}: "
               f"UNAVAILABLE - {c.get('reason')}")
@@ -26,6 +46,14 @@ def comparison_lines(c):
     print(f"    retention {f(c['retention_difference'])} "
           f"({c.get('retention_direction')}) recall "
           f"{f(c['recall_difference'])} ({c.get('recall_direction')})")
+    for s, d in paired_differences(rows_by or {}, c["candidate"],
+                                   c["against"], seeds).items():
+        if "missing" in d:
+            print(f"    seed {s}: MISSING held-out endpoint {d['missing']}")
+        else:
+            print(f"    seed {s}: revision {100 * d['revision']:+.4f} pp "
+                  f"retention {100 * d['retention']:+.4f} pp recall "
+                  f"{100 * d['recall']:+.4f} pp")
     sec = c.get("secondary_cells") or {}
     for k in ("immediate_revision", "later"):
         if k in sec:
@@ -62,10 +90,11 @@ def main(run_dir):
     pf = st.get("preflight") or {}
     print("\n--- preflight ---")
     for r in pf.get("rows", []):
-        print(f"  {r.get('arm'):<24} step {f(1e3 * r.get('step_s', 0), 2)}ms "
-              f"checkpoint {f(r.get('checkpoint_s'), 2)}s compile "
-              f"{f(r.get('compile_s_incurred'), 1)}s steps checked "
-              f"{r.get('measured_steps_checked')} failure "
+        print(f"  {r.get('arm'):<24} {r.get('config'):<7} warm "
+              f"{f(r.get('warmup_s'), 1)}s step "
+              f"{f(1e3 * r.get('step_s', 0), 2)}ms checkpoint "
+              f"{f(r.get('checkpoint_s'), 2)}s retraced {r.get('retraced')} "
+              f"steps checked {r.get('measured_steps_checked')} failure "
               f"{r.get('acceptance_failure')}")
         print(f"    last loss terms {r.get('last_terms')}")
     print(f"  projected {pf.get('projected_remaining_s')} failures "
@@ -109,15 +138,18 @@ def main(run_dir):
         for ex in h.get("executed_coefficient_sets") or []:
             print(f"      executed {ex}")
 
+    rows_by = {(r["rule"], r["seed"]): r["heldout"]
+               for r in st.get("final", []) if r.get("heldout")}
+    seeds = st.get("final_seeds", [])
     sc = st.get("screen") or {}
     if sc:
         print(f"\n--- PRIMARY verdicts (constrained endpoints) ---\n  "
               f"{sc.get('rule')}")
         for c in sc.get("primary", []):
-            comparison_lines(c)
+            comparison_lines(c, rows_by, seeds)
         print("\n--- descriptive comparisons ---")
         for c in sc.get("descriptive", []):
-            comparison_lines(c)
+            comparison_lines(c, rows_by, seeds)
         print(f"\n  note: {sc.get('note')}")
     for arm, o in (st.get("deployment_outcome") or {}).items():
         print(f"  deployment {arm:<22} {o}")
