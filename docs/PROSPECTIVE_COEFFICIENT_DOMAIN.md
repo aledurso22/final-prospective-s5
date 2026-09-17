@@ -84,7 +84,11 @@ that clamping `gamma` is off the table.** The repair restores both through
   (step 3), which cannot undo step 2 because it only increases `T`.
 
 The repair is therefore idempotent, never clamps `gamma`, and moves exactly
-one coordinate. Its result is **verified on the executed rounded
+one coordinate. **A repaired point is a different hypothesis**, because `T`
+also sets the window of the velocity smoother: the telemetry logs the
+proposed and the repaired coordinates separately, and a swept grid point that
+the repair would move is reported at its repaired location or refused, never
+at its nominal one. Its result is **verified on the executed rounded
 coefficients**, not on the proposal: after every repair the executed `a, b`
 are classified and must be strictly stable, the same gate as before.
 

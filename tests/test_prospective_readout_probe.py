@@ -406,3 +406,120 @@ def test_probe_stream_is_fresh():
     lo = RB.STREAM["probe"]
     for a, b in RA.previous_ranges() + list(RA.new_ranges().values()):
         assert not (a <= lo <= b), (a, b)
+
+
+# ===================== 5. the declared target branch and power =============
+def test_closed_form_of_the_idle_roll_forward():
+    """target_k = alpha^k W_t - c_k U_t exactly, with the idle gates."""
+    pn = _source_native_f64()
+    batch = TT.generate_batch(991_106, 4)
+    fails, tr = RB.trajectories(pn, batch)
+    assert fails == [], fails
+    targets = RB.roll_forward(tr)
+    g = tr["idle_gates"]
+    al, be, mu = g["alpha"], g["beta"], g["mu"]
+    for k in RB.K_OFFSETS:
+        cu = (be * mu * (al ** k - mu ** k) / (al - mu) if al != mu
+              else k * be * mu * al ** (k - 1))
+        want = (al ** k) * tr["W"].astype(F64) - cu * tr["U"].astype(F64)
+        got = targets[k].astype(F64)
+        assert onp.max(onp.abs(got - want)) <= 1e-4 * max(
+            1.0, float(onp.max(onp.abs(want)))), k
+
+
+def _fake_tr(alpha=0.9, beta=0.5, mu=0.6):
+    return dict(idle_gates=dict(alpha=alpha, beta=beta, mu=mu, eta=1.0),
+                alpha=onp.full((2, 4), alpha, dtype=onp.float32),
+                beta=onp.full((2, 4), beta, dtype=onp.float32))
+
+
+def _rec_t(family, sel, conf, target=RB.PRIMARY_TARGET):
+    m = {}
+    for k in RB.K_OFFSETS:
+        for tgt in (RB.PRIMARY_TARGET, RB.SECONDARY_TARGET):
+            v_sel = sel if tgt == target else 0.99
+            v_conf = conf if tgt == target else 0.99
+            m[RB.primary_key(half="selection", k=k, target=tgt)] = dict(
+                mean=v_sel, underpowered=False)
+            m[RB.primary_key(half="confirmation", k=k, target=tgt)] = dict(
+                mean=v_conf, underpowered=False)
+    return dict(family=family, metrics=m)
+
+
+def test_declared_branch_moves_to_the_secondary_target_when_trivial():
+    """DECLARED before the run: if the best lookahead arm is already
+    near-exact on the primary target, the decision moves to the secondary
+    target. Both rules are still computed."""
+    near = {"lookahead@lambda=1.0": _rec_t("lookahead", 0.01, 0.01),
+            "tss@T=1.0": _rec_t("literal_tss", 0.80, 0.80),
+            "generalized@x": _rec_t("generalized_interior", 0.50, 0.50)}
+    d = RB.closed_form_diagnostic(_fake_tr(), near)
+    assert d["decisive_target"] == RB.SECONDARY_TARGET
+    assert d["offsets_near_exact"] == len(RB.K_OFFSETS)
+    assert d["closed_form_coefficients"]["k1"]["coefficient_on_W"] == \
+        pytest.approx(0.9)
+    assert d["closed_form_coefficients"]["k1"]["coefficient_on_U"] == \
+        pytest.approx(0.5 * 0.6)
+    far = {"lookahead@lambda=1.0": _rec_t("lookahead", 0.60, 0.60),
+           "tss@T=1.0": _rec_t("literal_tss", 0.80, 0.80),
+           "generalized@x": _rec_t("generalized_interior", 0.50, 0.50)}
+    assert RB.closed_form_diagnostic(_fake_tr(), far)["decisive_target"] == \
+        RB.PRIMARY_TARGET
+    # the rule reads the target it is given
+    sr = RB.stopping_rule(far, RB.PRIMARY_TARGET)
+    assert sr["target"] == RB.PRIMARY_TARGET and sr["passes"]
+    sr2 = RB.stopping_rule(far, RB.SECONDARY_TARGET)
+    assert sr2["target"] == RB.SECONDARY_TARGET and not sr2["passes"]
+
+
+def test_cells_report_their_power():
+    num = onp.full((10, 10), 0.5)
+    den = onp.ones((10, 10))
+    small = RB._ratio(num[:2], den[:2], onp.ones((2, 10), dtype=bool))
+    assert small["n"] == 20 and small["underpowered"] is True   # n < 100
+    rs = onp.random.RandomState(0)
+    big_num = 0.5 + 0.001 * rs.randn(200, 10)
+    big = RB._ratio(big_num, onp.ones((200, 10)),
+                    onp.ones((200, 10), dtype=bool))
+    assert big["n"] == 2000 and big["sem"] < RB.STOP_MARGIN / 2
+    assert big["underpowered"] is False
+    noisy = RB._ratio(0.5 + rs.randn(200, 10), onp.ones((200, 10)),
+                      onp.ones((200, 10), dtype=bool))
+    assert noisy["underpowered"] is True                        # sem too big
+
+
+def test_a_repaired_grid_point_fails_and_is_logged_at_both_locations():
+    moved = dict(name="probe@moved", family="generalized_interior",
+                 kind="filter", M=0.0, gamma=0.0, T=0.2)   # violates the gap
+    fails, rows = RB.arm_admissibility([moved])
+    assert fails and "different hypothesis" in fails[0]
+    row = rows[0]
+    assert row["repair_moved"] is True
+    assert row["proposed"] == dict(M=0.0, gamma=0.0, T=0.2)
+    assert row["repaired"]["T"] > row["proposed"]["T"]
+    assert row["repaired"]["gamma"] == 0.0
+    ok = dict(name="probe@ok", family="generalized_interior", kind="filter",
+              M=0.25, gamma=-0.25, T=1.0)
+    fails2, rows2 = RB.arm_admissibility([ok])
+    assert fails2 == [] and rows2[0]["repair_moved"] is False
+
+
+def test_production_dtype_gate_exercises_negative_gamma():
+    """The gate must accept gamma < 0 on the ROUNDED float32 coefficients the
+    probe executes, and agree with the float64 classification."""
+    neg = [a for a in RB.arms()
+           if a["kind"] == "filter" and a["gamma"] < 0]
+    assert len(neg) >= 4                       # kappa > 1 and an interior point
+    for a in neg:
+        p32 = {"fil_M": jnp.full((1,), a["M"], jnp.float32),
+               "fil_gamma": jnp.full((1,), a["gamma"], jnp.float32),
+               "fil_T": jnp.full((1,), a["T"], jnp.float32)}
+        c32 = FL.coefficients(p32)
+        assert all(onp.asarray(x).dtype == onp.float32 for x in c32)
+        r32 = FL.filter_report(FL.coefficient_values(c32))
+        r64 = FL.filter_report(_coeffs(a["M"], a["gamma"], a["T"]))
+        assert FL.filter_failure_corrected(r32) is None, (a["name"], r32)
+        assert r32["classification"] == r64["classification"] == "stable"
+        assert FL.filter_failure(r32) is not None      # passive still refuses
+        for key in ("a", "b", "c", "d"):
+            assert abs(r32[key] - r64[key]) <= 1e-6 * max(1.0, abs(r64[key]))

@@ -53,6 +53,12 @@ def main(run_dir):
     print(f"measurement: {st.get('measurement')}")
     print(f"checkpoints {st.get('checkpoint_run')} seeds {st.get('seeds')}")
     print(f"grids {st.get('grids')}")
+    moved = [r for r in (st.get("arm_table") or []) if r.get("repair_moved")]
+    print(f"arms whose proposed point the repair would move: {len(moved)} "
+          f"{[r['name'] for r in moved]}")
+    neg = [r for r in (st.get("arm_table") or [])
+           if (r.get("proposed") or {}).get("gamma", 0) < 0]
+    print(f"arms with gamma < 0 exercised on the production path: {len(neg)}")
     print(f"arms {st.get('n_arms')} stream {st.get('stream')} episodes/family "
           f"{st.get('episodes_per_family')} offsets {st.get('offsets')}")
     tc = st.get("task_check") or {}
@@ -92,7 +98,23 @@ def main(run_dir):
         print(f"\n=== checkpoint {seed} (wall {f(r.get('wall_s'), 1)}s, "
               f"native-point agreement {r.get('native_point_logit_agreement')}"
               f") ===")
-        print(f"  idle gates {r.get('idle_gates')}")
+        cf = r.get("closed_form") or {}
+        print(f"  idle gates {cf.get('idle_gates') or r.get('idle_gates')}")
+        print(f"  closed-form target coefficients "
+              f"{cf.get('closed_form_coefficients')}")
+        print(f"  gate variation {cf.get('gate_variation')}")
+        print(f"  best lookahead on the primary target (selection half) "
+              f"{cf.get('best_lookahead_on_primary')}")
+        print(f"  near-exact at {cf.get('offsets_near_exact')} offsets "
+              f"(threshold {cf.get('near_exact_threshold')}) -> DECISIVE "
+              f"TARGET {cf.get('decisive_target')}")
+        print(f"  {cf.get('note')}")
+        other = r.get("rule_on_the_other_target") or {}
+        print(f"  rule on the other target ({other.get('target')}): passes="
+              f"{other.get('passes')} offsets won {other.get('offsets_won')}")
+        und = r.get("underpowered_cells") or []
+        print(f"  underpowered cells: {len(und)}"
+              + (f" (first: {und[:3]})" if und else ""))
         print(f"  stopping rule: offsets won {sr.get('offsets_won')} of "
               f"{sr.get('offsets_required')} required -> passes="
               f"{sr.get('passes')} (margin {sr.get('margin')}, baseline "

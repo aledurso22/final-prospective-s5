@@ -63,6 +63,38 @@ scored only if the denominator exceeds 1e-6; exclusions are counted.
 `W_(t+k)`, and the full-matrix (Frobenius) errors against both targets. A
 Frobenius win can come from directions nobody queries, so it never decides.
 
+**The primary target is closed form, and how predictable it is gets measured
+and can switch the decision — declared here, before the run.** With idle
+gates the roll-forward is exactly
+
+    target_k = alpha^k W_t - c_k U_t,
+    c_k = beta mu (alpha^k - mu^k)/(alpha - mu)        (verified exactly),
+
+so the `U`-lookahead family contains the `U` part exactly and differs from
+the target only by the decay term `(1 - alpha^k) W_t` — the very term the
+filtered arms can extrapolate and the lookahead cannot. If `alpha^k` is close
+to one, the best `lambda` will match the target almost exactly and every
+filtered arm loses by construction. That is an honest answer, not a metric
+flaw, but it would make the verdict close to foreknown.
+
+**Declared rule.** Each checkpoint reports the closed-form coefficients
+`alpha^k` and `c_k`, how much the per-token gates vary, and the best
+lookahead arm's error on the **selection** half. If that error is at most
+**0.05** at **at least 3 of the 5** offsets, the primary target counts as
+near-trivially predictable and **the interior-versus-baseline decision moves
+to the secondary target** (the actual `W_(t+k)`), where real writes and
+varying gates make the trend estimate non-trivial. The rule is evaluated on
+both targets and both are reported; only which one decides changes, and the
+switch is decided on selection-half data, never on the confirmation half.
+
+**Power.** Every reported cell carries its count `n` and the standard error
+of its mean, and is flagged **underpowered** when `n < 100` or that standard
+error exceeds half the 0.01 decision margin. The rule itself is evaluated on
+the pooled `all`-kind, `both`-condition cell — about 640 answered queries per
+offset on the confirmation half — while the split by query kind and condition
+is reporting. Underpowered cells are listed in the run record and named in
+the report instead of being read as results.
+
 Reported separately, never as one aggregate: query kind (revised keys,
 i.e. revised probes and late selected, versus untouched keys), fill condition
 (both, idle gap, intervening writes), offset `k` in {1, 2, 4, 8, 16}, half
@@ -98,7 +130,27 @@ so the interior cannot win the argmin by having more grid points:
 | Two-tap readout `(1+kappa) W_t - kappa W_(t-1)` | `kappa` in {0.25, 0.5, 1, 1.5, 2, 2.5, 3} (includes `kappa > 1`, i.e. `gamma < 0`) | none |
 | Literal TSS | `T` in {0.75, 1, 1.5, 2, 3, 4, 8} | one matrix |
 | `U`-lookahead `X_t = W_t - lambda beta_t U_t` | `lambda` in {0.1, 0.25, 0.5, 1, 1.5, 2, 3} | none |
-| Generalized interior | `(M, gamma, T)` in {(0.1,0,1), (0.25,0,1), (0.5,0,1), (0.25,−0.25,1), (0.25,0.25,1), (0.25,0,0.5), (0.25,0,2)} | two matrices |
+| Generalized interior | seven declared points, below | two matrices |
+
+**The seven interior points, and why each is there.** They were chosen
+without data, around the centre point `(M, gamma, T) = (0.25, 0, 1)`:
+
+| Point | Why |
+|---|---|
+| (0.25, 0, 1) | centre: a moderate second-order smoother at the TSS-like horizon |
+| (0.1, 0, 1) | mass an order below the centre: near the first-order (literal TSS) limit |
+| (0.5, 0, 1) | mass doubled: a slower, heavier velocity smoother |
+| (0.25, −0.25, 1) | negative damping at fixed mass: total lead `(h-gamma)/h = 1.25`, the region the old passive domain excluded |
+| (0.25, +0.25, 1) | positive damping at fixed mass: lead `0.75`, the interior of the old domain |
+| (0.25, 0, 0.5) | shorter horizon at fixed mass and lead |
+| (0.25, 0, 2) | longer horizon at fixed mass and lead |
+
+This is a one-at-a-time design around one centre, not a search. **A negative
+verdict is therefore a statement about these seven points**, on this task,
+these checkpoints and these offsets — **not about the interior of the family
+as a whole.** The report and the saved verdict both say so. The wider
+descriptive grid is reported beside them precisely so that a miss in the
+declared seven would be visible.
 
 Plus the **native identity** (reference, 1 arm) and a **descriptive extended
 interior** (`M` in {0.1,0.25,0.5,1} x `gamma` in {−0.5,−0.25,0,0.25,0.5} x
@@ -126,10 +178,13 @@ Declared here, before execution:
 > confirmation number is at least **0.01** below the baseline's. The
 > checkpoint passes if the interior wins **at least 3 of the 5** offsets.
 >
+> **Target:** whichever the declared closed-form test of s3 selects for that
+> checkpoint; the rule on the other target is computed and reported too.
+>
 > **Overall:** the interior helps only if it passes on **at least 3 of the 4
 > checkpoints** — not on a pooled mean. Otherwise: **STOP.** Given that we
-> hold the ground truth, the added freedom does not help on the read path,
-> and no trained comparison follows.
+> hold the ground truth, the added freedom does not help on the read path for
+> **the seven declared interior points**, and no trained comparison follows.
 
 Passing authorizes **nothing** by itself: a trained comparison remains a
 separate decision after Stage B reports.
@@ -168,4 +223,22 @@ described as expected to be positive.
 
 These change the decision procedure, not the placement or the equations. With
 1, 2 and 4 applied the stage is decisive either way.
+
+## 10. Second amendment (coordinator review, 17 September 2026)
+
+1. **Closed-form predictability of the primary target** is measured per
+   checkpoint (closed-form coefficients, gate variation, the best lookahead's
+   selection-half error) and, by a rule declared **before** the run, can move
+   the decision to the secondary target.
+2. **The seven interior points are justified one by one** (s5), and both the
+   protocol and the saved verdict state that a negative result is about those
+   seven points, not about the interior.
+3. **Power is reported per cell** (`n`, standard error, underpowered flag),
+   and the rule is evaluated on the pooled cell rather than on the sparse
+   per-kind, per-offset ones.
+4. **Proposed and repaired coordinates are logged separately**, and a grid
+   point the corrected repair would move **fails** rather than being reported
+   at its nominal location, because `T` also sets the smoother's window.
+5. **The gate is exercised on the production float32 path for `gamma < 0`**,
+   and the rounded classification is compared with the float64 one.
 

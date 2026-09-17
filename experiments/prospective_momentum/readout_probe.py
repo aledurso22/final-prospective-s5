@@ -67,6 +67,20 @@ STOP_MARGIN = 0.01
 STOP_MIN_OFFSETS = 3
 #: how many of the four checkpoints must pass the rule (no pooled mean)
 STOP_MIN_CHECKPOINTS = 3
+#: DECLARED BEFORE THE RUN. The idle roll-forward is closed form:
+#: target_k = alpha^k W_t - c_k U_t, c_k = beta mu (alpha^k - mu^k)/(alpha-mu),
+#: so the U-lookahead family contains its U part exactly and differs only by
+#: (1 - alpha^k) W_t, the decay term. If the best lookahead arm gets within
+#: NEAR_EXACT of the primary target on the SELECTION half at at least
+#: NEAR_EXACT_MIN_OFFSETS offsets, the primary target is (near) trivially
+#: predictable and the interior-versus-baseline decision moves to the
+#: SECONDARY target (the actual W_(t+k)), where real writes and varying gates
+#: make the trend estimate non-trivial. Both are always reported.
+NEAR_EXACT = 0.05
+NEAR_EXACT_MIN_OFFSETS = 3
+#: a reported cell is flagged underpowered if its standard error exceeds half
+#: the decision margin
+MIN_CELL_N = 100
 #: offsets after a revision for the secondary label-probability curves
 SECONDARY_OFFSETS = tuple(range(TD.SUFFIX_LEN))
 DIAG_DELAY = TD.DIAG_DELAY
@@ -160,9 +174,31 @@ def arm_admissibility(arm_list):
         ex = arm_coefficients(a)
         rep = FL.filter_report(ex, source="grid member, production dtype")
         bad = FL.filter_failure_corrected(rep)
+        # a repaired point is a DIFFERENT hypothesis (T also sets the velocity
+        # smoother's window), so proposed and repaired coordinates are logged
+        # separately and a moved grid point FAILS rather than being reported
+        # at its nominal location
+        proposed = {"fil_M": jnp.full((1,), a["M"], jnp.float32),
+                    "fil_gamma": jnp.full((1,), a["gamma"], jnp.float32),
+                    "fil_T": jnp.full((1,), a["T"], jnp.float32)}
+        repaired, tel = FL.repair_corrected(proposed)
+        moved = int(tel["n_repaired"]) > 0
+        if moved:
+            fails.append(f"{a['name']}: the corrected repair moves this grid "
+                         f"point to M={float(repaired['fil_M'][0])}, "
+                         f"gamma={float(repaired['fil_gamma'][0])}, "
+                         f"T={float(repaired['fil_T'][0])}; a repaired point "
+                         "is a different hypothesis and is not reported at "
+                         "its nominal location")
         if bad:
             fails.append(f"{a['name']}: {bad}")
-        rows.append(dict(name=a["name"], family=a["family"], executed=ex,
+        rows.append(dict(name=a["name"], family=a["family"],
+                         proposed=dict(M=a["M"], gamma=a["gamma"], T=a["T"]),
+                         repaired=dict(M=float(repaired["fil_M"][0]),
+                                       gamma=float(repaired["fil_gamma"][0]),
+                                       T=float(repaired["fil_T"][0])),
+                         repair_moved=moved, executed=ex,
+                         executed_dtype="float32",
                          classification=rep["classification"],
                          jury_slacks=rep["jury_slacks_exact"], failure=bad))
     return fails, rows
@@ -295,12 +331,20 @@ def readout(arm, tr):
 
 # ----------------------------------------------------------------- metrics --
 def _ratio(num, den, mask):
+    """Mean normalized error, with the standard error of that mean and an
+    explicit underpowered flag: a cell cannot support the 0.01 decision
+    margin if its standard error exceeds half of it."""
     ok = mask & (den > BASE_FLOOR) & onp.isfinite(num) & onp.isfinite(den)
     n = int(ok.sum())
     if n == 0:
-        return dict(mean=None, n=0, excluded=int(mask.sum()))
-    return dict(mean=float((num[ok] / den[ok]).mean()), n=n,
-                excluded=int(mask.sum()) - n)
+        return dict(mean=None, sem=None, n=0, excluded=int(mask.sum()),
+                    underpowered=True)
+    r = num[ok] / den[ok]
+    sem = float(r.std(ddof=1) / onp.sqrt(n)) if n > 1 else None
+    return dict(mean=float(r.mean()), sem=sem, n=n,
+                excluded=int(mask.sum()) - n,
+                underpowered=bool(n < MIN_CELL_N or sem is None
+                                  or sem > STOP_MARGIN / 2))
 
 
 def arm_metrics(X, tr, batch, targets, keys, half):
@@ -354,11 +398,61 @@ def arm_metrics(X, tr, batch, targets, keys, half):
     return out
 
 
-PRIMARY_TARGET, PRIMARY_PROJECTION = "rollforward", "key"
+PRIMARY_TARGET, SECONDARY_TARGET = "rollforward", "actual"
+PRIMARY_PROJECTION = "key"
 
 
-def primary_key(kind="all", cond="both", half="confirmation", k=1):
-    return f"{PRIMARY_TARGET}/{PRIMARY_PROJECTION}/{kind}/{cond}/{half}/k{k}"
+def primary_key(kind="all", cond="both", half="confirmation", k=1,
+                target=PRIMARY_TARGET):
+    return f"{target}/{PRIMARY_PROJECTION}/{kind}/{cond}/{half}/k{k}"
+
+
+def closed_form_diagnostic(tr, metrics_by_arm):
+    """How predictable the primary target is, per checkpoint, and the
+    DECLARED consequence. Reports the closed-form coefficients of the idle
+    roll-forward, how much the per-token gates vary (which is why a fixed
+    lambda can or cannot match), and the best lookahead arm's SELECTION-half
+    error at each offset."""
+    g = tr["idle_gates"]
+    al, be, mu = g["alpha"], g["beta"], g["mu"]
+    coeffs = {}
+    for k in K_OFFSETS:
+        cu = (be * mu * (al ** k - mu ** k) / (al - mu) if al != mu
+              else k * be * mu * al ** (k - 1))
+        coeffs[f"k{k}"] = dict(coefficient_on_W=float(al ** k),
+                               coefficient_on_U=float(cu),
+                               decay_gap_on_W=float(1.0 - al ** k))
+    best = {}
+    for k in K_OFFSETS:
+        sel = primary_key(half="selection", k=k)
+        vals = [(n, rec["metrics"][sel]["mean"])
+                for n, rec in metrics_by_arm.items()
+                if rec["family"] == "lookahead"
+                and rec["metrics"][sel]["mean"] is not None]
+        best[f"k{k}"] = (dict(arm=min(vals, key=lambda x: x[1])[0],
+                              selection=min(v for _, v in vals))
+                         if vals else None)
+    near = sum(1 for v in best.values()
+               if v is not None and v["selection"] <= NEAR_EXACT)
+    decisive = (SECONDARY_TARGET if near >= NEAR_EXACT_MIN_OFFSETS
+                else PRIMARY_TARGET)
+    return dict(
+        idle_gates=g, closed_form_coefficients=coeffs,
+        gate_variation={n: dict(mean=float(onp.mean(tr[n])),
+                                std=float(onp.std(tr[n])),
+                                min=float(onp.min(tr[n])),
+                                max=float(onp.max(tr[n])))
+                        for n in ("alpha", "beta")},
+        best_lookahead_on_primary=best, near_exact_threshold=NEAR_EXACT,
+        offsets_near_exact=near, decisive_target=decisive,
+        note=("the idle roll-forward is an exact linear function of "
+              "(W_t, U_t): alpha^k W_t - c_k U_t. The U-lookahead family "
+              "contains its U part exactly and differs only by the decay "
+              "term (1 - alpha^k) W_t, which the filtered arms can "
+              "extrapolate and the lookahead cannot. If the lookahead is "
+              "already near-exact the primary target is close to trivially "
+              "predictable, and by the DECLARED rule the decision moves to "
+              "the secondary target; both remain reported."))
 
 
 def component_split(tr, batch):
@@ -450,7 +544,7 @@ def argmins(metrics_by_arm, families=None, keys=None):
     return out
 
 
-def stopping_rule(metrics_by_arm):
+def stopping_rule(metrics_by_arm, target=PRIMARY_TARGET):
     """PREDECLARED (protocol s6), for ONE checkpoint.
 
     Baseline: the better of the literal-TSS line and the U-lookahead - the
@@ -462,8 +556,8 @@ def stopping_rule(metrics_by_arm):
     half. The interior wins an offset only if its confirmation number is at
     least STOP_MARGIN below the baseline's."""
     def pick(families, k):
-        sel = primary_key(half="selection", k=k)
-        conf = primary_key(half="confirmation", k=k)
+        sel = primary_key(half="selection", k=k, target=target)
+        conf = primary_key(half="confirmation", k=k, target=target)
         best = None
         for n, rec in metrics_by_arm.items():
             if rec["family"] not in families:
@@ -485,22 +579,29 @@ def stopping_rule(metrics_by_arm):
             continue
         win = bool(gi["confirmation"] <= base["confirmation"] - STOP_MARGIN)
         wins += int(win)
+        conf_key = primary_key(half="confirmation", k=k, target=target)
+        under = [n for n in (gi["arm"], base["arm"])
+                 if metrics_by_arm[n]["metrics"][conf_key]["underpowered"]]
         per_k[f"k{k}"] = dict(interior=gi, baseline=base,
                               difference=gi["confirmation"]
-                              - base["confirmation"], wins=win)
-    return dict(margin=STOP_MARGIN, offsets_required=STOP_MIN_OFFSETS,
-                offsets_won=wins, per_offset=per_k,
-                baseline_families=list(BASELINE_FAMILIES),
+                              - base["confirmation"], wins=win,
+                              underpowered_arms=under)
+    return dict(target=target, margin=STOP_MARGIN,
+                offsets_required=STOP_MIN_OFFSETS, offsets_won=wins,
+                per_offset=per_k, baseline_families=list(BASELINE_FAMILIES),
                 passes=bool(wins >= STOP_MIN_OFFSETS))
 
 
 def overall_verdict(per_seed):
-    """The rule is evaluated PER CHECKPOINT; the interior helps only if it
-    passes on at least STOP_MIN_CHECKPOINTS of the four."""
+    """The rule is evaluated PER CHECKPOINT, on that checkpoint's DECLARED
+    decisive target; the interior helps only if it passes on at least
+    STOP_MIN_CHECKPOINTS of the four."""
     passed = [s for s, r in per_seed.items() if r["stopping_rule"]["passes"]]
     helped = len(passed) >= STOP_MIN_CHECKPOINTS
     return dict(checkpoints_passed=sorted(passed),
                 checkpoints_required=STOP_MIN_CHECKPOINTS,
+                decisive_target={s: r["stopping_rule"]["target"]
+                                 for s, r in per_seed.items()},
                 interior_beats_baseline=helped,
                 verdict=("the generalized interior beats the best carry-free "
                          "or one-matrix control at predicting the rolled-"
@@ -508,11 +609,16 @@ def overall_verdict(per_seed):
                          "STOP: no generalized-interior member beats the best "
                          "of the literal-TSS line and the U-lookahead; the "
                          "added freedom does not help on the read path"),
-                note=("declared before execution: primary target, projection, "
-                      "baseline, matched budget, selection/confirmation "
-                      "split, margin and per-checkpoint requirement. Grids "
-                      "and categories are not widened or re-cut afterwards, "
-                      "and passing authorizes no trained comparison."))
+                scope=("a negative verdict is a statement about the SEVEN "
+                       "DECLARED interior points, on this task, these "
+                       "checkpoints and these offsets - not about the "
+                       "interior of the family as a whole"),
+                note=("declared before execution: targets and the rule for "
+                      "choosing between them, projection, baseline, matched "
+                      "budget, selection/confirmation split, margin and the "
+                      "per-checkpoint requirement. Grids and categories are "
+                      "not widened or re-cut afterwards, and passing "
+                      "authorizes no trained comparison."))
 
 
 # -------------------------------------------------------------------- main --
@@ -684,13 +790,26 @@ def run_probe(args, status, arm_list, deadline, save):
                 status["incomplete"].append(
                     f"stopped at arm {a['name']} of seed {seed}")
                 return 3, "INCOMPLETE"
-        sr = stopping_rule({n: m for n, m in metrics.items()
-                            if m["family"] in MATCHED_FAMILIES})
-        primary = [primary_key(kind, cond, half_, k)
+        primary = [primary_key(kind, cond, half_, k, target)
+                   for target in (PRIMARY_TARGET, SECONDARY_TARGET)
                    for kind in KINDS for cond in CONDITIONS
                    for half_ in HALVES for k in K_OFFSETS]
+        matched = {n: m for n, m in metrics.items()
+                   if m["family"] in MATCHED_FAMILIES}
+        closed = closed_form_diagnostic(tr, matched)
+        sr = stopping_rule(matched, closed["decisive_target"])
+        other_target = (SECONDARY_TARGET
+                        if closed["decisive_target"] == PRIMARY_TARGET
+                        else PRIMARY_TARGET)
+        other = stopping_rule(matched, other_target)
+        cells = {key: metrics["native_identity"]["metrics"][key]
+                 for key in primary}
+        under = sorted(key for key, v in cells.items() if v["underpowered"])
         per_seed[str(seed)] = dict(
-            stopping_rule=sr,
+            stopping_rule=sr, rule_on_the_other_target=other,
+            closed_form=closed, underpowered_cells=under,
+            cell_counts={key: dict(n=v["n"], sem=v["sem"])
+                         for key, v in cells.items()},
             argmins_matched=argmins(metrics, MATCHED_FAMILIES, primary),
             argmins_all_families=argmins(metrics, None, primary),
             component_split=component_split(tr, batch),
@@ -703,8 +822,11 @@ def run_probe(args, status, arm_list, deadline, save):
                                  secondary=secondary)
         status["per_seed"] = per_seed
         save()
-        print(f"[seed {seed}] stopping rule passes: {sr['passes']} "
-              f"(offsets won {sr['offsets_won']})")
+        print(f"[seed {seed}] decisive target {closed['decisive_target']} "
+              f"(lookahead near-exact at {closed['offsets_near_exact']} of "
+              f"{len(K_OFFSETS)}); passes {sr['passes']} (won "
+              f"{sr['offsets_won']}); underpowered cells {len(under)} of "
+              f"{len(primary)}")
     ST.write(os.path.join(status["out"], "metrics.json"), detail)
     status["overall"] = overall_verdict(per_seed)
     status["work_completed"] = dict(seeds=len(SEEDS), arms=len(arm_list),
