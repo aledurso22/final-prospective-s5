@@ -20,6 +20,7 @@ from experiments.nested_memory import model as NM
 from experiments.nested_memory.task import WRITE
 
 from . import dynamics as PD
+from . import filtered as FL
 from . import ordinary as OD
 
 D_K, D_V = NM.D_K, NM.D_V
@@ -30,7 +31,8 @@ MOMENTUM_LEAVES = ("key_raw", "value_table", "readout_W", "readout_b",
 
 
 #: rules executed by THIS module's shell; every other rule is delegated
-SHELL_RULES = ("prospective_momentum", "gain_momentum", OD.ORDINARY)
+SHELL_RULES = ("prospective_momentum", "gain_momentum", OD.ORDINARY,
+               FL.FILTERED)
 
 
 def rollout(rule, p, ep, dtype=None, carry0=None):
@@ -55,6 +57,13 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
     if rule == "prospective_momentum":
         scalar, step_fn = p["kappa"][0], PD.prospective_step
         coeff = dict(kappa=p["kappa"][0])
+    elif rule == FL.FILTERED:
+        # the master law applied to a residual-processing state; the Momentum
+        # update below it is unchanged. Its coefficients are formed ONCE here
+        # (`FL.coefficients`), and the acceptance gate reads exactly these.
+        scalar, step_fn = FL.coefficients(p), FL.filtered_step
+        M, gam, T, A = (x for x in scalar)
+        coeff = dict(M=M, gamma=gam, T=T, A=A)
     elif rule == OD.ORDINARY:
         # same shell, same gates; only the per-token update differs. Its carry
         # adds the previous residual (192 real numbers, counted as such).
@@ -73,7 +82,7 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
                        jnp.sqrt(jnp.sum(carry[1] ** 2)))
 
     z = jnp.zeros((D_V, D_K), dtype=dtype)
-    n_carry = 3 if rule == OD.ORDINARY else 2
+    n_carry = {OD.ORDINARY: 3, FL.FILTERED: 5}.get(rule, 2)
     carry = (z,) * n_carry if carry0 is None else carry0
     if len(carry) != n_carry:
         raise ValueError(f"{rule} needs {n_carry} carry matrices, "
@@ -91,7 +100,10 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
 def add_extension(p_native, rule):
     """The documented map from a saved native Momentum tree to an extension.
     `ordinary_prospective` takes the same single scalar kappa = 0 as the
-    candidate, so all three start as exactly the native function."""
+    candidate, so all three start as exactly the native function.
+    `filtered_processing` is the exception: it starts on the literal TSS
+    boundary at T0, which is a different function from native; its native
+    point is set explicitly by the study that wants it."""
     return convert_momentum(p_native, rule)
 
 
@@ -109,6 +121,11 @@ def convert_momentum(p_native, rule):
     dt = p_native["A_log"].dtype
     if rule == "momentum_delta":
         return dict(p_native)
+    if rule == FL.FILTERED:
+        # three stored scalars, at the declared start M = gamma = 0, T = T0:
+        # literal TSS, NOT the native function. The native point of this
+        # family is (M, gamma, T) = (0, h, 0) and is applied explicitly.
+        return dict(p_native, **FL.initial_leaves(dt))
     leaf = (PD.EXTRA_LEAF[rule] if rule in PD.EXTRA_LEAF
             else ("kappa" if rule == OD.ORDINARY else None))
     if leaf is None:

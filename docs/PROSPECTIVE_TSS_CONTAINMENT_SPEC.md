@@ -103,20 +103,36 @@ not a strictly stable driven filter. That point is now excluded, and it is a
 required fixture (§4.3).
 
 **Numerical policy** (executed arithmetic, *not* part of the derivation).
-Strict inequalities in (D1)-(D3) cannot be represented by a float comparison
-against zero, so the executed set replaces them by declared positive gaps:
+A float comparison against zero is perfectly possible; the executed set
+nevertheless uses declared positive gaps, as a **numerical robustness
+policy**, so that a repaired point is not placed exactly on a boundary
+(clearance of d95266d, s1):
 
     gamma + T >= g_min,                                                 (N1)
     4M + 2h (gamma + T) >= h^2 (1 + delta_filter),                      (N2)
 
 with `g_min > 0` and `delta_filter > 0` declared in advance as numerical
-constants (proposed `g_min = 2^-10 h`, `delta_filter = 1e-3`, the value
-already used for the existing coefficient repair). Their rounding budget -
-that the executed comparison in the production dtype cannot admit a point
-violating (D1)-(D3) - must be derived and recorded before use, as was done for
-`kappa`. (N1) implies (D2) because `A >= h g_min > 0`. These margins are a
-numerical policy: they are never presented as physical requirements, and the
-reported coefficients state both the executed values and the achieved slacks.
+constants (`g_min = 2^-10 h`, `delta_filter = 1e-3`, the value already used
+for the existing coefficient repair). (N1) implies (D2) because
+`A >= h g_min > 0`. These margins are a numerical policy: they are never
+presented as physical requirements, and the reported coefficients state both
+the executed values and the achieved slacks.
+
+**Scope of the gaps, and the executed acceptance gate** (clearance s1). The
+gaps do **not** certify strict stability of the *rounded* recurrence: for
+unbounded `M`, `A = M + h(gamma+T)` can round to `M`, `M/A` can round to one,
+and a slack can vanish when the actual coefficients are formed - e.g.
+`M = 1e18, gamma = 0, T = g_min` meets both gaps yet executes `c0 = 1`. What
+the gaps do give is a positive gap *in exact arithmetic* for every repaired
+point; no universal rounding guarantee is claimed. Acceptance is therefore a
+**gate on the executed coefficients**: the production step is applied to basis
+carries with no residual, which yields exactly the rounded normalized
+coefficients it executes, `[[c1, -c0], [1, 0]]`; finiteness and all three
+strict Jury conditions of that rounded polynomial are required after every
+update (in the executed dtype) and at every validation point (exact rational
+classification). A violation refuses the update and fails the run; no
+algebraically equivalent pre-rounding expression is substituted. This
+certifies only the isolated executed filter, not the closed-loop memory.
 
 Both exact points survive the executed set: literal TSS `M = gamma = 0`,
 `T = h` has `gamma + T = h`, slack `2h^2 - h^2(1+delta) > 0`; native
@@ -337,10 +353,14 @@ and refuses as INCOMPLETE if they do not fit. No retries, no trimming.
    feasible, record **TSS constrained selection: INFEASIBLE**. It is *not*
    mapped to native and not relabelled: native may be used as an explicit
    external deployment fallback, but such a selection is reported as **native**,
-   never as TSS. Optionally - predeclared now, not afterwards - a pure-TSS
-   endpoint chosen by the same ordering over *all* TSS checkpoints (ignoring
-   feasibility) is carried to final evaluation as a **diagnostic** endpoint,
-   labelled constraint-failing and explicitly not a feasible contender.
+   never as TSS. **Deterministic final endpoint** (clearance s3): the pure-TSS
+   final endpoint is *always* trained - the best feasible development
+   checkpoint if one exists, otherwise the best unconstrained one by the same
+   ordering, flagged **diagnostic**, constraint-failing and not a feasible
+   contender. The same feasible-then-diagnostic rule fixes the trained
+   generalized and operator endpoints. These use the existing final slots
+   (four trained families x three sources, <= 4,000 updates in total), and
+   all of them are frozen before any final run.
 4. **`generalized_processing`.** Its candidate set is: (a) feasible trained
    generalized checkpoints; (b) the **native fallback** - the selected native
    checkpoint mapped into the generalized family at its valid native point
@@ -374,11 +394,14 @@ and refuses as INCOMPLETE if they do not fit. No retries, no trimming.
 all four query categories by full name:
 
 - `generalized_processing` - `tss_processing`: does departing from the exact
-  TSS boundary help, starting from the same function? **This scientific
-  verdict requires an actual TSS endpoint on both sides.** If the TSS
-  selection was infeasible, or if either side is a native fallback, the
-  comparison is reported against *native*, labelled as such, and the
-  generalized-versus-TSS verdict is reported as unavailable.
+  TSS boundary help, starting from the same function? **A genuine extension
+  comparison needs a trained generalized endpoint against a trained
+  literal-TSS endpoint** (clearance s2). Scientific model comparisons are
+  kept apart from deployment selections. If literal TSS has no development
+  checkpoint meeting the retention constraints, the *constrained* screen is
+  reported as infeasible/unavailable; the comparison of the two genuine
+  trained endpoints is still reported, and keeps its constraint-failing
+  label. A native model is never called TSS.
 - `generalized_processing` - `native_full`, and `tss_processing` -
   `native_full`: matched-retention screens against the active baseline.
 - `generalized_processing` - `operator_full`: reported separately and
@@ -420,6 +443,18 @@ then reuses the existing task, source restore, evaluation and orchestration
 code. Cluster execution remains a separate reviewed step.
 
 ## 9. Amendment record (review of bdc1c19)
+
+Implementation clearance of d95266d, incorporated while coding (no separate
+specification round): (s1) the executed filter's acceptance is a gate on the
+rounded coefficients the production step executes, and the gaps are
+re-scoped as a robustness policy without a universal rounding guarantee; (s2)
+verdict wording separates the scientific generalized-versus-literal-TSS
+comparison from deployment selections; (s3) every family's final endpoint is
+fixed now by the feasible-then-diagnostic rule, inside the existing slots.
+Implementation note: both processing arms execute the same five-carry step, so
+the **executed** carry is 320 reals in both; the 256-real figure for
+`tss_processing` is the minimal carry its law needs, and both are reported.
+
 
 - **R1** - `gamma + T > 0` was derived in §4 but missing from the declared
   domain and the repair; added as (D1) with the executed gap (N1), with the
