@@ -267,20 +267,68 @@ def test_readout_never_feeds_back_into_the_backbone():
 
 
 # ===================== 4. the probe's measurement ==========================
-def test_identity_arm_scores_exactly_one_everywhere():
+def test_roll_forward_target_is_the_native_idle_recurrence():
+    """The primary target rolls (W_t, U_t) forward over IDLE tokens only.
+    Where an episode's next k tokens really are idle, it must reproduce the
+    actual trajectory."""
+    pn = _source_native_f64()
+    batch = TT.generate_batch(991_104, 4)
+    fails, tr = RB.trajectories(pn, batch)
+    assert fails == [], fails
+    targets = RB.roll_forward(tr)
+    g = tr["idle_gates"]
+    W, U = tr["W"], tr["U"]
+    u, w = U.copy(), W.copy()
+    for step in range(1, max(RB.K_OFFSETS) + 1):
+        u = g["mu"] * u
+        w = g["alpha"] * w - g["beta"] * u
+        if step in RB.K_OFFSETS:
+            assert onp.allclose(targets[step], w, rtol=0, atol=0)
+    ev = onp.asarray(batch["event"])
+    from experiments.nested_memory.task import IDLE
+    checked = 0
+    for k in (1, 2, 4):
+        for b in range(ev.shape[0]):
+            for t in range(ev.shape[1] - k):
+                if onp.all(ev[b, t + 1:t + 1 + k] == IDLE):
+                    a = targets[k][b, t].astype(F64)
+                    c = W[b, t + k].astype(F64)
+                    assert onp.linalg.norm(a - c) <= 1e-4 * max(
+                        1.0, onp.linalg.norm(c)), (k, b, t)
+                    checked += 1
+    assert checked > 0
+
+
+def test_identity_arm_scores_exactly_one_on_every_reported_key():
     pn = _source_native_f64()
     batch = TT.generate_batch(991_102, 4)
     _, tr = RB.trajectories(pn, batch)
     keys = onp.asarray(NMD.safe_normalize(pn["key_raw"])[0], F64)
-    rev_at, unt, keys = RB.episode_directions(batch, keys)
-    m = RB.arm_metrics(RB.readout(RB.arms()[0], tr), tr, batch, rev_at, unt,
-                       keys)
+    half = RB.split_halves(batch)
+    m = RB.arm_metrics(RB.readout(RB.arms()[0], tr), tr, batch,
+                       RB.roll_forward(tr), keys, half)
+    assert any(v["n"] > 0 for v in m.values())
     for key, v in m.items():
-        assert v["n"] > 0, key
-        _close(key, v["mean"], 1.0, tol=1e-9)
+        if v["mean"] is not None:
+            _close(key, v["mean"], 1.0, tol=1e-9)
+    # the primary key is declared: rolled-forward target, key projection
+    assert RB.primary_key("all", "both", "confirmation", 4) in m
+    assert (RB.PRIMARY_TARGET, RB.PRIMARY_PROJECTION) == ("rollforward",
+                                                          "key")
 
 
-def test_component_split_is_exact_and_grids_are_frozen():
+def test_halves_are_declared_and_balanced():
+    batch = TT.generate_batch(991_105, 8)
+    half = RB.split_halves(batch)
+    fam, cond = onp.asarray(batch["family"]), onp.asarray(batch["condition"])
+    for f in onp.unique(fam):
+        for c in onp.unique(cond):
+            idx = (fam == f) & (cond == c)
+            sel = (half[idx] == "selection").sum()
+            assert sel == idx.sum() // 2, (f, c, sel, idx.sum())
+
+
+def test_component_split_is_exact_and_budgets_are_matched():
     pn = _source_native_f64()
     batch = TT.generate_batch(991_103, 4)
     _, tr = RB.trajectories(pn, batch)
@@ -289,36 +337,69 @@ def test_component_split_is_exact_and_grids_are_frozen():
     # rounding of the production update, recomputed in float64
     assert cs["identity_max_abs"] <= 1e-4
     assert cs["both/write_tokens"]["n"] > 0
-    names = [a["name"] for a in RB.arms()]
+    arm_list = RB.arms()
+    names = [a["name"] for a in arm_list]
     assert len(names) == len(set(names))
-    fams = {a["family"] for a in RB.arms()}
-    assert fams == {"identity", "two_tap", "literal_tss",
-                    "generalized_interior", "lookahead"}
-    fails, rows = RB.arm_admissibility(RB.arms())
+    sizes = {}
+    for a in arm_list:
+        sizes[a["family"]] = sizes.get(a["family"], 0) + 1
+    for fam in RB.MATCHED_FAMILIES:
+        assert sizes[fam] == RB.N_MATCHED, (fam, sizes)
+    assert sizes["identity"] == 1 and sizes["generalized_extended"] > 0
+    assert set(RB.BASELINE_FAMILIES) == {"literal_tss", "lookahead"}
+    fails, rows = RB.arm_admissibility(arm_list)
     assert fails == [], fails
-    assert all(a["M"] > 0 for a in RB.arms()
-               if a["family"] == "generalized_interior")
+    assert any(a.get("gamma", 0) < 0 for a in arm_list)      # kappa > 1
     assert RB.K_OFFSETS == (1, 2, 4, 8, 16)
 
 
-def test_stopping_rule_is_predeclared_and_strict():
-    arm_list = [dict(name="tss@T=1.0", family="literal_tss"),
-                dict(name="generalized@x", family="generalized_interior")]
+def _rec(family, sel, conf):
+    m = {}
+    for k in RB.K_OFFSETS:
+        m[RB.primary_key(half="selection", k=k)] = dict(mean=sel)
+        m[RB.primary_key(half="confirmation", k=k)] = dict(mean=conf)
+    return dict(family=family, metrics=m)
 
-    def metrics(tss, gen):
-        return {"tss@T=1.0": {f"overall/both/k{k}": dict(mean=tss)
-                              for k in RB.K_OFFSETS},
-                "generalized@x": {f"overall/both/k{k}": dict(mean=gen)
-                                  for k in RB.K_OFFSETS}}
-    win = RB.stopping_rule(metrics(0.90, 0.80), arm_list)
-    assert win["interior_beats_literal_tss"] and win["offsets_won"] == 5
-    tie = RB.stopping_rule(metrics(0.90, 0.895), arm_list)
-    assert not tie["interior_beats_literal_tss"] and tie["offsets_won"] == 0
-    assert "STOP" in tie["verdict"]
-    edge = RB.stopping_rule(metrics(0.90, 0.89), arm_list)     # exactly margin
-    assert edge["interior_beats_literal_tss"]
-    worse = RB.stopping_rule(metrics(0.80, 0.95), arm_list)
-    assert not worse["interior_beats_literal_tss"]
+
+def test_stopping_rule_uses_the_best_carry_free_baseline():
+    """The interior must beat the BEST of the literal-TSS line and the
+    U-lookahead, on the confirmation half, at matched budget."""
+    beats_tss_only = {
+        "tss@T=1.0": _rec("literal_tss", 0.95, 0.95),
+        "lookahead@lambda=1.0": _rec("lookahead", 0.80, 0.80),
+        "generalized@x": _rec("generalized_interior", 0.90, 0.90)}
+    sr = RB.stopping_rule(beats_tss_only)
+    assert sr["offsets_won"] == 0 and not sr["passes"]
+    assert sr["baseline_families"] == ["literal_tss", "lookahead"]
+    beats_both = dict(beats_tss_only,
+                      **{"generalized@x": _rec("generalized_interior", 0.70,
+                                               0.70)})
+    assert RB.stopping_rule(beats_both)["passes"]
+    # selection picks the arm, confirmation decides: a selection-only winner
+    # whose confirmation number is bad does not pass
+    mirage = {
+        "tss@T=1.0": _rec("literal_tss", 0.90, 0.90),
+        "lookahead@lambda=1.0": _rec("lookahead", 0.92, 0.92),
+        "generalized@lucky": _rec("generalized_interior", 0.70, 0.95),
+        "generalized@steady": _rec("generalized_interior", 0.88, 0.88)}
+    sr2 = RB.stopping_rule(mirage)
+    assert sr2["per_offset"]["k1"]["interior"]["arm"] == "generalized@lucky"
+    assert sr2["offsets_won"] == 0 and not sr2["passes"]
+    edge = dict(beats_tss_only,
+                **{"generalized@x": _rec("generalized_interior", 0.79, 0.79)})
+    assert RB.stopping_rule(edge)["passes"]        # exactly the margin
+
+
+def test_overall_verdict_counts_checkpoints_not_a_pooled_mean():
+    def seed(passes):
+        return dict(stopping_rule=dict(passes=passes))
+    ov = RB.overall_verdict({"500": seed(True), "501": seed(True),
+                             "502": seed(True), "503": seed(False)})
+    assert ov["interior_beats_baseline"] and len(ov["checkpoints_passed"]) == 3
+    ov2 = RB.overall_verdict({"500": seed(True), "501": seed(True),
+                              "502": seed(False), "503": seed(False)})
+    assert not ov2["interior_beats_baseline"]
+    assert "STOP" in ov2["verdict"]
 
 
 def test_probe_stream_is_fresh():

@@ -16,25 +16,27 @@ def fmt(v, nd=4):
     return "  n/a" if v is None else f"{v:.{nd}f}"
 
 
-def table(metrics, arms, categories, conditions, offsets):
-    """One block per category and condition: arms as rows, offsets as
-    columns, best per column marked."""
-    for cat in categories:
+def table(metrics, arms, families, kinds, conditions, offsets, half):
+    """One block per query kind and condition: arms as rows, offsets as
+    columns, best per column marked. Values are the declared primary metric
+    (rolled-forward target, key projection) on the named half."""
+    for kind in kinds:
         for cond in conditions:
-            keys = [f"{cat}/{cond}/k{k}" for k in offsets]
+            keys = [f"rollforward/key/{kind}/{cond}/{half}/k{k}"
+                    for k in offsets]
             best = {}
             for key in keys:
                 vals = [(n, metrics[n][key]["mean"]) for n in arms
                         if metrics[n][key]["mean"] is not None]
                 best[key] = min(vals, key=lambda x: x[1])[0] if vals else None
-            print(f"\n  [{cat} | {cond}]  (1.0 = no better than native)")
+            print(f"\n  [{kind} queries | {cond} | {half} half]"
+                  "  (1.0 = no better than native)")
             print("    " + "arm".ljust(38)
                   + "".join(f"k={k}".rjust(10) for k in offsets))
             for n in arms:
                 row = "".join(
                     (("*" if best[key] == n else " ")
-                     + fmt(metrics[n][key]["mean"]).rjust(9))
-                    for key in keys)
+                     + fmt(metrics[n][key]["mean"]).rjust(9)) for key in keys)
                 print("    " + n.ljust(38) + row)
 
 
@@ -65,48 +67,55 @@ def main(run_dir):
           f"{all(v['ok'] for r in (ref.get('reproduction') or {}).values() for v in r.values())}")
 
     arms = st.get("arms", [])
-    pooled = (st.get("pooled") or {}).get("metrics")
     offsets = st.get("offsets", [])
-    if pooled:
-        print("\n=== pooled over seeds ===")
-        table(pooled, arms, ("overall", "revised_direction",
-                             "untouched_direction"),
-              ("both", "idle_gap", "intervening_writes"), offsets)
-        print("\n--- best arm per category, condition and offset ---")
-        for key, v in ((st.get("pooled") or {}).get("argmins") or {}).items():
-            print(f"  {key:<34} {v and v['arm']:<38} {fmt(v and v['mean'])}")
-        sr = (st.get("pooled") or {}).get("stopping_rule") or {}
-        print("\n--- PREDECLARED STOPPING RULE ---")
-        print(f"  margin {sr.get('margin')} offsets required "
-              f"{sr.get('offsets_required')} won {sr.get('offsets_won')}")
-        for key, row in (sr.get("per_offset") or {}).items():
-            print(f"  {key}: interior {row.get('generalized_interior')} "
-                  f"tss {row.get('literal_tss')} difference "
-                  f"{fmt(row.get('difference'))} wins {row.get('wins')}")
-        print(f"  interior_beats_literal_tss="
-              f"{sr.get('interior_beats_literal_tss')}")
-        print(f"  {sr.get('verdict')}")
-        print(f"  {sr.get('note')}")
+    print(f"\nmeasurement: {st.get('measurement')}")
+    print(f"baseline: {st.get('baseline')}")
+    print(f"split: {st.get('split')}")
+    ov = st.get("overall") or {}
+    print("\n=== PREDECLARED VERDICT ===")
+    print(f"  checkpoints passed {ov.get('checkpoints_passed')} of "
+          f"{ov.get('checkpoints_required')} required -> "
+          f"interior_beats_baseline={ov.get('interior_beats_baseline')}")
+    print(f"  {ov.get('verdict')}")
+    print(f"  {ov.get('note')}")
+    proj = st.get("projection") or {}
+    print(f"\nprojection {proj.get('seconds_per_arm_by_class')} -> "
+          f"{fmt(proj.get('projected_remaining_s'), 1)}s of "
+          f"{fmt(proj.get('remaining_s'), 1)}s remaining")
 
+    detail = {}
+    mpath = os.path.join(run_dir, "metrics.json")
+    if os.path.isfile(mpath):
+        detail = json.load(open(mpath))
     for seed, r in (st.get("per_seed") or {}).items():
-        print(f"\n=== seed {seed} (wall {f(r.get('wall_s'), 1)}s, native-point "
-              f"agreement {r.get('native_point_logit_agreement')}) ===")
         sr = r.get("stopping_rule") or {}
-        print(f"  stopping rule: won {sr.get('offsets_won')} of "
-              f"{sr.get('offsets_required')} required -> "
-              f"{sr.get('interior_beats_literal_tss')}")
+        print(f"\n=== checkpoint {seed} (wall {f(r.get('wall_s'), 1)}s, "
+              f"native-point agreement {r.get('native_point_logit_agreement')}"
+              f") ===")
+        print(f"  idle gates {r.get('idle_gates')}")
+        print(f"  stopping rule: offsets won {sr.get('offsets_won')} of "
+              f"{sr.get('offsets_required')} required -> passes="
+              f"{sr.get('passes')} (margin {sr.get('margin')}, baseline "
+              f"{sr.get('baseline_families')})")
+        for key, row in (sr.get("per_offset") or {}).items():
+            print(f"    {key}: interior {row.get('interior')}")
+            print(f"        baseline {row.get('baseline')} difference "
+                  f"{fmt(row.get('difference'))} wins {row.get('wins')}")
         print(f"  dW components: {r.get('component_split')}")
-        for key, v in (r.get("argmins") or {}).items():
-            print(f"    argmin {key:<32} {v and v['arm']:<38} "
-                  f"{fmt(v and v['mean'])}")
-        sec = r.get("secondary") or {}
-        for name in ("native_identity",):
-            if name in sec and sec[name]:
-                print(f"    secondary {name}: revised "
-                      f"{[round(x, 4) for x in sec[name]['revised_label_probability'][:6]]}"
+        for key, v in (r.get("argmins_matched") or {}).items():
+            if key.endswith("/confirmation/k4") or key.endswith(
+                    "/confirmation/k16"):
+                print(f"    argmin (matched budget) {key:<48} "
+                      f"{v and v['arm']:<38} {fmt(v and v['mean'])}")
+        seed_detail = detail.get(seed) or {}
+        if seed_detail.get("metrics"):
+            table(seed_detail["metrics"], arms, None,
+                  ("all", "revised", "untouched"),
+                  ("both", "idle_gap", "intervening_writes"), offsets,
+                  "confirmation")
+            sec = (seed_detail.get("secondary") or {}).get("native_identity")
+            if sec:
+                print(f"    secondary (native identity) revised "
+                      f"{[round(x, 4) for x in sec['revised_label_probability'][:6]]}"
                       f" untouched "
-                      f"{[round(x, 4) for x in sec[name]['untouched_label_probability'][:6]]}")
-
-
-if __name__ == "__main__":
-    main(sys.argv[1])
+                      f"{[round(x, 4) for x in sec['untouched_label_probability'][:6]]}")

@@ -41,76 +41,98 @@ enters no backbone line, **one rollout per checkpoint serves every arm**, and
 
 ## 3. Primary measurement
 
-For each arm, checkpoint and offset `k` in {1, 2, 4, 8, 16}:
+**Primary target: the counterfactual roll-forward.** From `(W_t, U_t)`, the
+native recurrence is rolled forward `k` **idle** steps: on an idle token the
+residual is zero, so `U <- mu_idle U` and `W <- alpha_idle W - beta_idle U`,
+with the gates of an IDLE token (key 0, no value). That is the transient
+already in flight — exactly what a prospective readout is entitled to
+anticipate. Predicting writes that have not happened is not the readout's
+job, and under the intervening-write condition the actual future partly is
+unpredictable noise.
 
-    ||X_t - W_(t+k)||_F / ||W_t - W_(t+k)||_F
+**Primary projection: the query key.** What the model needs is the value read
+at the query key, so the primary error is measured **at the tokens where a
+query is answered**, projected on that query's own key `q`:
 
-**1.0 means "no better than reading the native fast weight."** A pair
-`(t, t+k)` is scored only if `||W_t - W_(t+k)||_F > 1e-6`; excluded pairs are
-counted and reported.
+    ||(X_t - target_k(t)) q|| / ||(W_t - target_k(t)) q||
 
-Reported **separately**, never as one aggregate:
+**1.0 means "no better than reading the native fast weight."** A pair is
+scored only if the denominator exceeds 1e-6; exclusions are counted.
 
-| Split | Values |
-|---|---|
-| Direction | overall (Frobenius); projected on the revised key (the most recent revision at `t`); projected on the untouched target keys (mean over the five) |
-| Fill condition | both; idle gap; intervening writes |
-| Offset | each `k` separately |
-| Checkpoint | per seed, and pooled as the mean of the four |
+**Secondary:** the same key-projected error against the **actual**
+`W_(t+k)`, and the full-matrix (Frobenius) errors against both targets. A
+Frobenius win can come from directions nobody queries, so it never decides.
+
+Reported separately, never as one aggregate: query kind (revised keys,
+i.e. revised probes and late selected, versus untouched keys), fill condition
+(both, idle gap, intervening writes), offset `k` in {1, 2, 4, 8, 16}, half
+(s4), and checkpoint.
 
 **Component split.** For every token the run reports the norms of the write
 component `-beta_t U_t` and the decay component `(alpha_t - 1) W_(t-1)` of
-`dW_t`, separately for write and non-write tokens and per condition, with a
-check that the two sum to `dW_t`. Together with the two-tap/`U`-lookahead
-contrast (s4), this is what shows whether a filter that beats literal TSS
-does it **by extrapolating the write while not extrapolating the decay** —
-the specific hypothesis for the mass term and the specific mechanism that
-could protect retention.
+`dW_t`, per condition and for write versus non-write tokens, with a check
+that the two sum to `dW_t`. With the two-tap versus `U`-lookahead contrast
+(s5) this is what shows whether a winner extrapolates the write while not
+extrapolating the decay.
 
-**Secondary.** Revised-label and untouched-label probabilities through the
-existing learned readout map, at offsets 0–17 after each delay-16 revision,
-reusing the existing mechanism-diagnostic machinery. Secondary results do not
-decide anything.
+**Secondary label curves.** Revised-label and untouched-label probabilities
+through the existing learned readout map, at offsets 0–17 after each
+delay-16 revision. They decide nothing.
 
-## 4. Arms (frozen before execution)
+## 4. Selection and confirmation halves (declared before the run)
 
-| Family | Grid | Members |
+Inside every (family, condition) stratum of the 64 probe episodes, the first
+half is the **selection** half and the second the **confirmation** half.
+Arms are chosen on selection; the winner's **confirmation** number is what is
+reported and what the stopping rule uses. With about 80 arms, an argmin on a
+single set would find grid-search noise; this project has already been burned
+once by a single seed carrying a mean.
+
+## 5. Arms, at matched search budget
+
+Every family that may enter the stopping rule has **exactly seven** members,
+so the interior cannot win the argmin by having more grid points:
+
+| Family | Members | Extra carry |
 |---|---|---|
-| Native identity | — | 1 |
-| Two-tap readout `(1+kappa) W_t - kappa W_(t-1)` | `kappa` in {0.25, 0.5, 1, 1.5, 2, 2.5, 3} | 7 (includes `kappa > 1`, i.e. `gamma < 0`) |
-| Literal TSS | `T` in {0.75, 1, 1.5, 2, 3, 4, 8} | 7 |
-| Generalized interior | `M` in {0.1, 0.25, 0.5, 1}, `gamma` in {−0.5, −0.25, 0, 0.25, 0.5}, `T` in {0.5, 1, 2}, kept only if admissible | ≤ 60 |
-| `U`-lookahead `X_t = W_t - lambda beta_t U_t` | `lambda` in {0.25, 0.5, 1, 1.5, 2} | 5 |
+| Two-tap readout `(1+kappa) W_t - kappa W_(t-1)` | `kappa` in {0.25, 0.5, 1, 1.5, 2, 2.5, 3} (includes `kappa > 1`, i.e. `gamma < 0`) | none |
+| Literal TSS | `T` in {0.75, 1, 1.5, 2, 3, 4, 8} | one matrix |
+| `U`-lookahead `X_t = W_t - lambda beta_t U_t` | `lambda` in {0.1, 0.25, 0.5, 1, 1.5, 2, 3} | none |
+| Generalized interior | `(M, gamma, T)` in {(0.1,0,1), (0.25,0,1), (0.5,0,1), (0.25,−0.25,1), (0.25,0.25,1), (0.25,0,0.5), (0.25,0,2)} | two matrices |
+
+Plus the **native identity** (reference, 1 arm) and a **descriptive extended
+interior** (`M` in {0.1,0.25,0.5,1} x `gamma` in {−0.5,−0.25,0,0.25,0.5} x
+`T` in {0.5,1,2}, admissible members only) that is reported but **never
+enters the stopping rule**.
 
 Every filter arm's executed coefficients must pass the corrected gate before
 any measurement; an inadmissible or unstable member fails the run rather than
-being dropped quietly. **Grids are not widened, and categories are not re-cut,
-after seeing results.**
-
-Carry cost, from Stage A: the identity, two-tap and `U`-lookahead arms need
-**no extra carried state**; literal TSS needs one matrix; the generalized
-interior needs two.
-
-## 5. Reporting
-
-The digest prints, per category and condition, a table of arms × offsets with
-the best arm marked, then the **argmin per category, condition and offset** —
-not a single aggregate — then the component split, then the secondary curves.
+being dropped quietly. Grids are not widened and categories are not re-cut
+after seeing results.
 
 ## 6. Predeclared stopping rule
 
 Declared here, before execution:
 
-> The generalized interior helps on the read path only if its best member
-> beats the best literal-TSS member on the `overall/both` category by at
-> least **0.01** in normalized error, at **at least 3 of the 5** offsets.
-> Otherwise: **STOP.** Given that we hold the ground truth, the added freedom
-> does not help on the read path, and no trained comparison follows.
+> **Baseline:** the better of the **literal-TSS line** and the
+> **`U`-lookahead** — the strongest controls, since the lookahead carries no
+> extra state and does not extrapolate the decay term at all. Beating the
+> TSS line alone is not enough.
+>
+> **Procedure, per checkpoint:** on the **selection** half, take the argmin
+> of the generalized interior and the argmin of the baseline families, at
+> matched budget, for the primary key at each offset. Read both arms'
+> **confirmation**-half numbers. The interior wins that offset only if its
+> confirmation number is at least **0.01** below the baseline's. The
+> checkpoint passes if the interior wins **at least 3 of the 5** offsets.
+>
+> **Overall:** the interior helps only if it passes on **at least 3 of the 4
+> checkpoints** — not on a pooled mean. Otherwise: **STOP.** Given that we
+> hold the ground truth, the added freedom does not help on the read path,
+> and no trained comparison follows.
 
-The rule is evaluated per checkpoint and pooled. Meeting it authorizes
-**nothing** by itself: a trained comparison remains a separate decision after
-Stage B reports. Failing it ends this line of work. Grids, categories,
-offsets and the margin are frozen; they will not be adjusted afterwards.
+Passing authorizes **nothing** by itself: a trained comparison remains a
+separate decision after Stage B reports.
 
 ## 7. Budget and constraints
 
@@ -129,3 +151,21 @@ normalized error is evidence about the read path only. Prior art
 (`docs/PROSPECTIVE_PRIOR_ART.md`) applies unchanged: the filters are known
 optimizers, the placement is what is being examined, and no result here is
 described as expected to be positive.
+
+## 9. Amendment record (coordinator review, 17 September 2026)
+
+1. **Baseline corrected.** The rule now measures the interior against the
+   best of {literal-TSS line, `U`-lookahead}, not the TSS line alone.
+2. **Primary target corrected** to the counterfactual roll-forward over idle
+   tokens; the actual `W_(t+k)` is secondary.
+3. **Primary error is key-projected** at answered queries; the Frobenius norm
+   is secondary.
+4. **Selection/confirmation halves** declared, and the rule now requires the
+   margin on at least 3 of the 4 checkpoints instead of a pooled mean.
+5. **Search budget matched**: every family in the rule has seven members; the
+   wider interior grid is descriptive only.
+6. **Cost projection** from one arm of every structural class.
+
+These change the decision procedure, not the placement or the equations. With
+1, 2 and 4 applied the stage is decisive either way.
+

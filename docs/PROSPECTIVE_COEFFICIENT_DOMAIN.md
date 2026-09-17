@@ -73,6 +73,27 @@ to it.
   `T >= 0` and a strictly stable executed polynomial. `gamma < 0` is
   admissible.
 
+**What happens when a proposal violates `A > 0` or the filter condition, now
+that clamping `gamma` is off the table.** The repair restores both through
+`T` alone, deterministically and in the declared order above:
+
+- `gamma + T >= g_min` is always reachable by raising `T`, whatever the sign
+  or size of `gamma` (step 2), and it implies `A = M + h(gamma + T) >=
+  h g_min > 0`, so `A > 0` is never repaired directly;
+- `4M + 2h(gamma + T) >= h^2 (1 + delta)` is likewise reached by raising `T`
+  (step 3), which cannot undo step 2 because it only increases `T`.
+
+The repair is therefore idempotent, never clamps `gamma`, and moves exactly
+one coordinate. Its result is **verified on the executed rounded
+coefficients**, not on the proposal: after every repair the executed `a, b`
+are classified and must be strictly stable, the same gate as before.
+
+**Why `M >= 0` and `T >= 0` stay declared.** The third Jury condition reduces
+to `gamma + T > 0` only because `b = M/A >= 0`, which needs `M >= 0` with
+`A > 0`; with `M < 0` the `|b| < 1` condition would have to be carried in
+full. `T >= 0` is likewise declared: negative horizons are not admitted, even
+though the stability conditions alone would not forbid every one of them.
+
 Declared numerical gaps are unchanged: `g_min = 2^-10 h`, `delta = 1e-3`.
 They remain a robustness policy, not a certificate; the certificate is the
 executed-coefficient classification. As before, this certifies the isolated

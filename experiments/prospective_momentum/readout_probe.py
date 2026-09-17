@@ -36,7 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
 from experiments.nested_memory import dynamics as NMD              # noqa: E402
-from experiments.nested_memory.task import WRITE                  # noqa: E402
+from experiments.nested_memory import model as NM                  # noqa: E402
+from experiments.nested_memory.task import IDLE, QUERY, WRITE      # noqa: E402
 from experiments.prospective_momentum import filtered as FL        # noqa: E402
 from experiments.prospective_momentum import model as PM           # noqa: E402
 from experiments.prospective_momentum import replication_sources as RS  # noqa
@@ -64,27 +65,47 @@ BASE_FLOOR = 1e-6
 STOP_MARGIN = 0.01
 #: how many of the five offsets the interior must win by that margin
 STOP_MIN_OFFSETS = 3
+#: how many of the four checkpoints must pass the rule (no pooled mean)
+STOP_MIN_CHECKPOINTS = 3
 #: offsets after a revision for the secondary label-probability curves
 SECONDARY_OFFSETS = tuple(range(TD.SUFFIX_LEN))
 DIAG_DELAY = TD.DIAG_DELAY
 
 # ------------------------------------------------------------ frozen grids --
+# MATCHED SEARCH BUDGET: every family that enters the stopping rule has
+# exactly N_MATCHED members, declared here. The wider interior grid is kept
+# as a DESCRIPTIVE family that never enters the rule.
+N_MATCHED = 7
 TWO_TAP_KAPPA = (0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0)
 TSS_T = (0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0)
-GEN_M = (0.1, 0.25, 0.5, 1.0)
-GEN_GAMMA = (-0.5, -0.25, 0.0, 0.25, 0.5)
-GEN_T = (0.5, 1.0, 2.0)
-LOOKAHEAD_LAMBDA = (0.25, 0.5, 1.0, 1.5, 2.0)
-CATEGORIES = ("overall", "revised_direction", "untouched_direction")
+LOOKAHEAD_LAMBDA = (0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0)
+#: seven interior points around (M, gamma, T) = (0.25, 0, 1), spanning the
+#: mass, both signs of gamma and the horizon
+GEN_MATCHED = ((0.1, 0.0, 1.0), (0.25, 0.0, 1.0), (0.5, 0.0, 1.0),
+               (0.25, -0.25, 1.0), (0.25, 0.25, 1.0), (0.25, 0.0, 0.5),
+               (0.25, 0.0, 2.0))
+#: descriptive only, excluded from the stopping rule
+GEN_EXTENDED_M = (0.1, 0.25, 0.5, 1.0)
+GEN_EXTENDED_GAMMA = (-0.5, -0.25, 0.0, 0.25, 0.5)
+GEN_EXTENDED_T = (0.5, 1.0, 2.0)
+#: families that may enter the stopping rule (equal cardinality)
+MATCHED_FAMILIES = ("two_tap", "literal_tss", "lookahead",
+                    "generalized_interior")
+#: the baseline the interior must beat: the best CARRY-FREE or one-matrix
+#: control, i.e. the better of the literal-TSS line and the U-lookahead
+BASELINE_FAMILIES = ("literal_tss", "lookahead")
+KINDS = ("all", "revised", "untouched")
 CONDITIONS = ("both",) + TT.CONDITIONS
+HALVES = ("selection", "confirmation")
+#: query kinds of the temporal task: 0 revised probe, 2 late selected are
+#: "revised"; 1 untouched probe, 3 late untouched are "untouched"
+REVISED_KINDS, UNTOUCHED_KINDS = (0, 2), (1, 3)
 
 
 def arms():
-    """The frozen arm list, built once and printed before any measurement.
-    Grid members outside the corrected admissible set are excluded HERE, by
-    the declared rule, not after seeing results."""
-    out = [dict(name="native_identity", family="identity", kind="identity",
-                coefficients=None)]
+    """The frozen arm list. Grid members outside the corrected admissible set
+    are excluded HERE, by the declared rule, not after seeing results."""
+    out = [dict(name="native_identity", family="identity", kind="identity")]
     for k in TWO_TAP_KAPPA:
         out.append(dict(name=f"two_tap@kappa={k}", family="two_tap",
                         kind="filter", M=0.0, gamma=H * (1.0 - k), T=k * H,
@@ -92,16 +113,29 @@ def arms():
     for T in TSS_T:
         out.append(dict(name=f"tss@T={T}", family="literal_tss",
                         kind="filter", M=0.0, gamma=0.0, T=T))
-    for M in GEN_M:
-        for g in GEN_GAMMA:
-            for T in GEN_T:
-                if FL.admissible(M, g, T):
-                    out.append(dict(name=f"generalized@M={M},gamma={g},T={T}",
-                                    family="generalized_interior",
-                                    kind="filter", M=M, gamma=g, T=T))
     for lam in LOOKAHEAD_LAMBDA:
         out.append(dict(name=f"lookahead@lambda={lam}", family="lookahead",
                         kind="lookahead", lam=lam))
+    for (M, g, T) in GEN_MATCHED:
+        if not FL.admissible(M, g, T):
+            raise ValueError(f"declared interior point ({M},{g},{T}) is "
+                             "not admissible")
+        out.append(dict(name=f"generalized@M={M},gamma={g},T={T}",
+                        family="generalized_interior", kind="filter",
+                        M=M, gamma=g, T=T))
+    named = {a["name"] for a in out}
+    for M in GEN_EXTENDED_M:
+        for g in GEN_EXTENDED_GAMMA:
+            for T in GEN_EXTENDED_T:
+                name = f"generalized@M={M},gamma={g},T={T}"
+                if FL.admissible(M, g, T) and name not in named:
+                    out.append(dict(name=name, family="generalized_extended",
+                                    kind="filter", M=M, gamma=g, T=T))
+    sizes = {f: sum(1 for a in out if a["family"] == f)
+             for f in MATCHED_FAMILIES}
+    if set(sizes.values()) != {N_MATCHED}:
+        raise ValueError(f"matched families must have {N_MATCHED} members "
+                         f"each: {sizes}")
     return out
 
 
@@ -121,7 +155,7 @@ def arm_admissibility(arm_list):
     for a in arm_list:
         if a["kind"] != "filter":
             rows.append(dict(name=a["name"], family=a["family"],
-                             coefficients=None))
+                             executed=None))
             continue
         ex = arm_coefficients(a)
         rep = FL.filter_report(ex, source="grid member, production dtype")
@@ -141,7 +175,7 @@ def _traces(p, eps):
         out = PM.rollout(FL.FILTERED, p, e, trace=True)
         a, b, mu, eta = out["gates"]
         return dict(W=out["W_trace"], U=out["U_trace"], alpha=a, beta=b,
-                    logits=out["logits"], coeff=out["coeff"])
+                    mu=mu, logits=out["logits"], coeff=out["coeff"])
     return jax.vmap(one)(eps)
 
 
@@ -149,6 +183,18 @@ def _traces(p, eps):
 def _native_logits(p, eps):
     return jax.vmap(lambda e: PM.rollout("momentum_delta", p, e)["logits"])(
         eps)
+
+
+@jax.jit
+def _idle_gates(p):
+    """The gates of an IDLE token (key 0, no value): the token the
+    counterfactual roll-forward uses."""
+    x = NM.gate_features(jnp.zeros((1,), jnp.int32),
+                         -jnp.ones((1,), jnp.int32),
+                         jnp.full((1,), IDLE, jnp.int32)).astype(
+                             p["key_raw"].dtype)
+    a, b, mu, eta = NM._momentum_gates(p, x)
+    return a[0], b[0], mu[0], eta[0]
 
 
 def trajectories(native_p, batch):
@@ -160,7 +206,7 @@ def trajectories(native_p, batch):
     ref = _native_logits(native_p, eps)
     want = onp.dtype(native_p["A_log"].dtype)
     fails = []
-    for name in ("W", "U", "alpha", "beta", "logits"):
+    for name in ("W", "U", "alpha", "beta", "mu", "logits"):
         arr = onp.asarray(tr[name])
         if arr.dtype != want:
             fails.append(f"{name} dtype {arr.dtype} is not the production "
@@ -180,14 +226,55 @@ def trajectories(native_p, batch):
     if not err <= TRAJ32:
         fails.append(f"native-point trajectory differs from the native rule "
                      f"by {err:.3e} (TRAJ32 {TRAJ32})")
+    ig = [float(x) for x in _idle_gates(native_p)]
+    fails += TD.finite_failures("idle gates", onp.asarray(ig))
     return fails, dict(W=onp.asarray(tr["W"]), U=onp.asarray(tr["U"]),
                        alpha=onp.asarray(tr["alpha"]),
                        beta=onp.asarray(tr["beta"]),
+                       idle_gates=dict(alpha=ig[0], beta=ig[1], mu=ig[2],
+                                       eta=ig[3]),
                        native_point_logit_agreement=err)
 
 
+def roll_forward(tr):
+    """PRIMARY TARGET: the native recurrence rolled forward from (W_t, U_t)
+    over IDLE tokens only, k steps ahead. This is what a prospective readout
+    is entitled to anticipate: the transient already in flight, with no
+    unobserved future write. On an idle token R = 0, so
+    U <- mu U and W <- alpha W - beta U."""
+    g = tr["idle_gates"]
+    al = onp.float32(g["alpha"]); be = onp.float32(g["beta"])
+    mu = onp.float32(g["mu"])
+    W = tr["W"].copy(); U = tr["U"].copy()
+    out = {}
+    for step in range(1, max(K_OFFSETS) + 1):
+        U = mu * U
+        W = al * W - be * U
+        if step in K_OFFSETS:
+            out[step] = W.copy()
+    return out
+
+
+def split_halves(batch):
+    """Declared BEFORE the run: inside every (family, condition) stratum the
+    first half of the episodes is the SELECTION half and the second half the
+    CONFIRMATION half. Arms are chosen on selection and reported on
+    confirmation."""
+    fam = onp.asarray(batch["family"]); cond = onp.asarray(batch["condition"])
+    half = onp.empty(fam.shape, dtype=object)
+    for f in onp.unique(fam):
+        for c in onp.unique(cond):
+            idx = onp.flatnonzero((fam == f) & (cond == c))
+            cut = len(idx) // 2
+            half[idx[:cut]] = "selection"
+            half[idx[cut:]] = "confirmation"
+    return half
+
+
 def readout(arm, tr):
-    """X for one arm, in the production dtype, from the frozen trajectory."""
+    """X for one arm, in the production dtype, from the frozen trajectory.
+    X never enters R, U or W (Stage A s3), so every arm reads the SAME
+    trajectory."""
     W, U, beta = tr["W"], tr["U"], tr["beta"]
     if arm["kind"] == "identity":
         return W.copy()
@@ -206,30 +293,7 @@ def readout(arm, tr):
         x2, x1, wp = x1, x, W[:, t]
     return X
 
-
 # ----------------------------------------------------------------- metrics --
-def episode_directions(batch, keys):
-    """Per episode: the key vector of the most recent revision at each token
-    (or None before the first), and the untouched target key vectors."""
-    B, L = batch["event"].shape
-    rev_at = onp.full((B, L), -1, dtype=onp.int32)
-    unt = []
-    for b in range(B):
-        probes = onp.flatnonzero(batch["kind"][b] == 0)
-        rev_tokens = sorted({int(t - batch["since_revision"][b, t])
-                             for t in probes})
-        cur = -1
-        for t in range(L):
-            if cur + 1 < len(rev_tokens) and t >= rev_tokens[cur + 1]:
-                cur += 1
-            rev_at[b, t] = (int(batch["key_id"][b, rev_tokens[cur]])
-                            if cur >= 0 else -1)
-        unt.append(sorted({int(batch["key_id"][b, t]) for t in
-                           onp.flatnonzero((batch["kind"][b] == 1)
-                                           | (batch["kind"][b] == 3))}))
-    return rev_at, onp.asarray(unt), keys
-
-
 def _ratio(num, den, mask):
     ok = mask & (den > BASE_FLOOR) & onp.isfinite(num) & onp.isfinite(den)
     n = int(ok.sum())
@@ -239,44 +303,67 @@ def _ratio(num, den, mask):
                 excluded=int(mask.sum()) - n)
 
 
-def arm_metrics(X, tr, batch, rev_at, unt_keys, keys):
-    """Normalized prediction error per offset, category and condition."""
+def arm_metrics(X, tr, batch, targets, keys, half):
+    """Normalized prediction error. PRIMARY: key-projected, against the
+    counterfactual roll-forward, at the tokens where a query is actually
+    answered, split by query kind, fill condition and half. SECONDARY: the
+    same against the ACTUAL W_(t+k), and the full-matrix (Frobenius) norms."""
     W = tr["W"]
     B, L = W.shape[0], W.shape[1]
+    ev, kd = onp.asarray(batch["event"]), onp.asarray(batch["kind"])
     cond = onp.asarray(batch["condition"])
+    q_tok = ev == QUERY
+    qkeys = keys[onp.asarray(batch["key_id"])]                 # (B, L, d_k)
     out = {}
     for k in K_OFFSETS:
-        T_ = L - k
-        D = (X[:, :T_] - W[:, k:]).astype(onp.float64)
-        Bs = (W[:, :T_] - W[:, k:]).astype(onp.float64)
-        fro_num = onp.linalg.norm(D, axis=(-2, -1))
-        fro_den = onp.linalg.norm(Bs, axis=(-2, -1))
-        rev_q = keys[onp.clip(rev_at[:, :T_], 0, None)]
-        has_rev = rev_at[:, :T_] >= 0
-        rev_num = onp.linalg.norm(onp.einsum("btvw,btw->btv", D, rev_q),
-                                  axis=-1)
-        rev_den = onp.linalg.norm(onp.einsum("btvw,btw->btv", Bs, rev_q),
-                                  axis=-1)
-        uq = keys[unt_keys]                                   # (B, n_unt, dk)
-        unt_num = onp.linalg.norm(onp.einsum("btvw,buw->btuv", D, uq),
-                                  axis=-1).mean(-1)
-        unt_den = onp.linalg.norm(onp.einsum("btvw,buw->btuv", Bs, uq),
-                                  axis=-1).mean(-1)
-        for cname in CONDITIONS:
-            m = onp.ones((B, T_), dtype=bool)
-            if cname != "both":
-                m = m & (cond == TT.CONDITIONS.index(cname))[:, None]
-            out[f"overall/{cname}/k{k}"] = _ratio(fro_num, fro_den, m)
-            out[f"revised_direction/{cname}/k{k}"] = _ratio(
-                rev_num, rev_den, m & has_rev)
-            out[f"untouched_direction/{cname}/k{k}"] = _ratio(
-                unt_num, unt_den, m)
+        roll = targets[k]
+        pairs = [("rollforward", roll, onp.ones((B, L), dtype=bool))]
+        act = onp.zeros_like(W)
+        act[:, :L - k] = W[:, k:]
+        ok_act = onp.zeros((B, L), dtype=bool)
+        ok_act[:, :L - k] = True
+        pairs.append(("actual", act, ok_act))
+        for tname, target, valid in pairs:
+            D = (X - target).astype(onp.float64)
+            Bs = (W - target).astype(onp.float64)
+            key_num = onp.linalg.norm(onp.einsum("btvw,btw->btv", D, qkeys),
+                                      axis=-1)
+            key_den = onp.linalg.norm(onp.einsum("btvw,btw->btv", Bs, qkeys),
+                                      axis=-1)
+            fro_num = onp.linalg.norm(D, axis=(-2, -1))
+            fro_den = onp.linalg.norm(Bs, axis=(-2, -1))
+            for hname in HALVES + ("both",):
+                hm = (onp.ones((B, 1), dtype=bool) if hname == "both"
+                      else (half == hname)[:, None])
+                for cname in CONDITIONS:
+                    cm = (onp.ones((B, 1), dtype=bool) if cname == "both"
+                          else (cond == TT.CONDITIONS.index(cname))[:, None])
+                    for kind in KINDS:
+                        if kind == "all":
+                            km = q_tok
+                        elif kind == "revised":
+                            km = q_tok & onp.isin(kd, REVISED_KINDS)
+                        else:
+                            km = q_tok & onp.isin(kd, UNTOUCHED_KINDS)
+                        m = valid & hm & cm & km
+                        out[f"{tname}/key/{kind}/{cname}/{hname}/k{k}"] = \
+                            _ratio(key_num, key_den, m)
+                    if cname == "both" and hname == "both":
+                        out[f"{tname}/frobenius/all/both/both/k{k}"] = _ratio(
+                            fro_num, fro_den, valid)
     return out
 
 
+PRIMARY_TARGET, PRIMARY_PROJECTION = "rollforward", "key"
+
+
+def primary_key(kind="all", cond="both", half="confirmation", k=1):
+    return f"{PRIMARY_TARGET}/{PRIMARY_PROJECTION}/{kind}/{cond}/{half}/k{k}"
+
+
 def component_split(tr, batch):
-    """The two parts of dW, reported so a filter that beats literal TSS can be
-    read as extrapolating the write term, the decay term, or both."""
+    """The two parts of dW, reported so a filter that beats the baseline can
+    be read as extrapolating the write term, the decay term, or both."""
     W, U, alpha, beta = tr["W"], tr["U"], tr["alpha"], tr["beta"]
     write = -beta[..., None, None] * U
     prev = onp.concatenate([onp.zeros_like(W[:, :1]), W[:, :-1]], axis=1)
@@ -285,14 +372,13 @@ def component_split(tr, batch):
     nw = onp.linalg.norm(write.astype(onp.float64), axis=(-2, -1))
     nd = onp.linalg.norm(decay.astype(onp.float64), axis=(-2, -1))
     nt = onp.linalg.norm(dW.astype(onp.float64), axis=(-2, -1))
-    ev = onp.asarray(batch["event"])
-    cond = onp.asarray(batch["condition"])
+    ev = onp.asarray(batch["event"]); cond = onp.asarray(batch["condition"])
     out = dict(identity_max_abs=float(onp.max(onp.abs(
         (write + decay - dW).astype(onp.float64)))))
     for cname in CONDITIONS:
-        m = onp.ones_like(nt, dtype=bool)
-        if cname != "both":
-            m = m & (cond == TT.CONDITIONS.index(cname))[:, None]
+        m = (onp.ones_like(nt, dtype=bool) if cname == "both"
+             else onp.broadcast_to(
+                 (cond == TT.CONDITIONS.index(cname))[:, None], nt.shape))
         for tname, tm in (("write_tokens", ev == WRITE),
                           ("non_write_tokens", ev != WRITE)):
             mm = m & tm
@@ -326,10 +412,9 @@ def secondary_curves(X, tr, batch, keys, readout_W, readout_b):
     if not rows:
         return None
     idx_b = onp.asarray([b for b, _ in rows])
-    idx_t = onp.asarray([[r + o for o in SECONDARY_OFFSETS]
-                         for _, r in rows])
+    idx_t = onp.asarray([[r + o for o in SECONDARY_OFFSETS] for _, r in rows])
     Xs = X[idx_b[:, None], idx_t].astype(onp.float64)
-    out = {}
+    out = {"offsets": list(SECONDARY_OFFSETS)}
     for tag, kk, ll in (("revised", keys_r, labs_r),
                         ("untouched", keys_u, labs_u)):
         q = keys[onp.asarray(kk)]
@@ -342,65 +427,92 @@ def secondary_curves(X, tr, batch, keys, readout_W, readout_b):
         ].mean(0).tolist()
         out[f"{tag}_accuracy"] = (logits.argmax(-1)
                                   == lab[:, None]).mean(0).tolist()
-    out["offsets"] = list(SECONDARY_OFFSETS)
     return out
 
 
 # ------------------------------------------------------- report and verdict --
-def argmins(metrics_by_arm):
-    """The best arm per category, condition and offset - reported instead of
-    a single aggregate."""
+def argmins(metrics_by_arm, families=None, keys=None):
+    """Best arm per reported key. `families` restricts the pool (the matched
+    budget); `keys` restricts which keys are ranked."""
     out = {}
-    keys = next(iter(metrics_by_arm.values())).keys()
-    for key in keys:
+    pool = [n for n in metrics_by_arm
+            if families is None or metrics_by_arm[n]["family"] in families]
+    all_keys = keys or [k for k in metrics_by_arm[pool[0]]["metrics"]]
+    for key in all_keys:
         best = None
-        for name, m in metrics_by_arm.items():
-            v = m[key]["mean"]
+        for n in pool:
+            v = metrics_by_arm[n]["metrics"][key]["mean"]
             if v is None:
                 continue
             if best is None or v < best[1]:
-                best = (name, v)
+                best = (n, v)
         out[key] = dict(arm=best[0], mean=best[1]) if best else None
     return out
 
 
-def stopping_rule(metrics_by_arm, arm_list):
-    """PREDECLARED (protocol s6): the generalized interior helps on the read
-    path only if its best member beats the best literal-TSS member on the
-    overall/both category by at least STOP_MARGIN at at least
-    STOP_MIN_OFFSETS of the five offsets. Otherwise the stage stops."""
-    fam = {a["name"]: a["family"] for a in arm_list}
+def stopping_rule(metrics_by_arm):
+    """PREDECLARED (protocol s6), for ONE checkpoint.
 
-    def best(family, key):
-        vals = [(n, m[key]["mean"]) for n, m in metrics_by_arm.items()
-                if fam[n] == family and m[key]["mean"] is not None]
-        return min(vals, key=lambda x: x[1]) if vals else None
+    Baseline: the better of the literal-TSS line and the U-lookahead - the
+    strongest control, since the lookahead carries no extra state and does
+    not extrapolate the decay term. Only the matched-budget families take
+    part (equal cardinality), so the interior cannot win by grid size.
+
+    Arms are chosen on the SELECTION half and compared on the CONFIRMATION
+    half. The interior wins an offset only if its confirmation number is at
+    least STOP_MARGIN below the baseline's."""
+    def pick(families, k):
+        sel = primary_key(half="selection", k=k)
+        conf = primary_key(half="confirmation", k=k)
+        best = None
+        for n, rec in metrics_by_arm.items():
+            if rec["family"] not in families:
+                continue
+            v = rec["metrics"][sel]["mean"]
+            if v is None:
+                continue
+            if best is None or v < best[1]:
+                best = (n, v, rec["metrics"][conf]["mean"])
+        return (dict(arm=best[0], selection=best[1], confirmation=best[2])
+                if best else None)
     per_k, wins = {}, 0
     for k in K_OFFSETS:
-        key = f"overall/both/k{k}"
-        gi, tss = best("generalized_interior", key), best("literal_tss", key)
-        if gi is None or tss is None:
-            per_k[key] = dict(generalized_interior=gi, literal_tss=tss,
-                              wins=False)
+        gi = pick(("generalized_interior",), k)
+        base = pick(BASELINE_FAMILIES, k)
+        if (gi is None or base is None or gi["confirmation"] is None
+                or base["confirmation"] is None):
+            per_k[f"k{k}"] = dict(interior=gi, baseline=base, wins=False)
             continue
-        win = bool(gi[1] <= tss[1] - STOP_MARGIN)
+        win = bool(gi["confirmation"] <= base["confirmation"] - STOP_MARGIN)
         wins += int(win)
-        per_k[key] = dict(generalized_interior=dict(arm=gi[0], mean=gi[1]),
-                          literal_tss=dict(arm=tss[0], mean=tss[1]),
-                          difference=gi[1] - tss[1], wins=win)
-    helped = bool(wins >= STOP_MIN_OFFSETS)
+        per_k[f"k{k}"] = dict(interior=gi, baseline=base,
+                              difference=gi["confirmation"]
+                              - base["confirmation"], wins=win)
     return dict(margin=STOP_MARGIN, offsets_required=STOP_MIN_OFFSETS,
                 offsets_won=wins, per_offset=per_k,
-                interior_beats_literal_tss=helped,
-                verdict=("the generalized interior beats the literal-TSS line "
-                         "at predicting the near-future fast weight"
-                         if helped else
-                         "STOP: no generalized-interior member beats the "
-                         "literal-TSS line at predicting W_(t+k); the added "
-                         "freedom does not help on the read path"),
-                note=("declared before execution; grids and categories are "
-                      "not widened or re-cut after seeing results, and no "
-                      "trained comparison is authorized by this result"))
+                baseline_families=list(BASELINE_FAMILIES),
+                passes=bool(wins >= STOP_MIN_OFFSETS))
+
+
+def overall_verdict(per_seed):
+    """The rule is evaluated PER CHECKPOINT; the interior helps only if it
+    passes on at least STOP_MIN_CHECKPOINTS of the four."""
+    passed = [s for s, r in per_seed.items() if r["stopping_rule"]["passes"]]
+    helped = len(passed) >= STOP_MIN_CHECKPOINTS
+    return dict(checkpoints_passed=sorted(passed),
+                checkpoints_required=STOP_MIN_CHECKPOINTS,
+                interior_beats_baseline=helped,
+                verdict=("the generalized interior beats the best carry-free "
+                         "or one-matrix control at predicting the rolled-"
+                         "forward fast weight" if helped else
+                         "STOP: no generalized-interior member beats the best "
+                         "of the literal-TSS line and the U-lookahead; the "
+                         "added freedom does not help on the read path"),
+                note=("declared before execution: primary target, projection, "
+                      "baseline, matched budget, selection/confirmation "
+                      "split, margin and per-checkpoint requirement. Grids "
+                      "and categories are not widened or re-cut afterwards, "
+                      "and passing authorizes no trained comparison."))
 
 
 # -------------------------------------------------------------------- main --
@@ -439,13 +551,27 @@ def main():
         seeds=list(SEEDS), stream=STREAM,
         episodes_per_family=N_PROBE_PER_FAMILY, offsets=list(K_OFFSETS),
         base_floor=BASE_FLOOR,
-        grids=dict(two_tap_kappa=list(TWO_TAP_KAPPA), tss_T=list(TSS_T),
-                   generalized_M=list(GEN_M), generalized_gamma=list(GEN_GAMMA),
-                   generalized_T=list(GEN_T),
-                   lookahead_lambda=list(LOOKAHEAD_LAMBDA)),
+        grids=dict(matched_size=N_MATCHED, two_tap_kappa=list(TWO_TAP_KAPPA),
+                   tss_T=list(TSS_T),
+                   lookahead_lambda=list(LOOKAHEAD_LAMBDA),
+                   generalized_matched=[list(x) for x in GEN_MATCHED],
+                   generalized_extended=dict(M=list(GEN_EXTENDED_M),
+                                             gamma=list(GEN_EXTENDED_GAMMA),
+                                             T=list(GEN_EXTENDED_T)),
+                   matched_families=list(MATCHED_FAMILIES),
+                   baseline_families=list(BASELINE_FAMILIES)),
         arms=[a["name"] for a in arm_list], n_arms=len(arm_list),
-        measurement=("||X_t - W_(t+k)||_F / ||W_t - W_(t+k)||_F; 1.0 means no "
-                     "better than reading the native fast weight"),
+        measurement=(
+            "PRIMARY: ||(X_t - target_k) q|| / ||(W_t - target_k) q|| at the "
+            "tokens where a query is answered, q that query's key, with "
+            "target_k the native recurrence rolled forward k IDLE steps from "
+            "(W_t, U_t) - the transient already in flight, with no "
+            "unobserved future write. 1.0 means no better than reading the "
+            "native fast weight. SECONDARY: the actual W_(t+k) as target, "
+            "and the full-matrix norms."),
+        baseline=("the stopping rule measures the generalized interior "
+                  "against the BEST of the literal-TSS line and the "
+                  "U-lookahead, at matched search budget"),
         training="none: the backbone is frozen and nothing is optimized",
         source=dict(hashes_at_restore=None), incomplete=[])
     status_path = os.path.join(out, "status.json")
@@ -483,6 +609,13 @@ def run_probe(args, status, arm_list, deadline, save):
         return 4, "FAILED"
     fails, rows = arm_admissibility(arm_list)
     status["arm_table"] = rows
+    half = split_halves(batch)
+    status["split"] = dict(
+        selection=int((half == "selection").sum()),
+        confirmation=int((half == "confirmation").sum()),
+        rule=("declared before the run: inside every (family, condition) "
+              "stratum the first half of the episodes selects and the second "
+              "half confirms"))
     save()
     if fails:
         status["failed"] = f"inadmissible or unstable grid members: {fails}"
@@ -499,7 +632,11 @@ def run_probe(args, status, arm_list, deadline, save):
     print(f"[checkpoints] {len(refs)} frozen native checkpoints verified")
     save()
 
-    per_seed, timings = {}, {}
+    #: one arm of each structural class is timed, because the classes differ
+    #: in carried state and cost
+    classes = ("identity", "two_tap", "lookahead", "literal_tss",
+               "generalized_interior")
+    per_seed, detail, class_s = {}, {}, {}
     for i, seed in enumerate(SEEDS):
         t_seed = time.time()
         p = refs[seed]
@@ -507,69 +644,76 @@ def run_probe(args, status, arm_list, deadline, save):
         if fails:
             status["failed"] = f"trajectory checks failed for {seed}: {fails}"
             return 4, "FAILED"
+        targets = roll_forward(tr)
         keys = onp.asarray(NMD.safe_normalize(p["key_raw"])[0], onp.float64)
-        rev_at, unt_keys, keys = episode_directions(batch, keys)
         rw = onp.asarray(p["readout_W"], onp.float64)
         rb = onp.asarray(p["readout_b"], onp.float64)
         metrics, secondary = {}, {}
-        t_arm0 = time.time()
-        for j, a in enumerate(arm_list):
+        for a in arm_list:
+            t_arm = time.time()
             X = readout(a, tr)
             if not onp.all(onp.isfinite(X)):
                 status["failed"] = f"non-finite readout {a['name']} ({seed})"
                 return 4, "FAILED"
-            metrics[a["name"]] = arm_metrics(X, tr, batch, rev_at, unt_keys,
-                                             keys)
+            metrics[a["name"]] = dict(
+                family=a["family"],
+                metrics=arm_metrics(X, tr, batch, targets, keys, half))
             secondary[a["name"]] = secondary_curves(X, tr, batch, keys, rw,
                                                     rb)
-            if j == 0:
-                timings["seconds_per_arm"] = time.time() - t_arm0
-                left = deadline - time.time() - args.reserve_s
-                need = timings["seconds_per_arm"] * len(arm_list) * (
-                    len(SEEDS) - i)
-                timings["projected_remaining_s"] = need
-                print(f"PROBE_PROJECTED_REMAINING_S={need:.1f}")
-                if need > left:
-                    why = (f"projected {need:.0f}s > remaining {left:.0f}s; "
-                           "not started, nothing reduced")
-                    status["incomplete"].append(why)
-                    print(f"[!] {why}")
-                    return 3, "INCOMPLETE"
+            if a["family"] in classes and a["family"] not in class_s:
+                class_s[a["family"]] = time.time() - t_arm
+                if len(class_s) == len(classes):
+                    need = sum(
+                        class_s.get(b["family"], max(class_s.values()))
+                        for b in arm_list) * (len(SEEDS) - i)
+                    left = deadline - time.time() - args.reserve_s
+                    status["projection"] = dict(
+                        seconds_per_arm_by_class=dict(class_s),
+                        projected_remaining_s=need, remaining_s=left,
+                        note=("projected from one arm of EVERY structural "
+                              "class, since carried state and cost differ"))
+                    print(f"PROBE_PROJECTED_REMAINING_S={need:.1f}")
+                    save()
+                    if need > left:
+                        why = (f"projected {need:.0f}s > remaining "
+                               f"{left:.0f}s; not started, nothing reduced")
+                        status["incomplete"].append(why)
+                        print(f"[!] {why}")
+                        return 3, "INCOMPLETE"
             if time.time() > deadline - args.reserve_s:
                 status["incomplete"].append(
                     f"stopped at arm {a['name']} of seed {seed}")
                 return 3, "INCOMPLETE"
+        sr = stopping_rule({n: m for n, m in metrics.items()
+                            if m["family"] in MATCHED_FAMILIES})
+        primary = [primary_key(kind, cond, half_, k)
+                   for kind in KINDS for cond in CONDITIONS
+                   for half_ in HALVES for k in K_OFFSETS]
         per_seed[str(seed)] = dict(
-            metrics=metrics, secondary=secondary,
+            stopping_rule=sr,
+            argmins_matched=argmins(metrics, MATCHED_FAMILIES, primary),
+            argmins_all_families=argmins(metrics, None, primary),
             component_split=component_split(tr, batch),
-            native_point_logit_agreement=tr["native_point_logit_agreement"],
-            argmins=argmins(metrics), stopping_rule=stopping_rule(metrics,
-                                                                  arm_list),
+            idle_gates=tr["idle_gates"],
+            native_point_logit_agreement=tr[
+                "native_point_logit_agreement"],
             wall_s=time.time() - t_seed)
+        detail[str(seed)] = dict(metrics={n: m["metrics"]
+                                          for n, m in metrics.items()},
+                                 secondary=secondary)
         status["per_seed"] = per_seed
         save()
-        print(f"[seed {seed}] interior beats literal TSS: "
-              f"{per_seed[str(seed)]['stopping_rule']['interior_beats_literal_tss']}")
-    pooled = {}
-    for name in (a["name"] for a in arm_list):
-        pooled[name] = {}
-        for key in per_seed[str(SEEDS[0])]["metrics"][name]:
-            vals = [per_seed[str(s)]["metrics"][name][key]["mean"]
-                    for s in SEEDS]
-            pooled[name][key] = dict(
-                mean=(float(onp.mean(vals)) if all(v is not None for v in
-                                                   vals) else None),
-                per_seed={str(s): per_seed[str(s)]["metrics"][name][key][
-                    "mean"] for s in SEEDS})
-    status["pooled"] = dict(metrics=pooled, argmins=argmins(pooled),
-                            stopping_rule=stopping_rule(pooled, arm_list))
-    status["timings"] = timings
+        print(f"[seed {seed}] stopping rule passes: {sr['passes']} "
+              f"(offsets won {sr['offsets_won']})")
+    ST.write(os.path.join(status["out"], "metrics.json"), detail)
+    status["overall"] = overall_verdict(per_seed)
     status["work_completed"] = dict(seeds=len(SEEDS), arms=len(arm_list),
                                     episodes=int(batch["event"].shape[0]),
                                     offsets=list(K_OFFSETS), updates=0)
-    sr = status["pooled"]["stopping_rule"]
-    print(f"[stopping rule] interior_beats_literal_tss="
-          f"{sr['interior_beats_literal_tss']} offsets_won={sr['offsets_won']}")
+    ov = status["overall"]
+    print(f"[stopping rule] interior_beats_baseline="
+          f"{ov['interior_beats_baseline']} checkpoints passed "
+          f"{ov['checkpoints_passed']}")
     status["complete"] = True
     return 0, "PASS"
 

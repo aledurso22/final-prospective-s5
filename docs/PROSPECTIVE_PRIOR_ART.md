@@ -16,10 +16,13 @@ arithmetic** (Python `Fraction`), which is stronger than the float64
 reproduction the brief asked for: an exact zero rather than a small residual.
 The same identities are also reproduced numerically in float64 against the
 production code by `tests/test_prospective_readout_probe.py`, which runs on
-the cluster. Statements that are **citations to external papers** cannot be
-verified in this environment and are marked as such: what is verified is the
-match between our recurrence and the update rule **as stated in the brief**,
-not the attribution to a source.
+the cluster. Statements that are **citations to external papers** cannot be verified from
+this environment. They were **verified externally by the coordinator against
+the arXiv versions on 17 September 2026** — Titans' update (Eq. 1 and 13),
+MDN's Appendix C future-work sentence naming Nesterov momentum, Adam and Muon,
+An et al.'s PID rule, Adan, and Shi et al.'s gradient-correction term — and
+are marked accordingly below. The non-exhaustive-search caveat stands
+unchanged.
 
 Notation: the operator's residual `R_t = m_t (alpha_t W_prev k_t - v_t) k_t^T`
 is the gradient of `1/2 ||W k - v||^2` with respect to `W` at the masked
@@ -50,9 +53,9 @@ with an extra multiplicative decay on the iterate, which NAG does not have.
 i.e. momentum plus `K_d` times a **moving average (pole `mu`) of the gradient
 difference**. **Verified exactly.** That is the PID optimizer's structure
 (An et al., CVPR 2018): the integral/momentum term plus `K_d (g_c - g_(c-1))`
-with an average on the derivative term. *Attribution to that paper, and the
-statement that Adan (Xie et al., 2022) is the adaptive-gradient version, are
-taken from the brief and not checked against the sources here.*
+with an average on the derivative term. *The attribution to that paper, and the statement that Adan (Xie et al.,
+2022) is the adaptive-gradient version, were verified externally against the
+arXiv versions (17 September 2026); they are not re-checkable here.*
 
 ## 2. The residual-processing family is PID with an averaged D term
 
@@ -82,8 +85,9 @@ Hessian-driven damping term (chain rule; trivially verified). This is the
 inertial-dynamics-with-Hessian-damping family (Alvarez et al. 2002; Attouch
 et al., already cited in this repository) and, specifically, the
 high-resolution ODE of NAG-SC (Shi, Du, Jordan, Su), where `sqrt(s)
-grad^2 f(X) Xdot` is called the gradient correction. *The identification of
-these references is taken from the brief; the papers are not available here.*
+grad^2 f(X) Xdot` is called the gradient correction. *The identification of Shi et al.'s gradient-correction term was verified
+externally against the arXiv version (17 September 2026); the papers are not
+available here.*
 
 ## 4. Delta-rule boundaries (one correction to the brief)
 
@@ -94,9 +98,10 @@ and leaves a **first-order delta rule with step `beta eta/(1 - mu)`** — QHM at
 executed recurrence. This is the passive-circuit boundary of that
 parameterization.
 
-**The brief also calls this "the same cancellation as `M = gamma T`".** That
-is true of the **continuous** law and **not** of the implemented discrete
-coefficient form:
+**The brief, and the handoff's s6.3 framing, call this "the same cancellation
+as `M = gamma T`, in different coordinates".** That is true of the
+**continuous** law and **not** of the implemented discrete coefficient form,
+so the s6.3 framing is corrected here as well, not only the brief:
 
 - continuous `H(s) = (1 + T s)/(M s^2 + (gamma + T) s + 1)`: the denominator
   at the numerator root `s = -1/T` equals `(M - gamma T)/T^2`, so the pole
@@ -106,15 +111,20 @@ coefficient form:
 - the executed TSS-compatible discretisation `z^2 - a z + b` with numerator
   `c z - d`: at `M = gamma T` the denominator at the numerator root
   `z = d/c = T/(h + T)` is **not** zero (for example `3/176` at
-  `gamma = 2, T = 3, h = 1`). **The claim does not hold there**, and this
-  document marks it as such. In that discretisation the only first-order
+  `gamma = 2, T = 3, h = 1`, a value the coordinator independently
+  reproduced). **The claim does not hold there**, and this document marks it
+  as such. The two statements are therefore independent: `kappa = mu/(1-mu)`
+  cancels the momentum pole exactly in the discrete PM recurrence, while
+  `M = gamma T` is a continuous-only statement, where the denominator factors
+  so that the `(1 + T p)` zero meets a pole. In that discretisation the only first-order
   point of the processing family is the native point `M = 0, gamma = h,
   T = 0`.
 
 ## 5. The backbone
 
-*Taken from the brief and not verifiable here:* the native rule (N) is the
-linear-memory case of Titans (momentum plus forgetting on the associative
+*Verified externally against the arXiv versions (17 September 2026), not
+re-checkable here:* the native rule (N) is the linear-memory case of Titans
+(Eq. 1 and 13) (momentum plus forgetting on the associative
 loss), and MDN is its chunkwise-parallel form. MDN's Appendix C names
 Nesterov momentum, Adam and Muon scaling as future work and does not
 implement them; no published delta-rule or linear-attention model uses a
