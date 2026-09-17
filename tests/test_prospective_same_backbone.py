@@ -44,6 +44,35 @@ F64 = onp.float64
 EPS64 = float(onp.finfo(F64).eps)
 
 
+def _finite_tree(*trees):
+    """F2: every inexact leaf must be finite. Scoped to the numerical
+    contract; projection telemetry (NaN for an absent extension, +inf for a
+    legitimately unbounded frozen-token bound) is not included."""
+    return all(bool(onp.all(onp.isfinite(onp.asarray(v, F64))))
+               for t in trees
+               for v in jax.tree_util.tree_leaves(t)
+               if onp.issubdtype(onp.asarray(v).dtype, onp.inexact))
+
+
+def _moved_finite(after, before):
+    """F2: a NaN coefficient is NOT movement."""
+    a, b = float(onp.asarray(after)), float(onp.asarray(before))
+    return bool(onp.isfinite(a) and onp.isfinite(b) and a != b)
+
+
+def _close(label, got, ref, rel_tol, floor=1e3 * EPS64):
+    """F1: finite-first scalar comparison of two SEPARATELY COMPILED graphs at
+    the declared tolerance, with the established near-zero floor. Their
+    mathematical identity does not imply bitwise equality across
+    compilations."""
+    g, r = float(onp.asarray(got)), float(onp.asarray(ref))
+    assert onp.isfinite(g) and onp.isfinite(r), (label, g, r)
+    a = abs(g - r)
+    print(f"  {label}: {g:.12g} vs {r:.12g} abs {a:.3e} rel "
+          f"{a / max(abs(r), 1e-30):.3e} (tolerance {rel_tol})")
+    assert a <= max(rel_tol * abs(r), floor * max(abs(r), 1.0)), (label, a)
+
+
 def _rel(a, b):
     a, b = onp.asarray(a, F64), onp.asarray(b, F64)
     n = float(onp.linalg.norm(b))
@@ -343,18 +372,46 @@ def test_coefficient_only_freezes_the_backbone_but_keeps_full_bptt():
         opt = ST.TX.init(p)
         full = ST.train_step(law, p, opt, eps, lr)
         frozen = SB.train_step_coefficient_only(law, p, opt, eps, lr)
-        # the SAME loss and the SAME kappa gradient: freezing changes only
-        # which leaves the optimizer may move
-        assert float(full[2]) == float(frozen[2])
-        assert float(full[9]) == float(frozen[9]) != 0.0
+        # F2: finiteness of both updated trees and of every returned scalar
+        # required finite, BEFORE any equality/movement/preservation decision
+        assert _finite_tree(full[0], full[1], frozen[0], frozen[1]), law
+        for x in list(full[2:8]) + [full[9]] + list(frozen[2:8]) + [frozen[9]]:
+            assert onp.isfinite(float(x)), law
+        # F1: the two graphs are compiled separately; their loss and kappa
+        # gradient are mathematically identical, compared here at the declared
+        # float64 identity tolerance rather than bitwise
+        _close(f"{law} loss (full vs coefficient-only)", frozen[2], full[2],
+               ID64)
+        _close(f"{law} kappa gradient (full vs coefficient-only)", frozen[9],
+               full[9], GRAD64)
+        assert float(frozen[9]) != 0.0                 # separate, non-vanishing
+        # routing at the shared boundary: only kappa is passed through
+        mask = SB.freeze_mask(p)
+        assert float(mask["kappa"]) == 1.0
+        assert all(float(mask[k]) == 0.0 for k in p if k != "kappa")
         pf = frozen[0]
+        # EXACT preservation is kept: a storage/update invariant, not a claim
+        # about two separately compiled computations
         assert SB.frozen_leaf_differences(pf, p) == {}
         for k in p:
             if k != "kappa":
                 assert onp.array_equal(onp.asarray(pf[k]), onp.asarray(p[k]))
-        assert float(pf["kappa"][0]) != float(p["kappa"][0])
+        assert _moved_finite(pf["kappa"][0], p["kappa"][0])
         # the full regime does move the backbone
         assert SB.frozen_leaf_differences(full[0], p) != {}
+
+
+def test_movement_and_finiteness_guards_reject_a_nan_update():
+    """F2 regression: a NaN updated coefficient is rejected, not counted as
+    movement; telemetry that is NaN or +inf by design is out of scope."""
+    assert _moved_finite(0.4, 0.3)
+    assert not _moved_finite(float("nan"), 0.3)
+    assert not _moved_finite(0.3, float("nan"))
+    assert not _moved_finite(0.3, 0.3)
+    assert _finite_tree({"a": jnp.asarray([1.0])}, {"b": jnp.asarray(2.0)})
+    assert not _finite_tree({"a": jnp.asarray([jnp.nan])})
+    assert not _finite_tree({"a": jnp.asarray([jnp.inf])})
+    assert _finite_tree({"i": jnp.asarray([1], dtype=jnp.int32)})
 
 
 def test_frozen_leaf_differences_reports_what_changed():

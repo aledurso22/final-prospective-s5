@@ -168,9 +168,15 @@ checks remain distinct from switching stability.
 10. the operator's executed 3×3 matches its analytic form; its characteristic
     polynomial is `z` times the candidate's quadratic; classification agrees
     with the candidate's; above the bound it is unstable;
-11. coefficient-only: identical loss and identical kappa gradient to the full
-    regime (so freezing does not truncate BPTT), backbone bitwise unchanged,
-    kappa moved, and the full regime does move the backbone;
+11. coefficient-only: the loss and the kappa gradient agree with the full
+    regime (so freezing does not truncate BPTT) **within the declared
+    identity/gradient tolerances**, since the two are separately compiled
+    graphs and bitwise equality across compilations is not claimed
+    (amendment F1); the mask routes only kappa at the shared boundary; the
+    backbone is bitwise unchanged (an exact storage/update invariant); kappa
+    moved finitely; the full regime does move the backbone. Finiteness of
+    both updated parameter and optimizer trees and of every required scalar
+    is established FIRST (amendment F2);
 11b. **production precision (amendment R2):** a dedicated x64-DISABLED probe
     process, `tests/prospective_same_backbone_float32_probe.py`, inside the
     same check budget. It asserts parameter, carry, gate and output dtypes and
@@ -179,9 +185,13 @@ checks remain distinct from switching stability.
     sequential sensitivity of the same rounded inputs (REL32 2e-2, a
     cross-precision comparison) and against float32 central differences under
     the declared FD32/REL32 resolvability and limitation policy, finiteness
-    first; and the coefficient-only step preserving every pretrained leaf
-    exactly while keeping a finite, nonzero kappa gradient through the
-    recurrence. The completed studies are not re-run;
+    first; that the independent reference agrees with production on the
+    primal loss and the final W and U carries as well as the logits and the
+    derivative; explicit finiteness of the returned gates, logits and all
+    three carries; and the coefficient-only step preserving every pretrained
+    leaf exactly while keeping a finite, nonzero kappa gradient through the
+    recurrence, with loss and gradient compared at the declared float32
+    tolerance rather than bitwise. The completed studies are not re-run;
 12. the arm plan, parameter/carry counts, planned work (25 trained runs,
     5,000 updates, 4 frozen evaluations), stream freshness, per-arm
     development-only selection, every declared comparison reported separately
@@ -262,6 +272,23 @@ training.
 - **R3.** Two comparisons added: coefficient-only versus continued native for
   the candidate and for the operator. The coefficient-only-versus-full pairs
   are marked descriptive.
+- **F1 (confirmation review of 11f9858).** Exact Python-float equality
+  between the two separately jitted training steps is replaced by a
+  finite-first comparison at the declared tolerances (ID64/GRAD64 in float64,
+  TRAJ32 in float32), printing absolute and relative discrepancies, plus an
+  explicit routing check of the freeze mask at the shared boundary. The
+  finite, nonzero coefficient-gradient check is kept separate, and exact
+  preservation of frozen stored leaves is unchanged.
+- **F2 (same review).** Finiteness of both updated parameter trees, both
+  optimizer trees and every required returned scalar is established before any
+  equality, movement or preservation decision; movement requires a FINITE
+  change, so a NaN coefficient is rejected rather than counted as movement (a
+  small guard regression covers this); the operator's gates, logits and all
+  three carries are checked for finiteness explicitly rather than by dtype;
+  and the independent float64 reference must match production on the primal
+  loss and final carries too. Projection telemetry that is NaN (no extension
+  scalar) or +inf (a legitimately unbounded frozen-token bound) stays out of
+  scope of the finiteness contract.
 - **Reporting.** Stored and trainable parameters are reported separately; the
   digest prints full category names for per-seed rows as well as means; the
   audit's determinant order, the matched/reachable-state qualification of the

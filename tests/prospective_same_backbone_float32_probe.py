@@ -64,6 +64,53 @@ def rel(a, b):
     return float(onp.linalg.norm(a - b)) / (n if n > 0 else 1.0)
 
 
+def finite_tree(*trees):
+    """F2: every inexact leaf of a parameter/optimizer tree must be finite.
+    Scoped to the numerical contract: projection telemetry is NOT included,
+    because an absent extension or a legitimately unbounded frozen-token
+    bound is reported as NaN/inf by design."""
+    return all(bool(onp.all(onp.isfinite(onp.asarray(v, onp.float64))))
+               for t in trees
+               for v in jax.tree_util.tree_leaves(t)
+               if onp.issubdtype(onp.asarray(v).dtype, onp.inexact))
+
+
+def moved_finite(after, before):
+    """F2: a NaN coefficient is NOT movement. Finite first, then changed."""
+    if not all_finite(after, before):
+        return False
+    return float(after) != float(before)
+
+
+def close(label, got, ref, rel_tol, floor_eps=1e3 * float(onp.finfo(
+        onp.float32).eps)):
+    """F1: finite-first, dtype-appropriate scalar comparison with the declared
+    tolerance and the established near-zero floor. Two separately compiled
+    graphs are mathematically identical here, but bitwise equality across
+    compilations is not claimed."""
+    if not all_finite(got, ref):
+        fails.append(f"{label}: non-finite ({got} vs {ref})")
+        return False
+    a = abs(float(got) - float(ref))
+    r = a / max(abs(float(ref)), 1e-30)
+    print(f"  {label}: {float(got):.9g} vs {float(ref):.9g} abs {a:.3e} rel "
+          f"{r:.3e} (tolerance {rel_tol}, floor {floor_eps:.2e})")
+    if a <= max(rel_tol * abs(float(ref)), floor_eps * max(abs(float(ref)),
+                                                           1.0)):
+        return True
+    fails.append(f"{label}: abs {a:.3e} rel {r:.3e}")
+    return False
+
+
+# a tiny regression for the two guards themselves
+if moved_finite(float("nan"), 0.3) or moved_finite(0.3, 0.3):
+    fails.append("guard regression: NaN or unchanged counted as movement")
+if not moved_finite(0.4, 0.3):
+    fails.append("guard regression: a finite move was not counted")
+if finite_tree({"a": onp.array([onp.nan])}):
+    fails.append("guard regression: a NaN tree was called finite")
+
+
 def check_dtype(label, *arrs):
     for a in arrs:
         if onp.asarray(a).dtype != F32:
@@ -123,6 +170,9 @@ def loss_fn(rule, ep_):
 on = PM.rollout("momentum_delta", pn, ep)
 oo = PM.rollout(OD.ORDINARY, p_op, ep)
 check_dtype("operator outputs", oo["logits"], *oo["final_carry"], *oo["gates"])
+if not all_finite(oo["logits"], *oo["final_carry"], *oo["gates"],
+                  on["logits"], *on["final_carry"]):
+    fails.append("non-finite gates, logits or carries at kappa = 0")
 worst = rel(oo["logits"], on["logits"])
 for x, y in zip(oo["final_carry"][:2], on["final_carry"]):
     worst = max(worst, rel(x, y))
@@ -147,6 +197,11 @@ print(f"  kappa={KAPPA_TEST} streaming across a boundary: worst relative "
 if not stream <= TRAJ32:
     fails.append(f"float32 streaming {stream:.2e}")
 check_dtype("streamed carries", *a2["final_carry"])
+if not all_finite(full["logits"], *full["final_carry"], *full["gates"],
+                  a1["logits"], a2["logits"], *a2["final_carry"]):
+    fails.append(f"non-finite gates, logits or carries at kappa={KAPPA_TEST}")
+if len(full["final_carry"]) != 3 or len(a2["final_carry"]) != 3:
+    fails.append("the operator must stream three carry matrices")
 
 
 # ---- 3. the kappa derivative: float32 FD and an INDEPENDENT float64 reference
@@ -213,10 +268,15 @@ if not all_finite(jvp, fval, ref["loss"], ref["dL_dkappa"], ref["logits"],
     fails.append("non-finite loss, JVP, reference or production state")
 else:
     e_log = rel(ref["logits"], full["logits"])
+    e_W = rel(ref["W"], full["final_carry"][0])
+    e_U = rel(ref["U"], full["final_carry"][1])
+    e_loss = abs(ref["loss"] - fval) / max(abs(fval), 1e-30)
     print(f"  reference vs production (float64 vs float32): logits {e_log:.2e}"
-          f" loss {ref['loss']!r} vs {fval!r}")
-    if not e_log <= TRAJ32:
-        fails.append(f"reference logits disagree: {e_log:.2e}")
+          f" W {e_W:.2e} U {e_U:.2e} loss {ref['loss']!r} vs {fval!r} rel "
+          f"{e_loss:.2e} (TRAJ32 {TRAJ32})")
+    if max(e_log, e_W, e_U, e_loss) > TRAJ32:
+        fails.append(f"reference disagrees with production: logits {e_log:.2e}"
+                     f" W {e_W:.2e} U {e_U:.2e} loss {e_loss:.2e}")
     err = abs(jvp - ref["dL_dkappa"]) / max(abs(ref["dL_dkappa"]), 1e-30)
     print(f"  kappa={KAPPA_TEST} jvp {jvp:.6e} independent float64 reference "
           f"{ref['dL_dkappa']:.6e} rel {err:.2e} (REF32 {REF32})")
@@ -241,19 +301,39 @@ for law in ("prospective_momentum", OD.ORDINARY):
     full_step = ST.train_step(law, p, opt, bt, lr)
     froz = SB.train_step_coefficient_only(law, p, opt, bt, lr)
     check_dtype(f"{law} frozen-step leaves", *froz[0].values())
+    # F2: finiteness of BOTH updated trees and of every returned scalar the
+    # numerical contract requires finite, BEFORE any equality, movement or
+    # preservation decision
+    scalars = [float(x) for x in list(full_step[2:8]) + [full_step[9]]
+               + list(froz[2:8]) + [froz[9]]]
+    if not (finite_tree(full_step[0], full_step[1], froz[0], froz[1])
+            and all_finite(*scalars)):
+        fails.append(f"{law}: non-finite updated parameters, optimizer state "
+                     f"or returned scalars")
+        continue
+    # F1: the two separately compiled graphs are mathematically identical;
+    # compare at the declared float32 tolerance instead of bitwise
+    close(f"{law} loss (full vs coefficient-only)", froz[2], full_step[2],
+          TRAJ32)
+    close(f"{law} kappa gradient (full vs coefficient-only)", froz[9],
+          full_step[9], TRAJ32)
+    # routing at the shared boundary: the mask copies kappa and zeroes the rest
+    mask = SB.freeze_mask(p)
+    if not (float(mask["kappa"]) == 1.0
+            and all(float(mask[k]) == 0.0 for k in p if k != "kappa")):
+        fails.append(f"{law}: freeze mask does not route only kappa")
     changed = SB.frozen_leaf_differences(froz[0], p)
-    same_loss = float(full_step[2]) == float(froz[2])
-    same_grad = float(full_step[9]) == float(froz[9])
-    moved = float(froz[0]["kappa"][0]) != float(p["kappa"][0])
+    moved = moved_finite(froz[0]["kappa"][0], p["kappa"][0])
+    grad_ok = all_finite(float(froz[9])) and float(froz[9]) != 0.0
     print(f"  {law}: coefficient-only loss {float(froz[2]):.6f} kappa grad "
           f"{float(froz[9]):.3e} frozen leaves changed {len(changed)} kappa "
           f"moved {moved}")
-    if changed:
+    if changed:                      # exact: a storage/update invariant
         fails.append(f"{law}: frozen leaves changed {changed}")
-    if not (same_loss and same_grad):
-        fails.append(f"{law}: freezing changed the loss or the kappa gradient")
-    if not (moved and all_finite(float(froz[9])) and float(froz[9]) != 0.0):
-        fails.append(f"{law}: kappa did not move or its gradient vanished")
+    if not moved:
+        fails.append(f"{law}: kappa did not move (finite movement required)")
+    if not grad_ok:
+        fails.append(f"{law}: the kappa gradient is non-finite or vanished")
     if not SB.frozen_leaf_differences(full_step[0], p):
         fails.append(f"{law}: the full regime did not move the backbone")
 
