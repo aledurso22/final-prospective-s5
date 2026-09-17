@@ -35,8 +35,14 @@ SHELL_RULES = ("prospective_momentum", "gain_momentum", OD.ORDINARY,
                FL.FILTERED)
 
 
-def rollout(rule, p, ep, dtype=None, carry0=None):
+def rollout(rule, p, ep, dtype=None, carry0=None, trace=False):
+    # `trace` (temporal-response diagnostic, additive): also return the
+    # per-token W and U of the SAME scan. Default False leaves every output of
+    # every rule unchanged.
     if rule not in SHELL_RULES:
+        if trace:
+            raise ValueError(f"trace is only available for shell rules "
+                             f"{SHELL_RULES}, not {rule!r}")
         return MM.rollout(rule, p, ep, dtype=dtype, carry0=carry0)
     if dtype is None:
         dtype = p["key_raw"].dtype
@@ -86,6 +92,8 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
             outs = outs + (jnp.maximum(jnp.maximum(
                 jnp.max(jnp.abs(carry[2])), jnp.max(jnp.abs(carry[3]))),
                 jnp.max(jnp.abs(carry[4]))),)
+        if trace:
+            outs = outs + (carry[0], carry[1])
         return carry, outs
 
     z = jnp.zeros((D_V, D_K), dtype=dtype)
@@ -104,6 +112,8 @@ def rollout(rule, p, ep, dtype=None, carry0=None):
                weights=None, coeff=coeff)
     if rule == FL.FILTERED:
         ret["proc_max_abs"] = outs[3]
+    if trace:
+        ret["W_trace"], ret["U_trace"] = outs[-2], outs[-1]
     return ret
 
 
