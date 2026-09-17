@@ -236,12 +236,17 @@ def _summary(m):
 # ------------------------------------------------------------------ one run --
 def run_one(arm, tag, lr_value, seed, source_p, val_np, updates, out,
             deadline, reserve_s, status, stage, source_label, save=None,
-            val_at=None, keep_at=()):
+            val_at=None, keep_at=(), step_fn=None, step_failure_fn=None):
     """One trajectory of `updates` updates (possibly 0) or the frozen anchor.
     Every checkpoint is evaluated, accepted and persisted before the next
     update; the parameter trees at `keep_at` updates are returned for
     endpoint evaluation. Returns (record, final params, {update: params}) or
-    None when the time reserve is reached."""
+    None when the time reserve is reached.
+
+    `step_fn` and `step_failure_fn` are additive hooks (retention-aware
+    study): a study may supply its own host step and per-step acceptance with
+    the same signatures as `host_step` and `tss_containment.step_failure`.
+    The defaults leave this study's behaviour unchanged."""
     rule, regime = LAW_OF[arm], REGIME_OF[arm]
     t0 = time.time()
     p = dict(source_p)
@@ -294,8 +299,9 @@ def run_one(arm, tag, lr_value, seed, source_p, val_np, updates, out,
                 f"{updates}")
             return None
         lr = jnp.asarray(lr_value, dtype=jnp.float32)
-        p, opt, scalars, rec = host_step(arm, p, opt, seed, u, lr, hist)
-        bad = TC.step_failure(arm, scalars, rec)
+        p, opt, scalars, rec = (step_fn or host_step)(arm, p, opt, seed, u,
+                                                      lr, hist)
+        bad = (step_failure_fn or TC.step_failure)(arm, scalars, rec)
         if bad:
             break
         if u % 25 == 0 or u == updates - 1:
