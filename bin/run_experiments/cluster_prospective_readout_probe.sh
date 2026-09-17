@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # STAGE B: frozen-checkpoint predictive diagnostic for the prospective
-# readout. NO TRAINING. NOT AUTHORIZED TO RUN until
-# docs/PROSPECTIVE_READOUT_STAGE_B_PROTOCOL.md is cleared.
+# readout. NO TRAINING. CLEARED for ONE launch on 17 September 2026, after
+# the third amendment to docs/PROSPECTIVE_READOUT_STAGE_B_PROTOCOL.md (both
+# targets reported under the per-checkpoint branch; per-offset standard
+# errors, with an above-margin offset counted as indeterminate). One launch
+# only: no retries, no second dispatch, no trimming.
 #
 # ONE hard 600-second budget covers GPU startup, the existing law checks, this
 # stage's checks, checkpoint and source verification, the diagnostic itself,
