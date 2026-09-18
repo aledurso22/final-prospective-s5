@@ -17,12 +17,20 @@ from experiments.s5_three_arm_full.runner import (ARM_ORDER, BATCH_SIZE,
 
 def main(args):
     rows = []
+    failures = []
     for arm in ARM_ORDER:
         for seed in SEEDS:
             path = os.path.join(args.task_root, arm, str(seed),
                                 "task_result.json")
             if not os.path.exists(path):
-                raise SystemExit(f"missing completed task: {path}")
+                failure_path = os.path.join(args.task_root, arm, str(seed),
+                                            "failure.json")
+                if not os.path.exists(failure_path):
+                    raise SystemExit(f"missing completed task: {path}")
+                with open(failure_path) as handle:
+                    failure = json.load(handle)
+                failures.append(failure)
+                continue
             with open(path) as handle:
                 row = json.load(handle)
             if row["code_identifier"] != arm or row["seed"] != seed:
@@ -34,6 +42,28 @@ def main(args):
             else:
                 row["status"] = "OK"
             rows.append(row)
+
+    if failures:
+        result = {
+            "schema": "s5-three-arm-full-training/v2",
+            "status": "SCIENTIFIC_FAILURE",
+            "scientific_arms": [
+                "Native S5",
+                "Zucchet prospective dynamics — finite-difference realization",
+                "generalized prospective dynamics (M,γ,T) — finite-difference realization"],
+            "code_identifiers": list(ARM_ORDER), "seeds": list(SEEDS),
+            "completed_rows": rows, "failed_tasks": failures,
+            "test_opened_after_selection": False,
+            "test_opened_once_by_finalizer": False,
+        }
+        os.makedirs(args.out, exist_ok=True)
+        with open(os.path.join(args.out, "results.json"), "w") as handle:
+            json.dump(result, handle, indent=2)
+        with open(os.path.join(args.out, "artifact_manifest.json"), "w") as handle:
+            json.dump({"schema": "s5-three-arm-full-training/artifacts-v2",
+                       "results": "results.json", "failed_tasks": len(failures)},
+                      handle, indent=2)
+        return
 
     test = EXPERIMENT_DATA.load_official_raw(
         args.data_cache, ("test",))[0]["test"]

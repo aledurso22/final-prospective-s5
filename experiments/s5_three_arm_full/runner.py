@@ -414,7 +414,10 @@ def production_check(arm, seed, out):
     with open(os.path.join(out, "production_check.json"), "w") as handle:
         json.dump(result, handle, indent=2)
     if not result["gradients_finite"] or not result["state_finite"]:
-        raise RuntimeError("production check failed: " + json.dumps(result))
+        raise NumericalTrainingFailure({
+            "arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm,
+            "seed": seed, "epoch": 0, "step": 0,
+            "failure": "production check nonfinite", **result})
 
 
 def main():
@@ -435,6 +438,8 @@ def main():
             failure["record"] = error.record
         with open(os.path.join(args.out, "failure.json"), "w") as handle:
             json.dump(failure, handle, indent=2)
+        if isinstance(error, NumericalTrainingFailure):
+            return
         raise
 
 
