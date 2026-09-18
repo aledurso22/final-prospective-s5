@@ -14,7 +14,21 @@ RHO_MIN = 1e-4
 def _block_operator(q_i, q_j):
     A_i, b_i = q_i
     A_j, b_j = q_j
-    return A_j @ A_i, (A_j @ b_i[..., None])[..., 0] + b_j
+
+    c00 = A_j[..., 0, 0] * A_i[..., 0, 0] + A_j[..., 0, 1] * A_i[..., 1, 0]
+    c01 = A_j[..., 0, 0] * A_i[..., 0, 1] + A_j[..., 0, 1] * A_i[..., 1, 1]
+    c10 = A_j[..., 1, 0] * A_i[..., 0, 0] + A_j[..., 1, 1] * A_i[..., 1, 0]
+    c11 = A_j[..., 1, 0] * A_i[..., 0, 1] + A_j[..., 1, 1] * A_i[..., 1, 1]
+    A_out = np.stack(
+        [np.stack([c00, c01], axis=-1),
+         np.stack([c10, c11], axis=-1)], axis=-2)
+
+    d0 = (A_j[..., 0, 0] * b_i[..., 0]
+          + A_j[..., 0, 1] * b_i[..., 1] + b_j[..., 0])
+    d1 = (A_j[..., 1, 0] * b_i[..., 0]
+          + A_j[..., 1, 1] * b_i[..., 1] + b_j[..., 1])
+    b_out = np.stack([d0, d1], axis=-1)
+    return A_out, b_out
 
 
 def generalized_zoh_coefficients(Lambda, B_tilde, step, response, mass):
@@ -33,7 +47,9 @@ def generalized_zoh_coefficients(Lambda, B_tilde, step, response, mass):
     exponential = jax.vmap(expm)(K)
     A_bar = exponential[:, :2, :2]
     G = exponential[:, :2, 2:4]
-    B_bar = np.einsum("pij,pjh->pih", G, B)
+    b00 = G[:, 0, 0, None] * B[:, 0] + G[:, 0, 1, None] * B[:, 1]
+    b01 = G[:, 1, 0, None] * B[:, 0] + G[:, 1, 1, None] * B[:, 1]
+    B_bar = np.stack([b00, b01], axis=1)
     return A_bar, B_bar
 
 

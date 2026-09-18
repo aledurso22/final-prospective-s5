@@ -10,5 +10,5 @@ test -z "$(git status --porcelain)"
 OUT="${S5_THREE_ARM_PREFLIGHT_OUT:-$PROSPECTIVE_RUNS/s5-three-arm-preflight/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT"
 exec sbatch --parsable \
-  --export=ALL,EXPECTED_COMMIT="$EXPECTED_COMMIT",S5_THREE_ARM_PREFLIGHT_OUT="$OUT" \
+  --export=ALL,EXPECTED_COMMIT="$EXPECTED_COMMIT",PREFLIGHT_ARM="${PREFLIGHT_ARM:-}",S5_THREE_ARM_PREFLIGHT_OUT="$OUT" \
   "$PROSPECTIVE_REPO/bin/slurm/s5_three_arm_preflight.sbatch"

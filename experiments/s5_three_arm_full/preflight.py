@@ -83,7 +83,8 @@ def run_arm(arm, output_dir):
 def main(args):
     if len(jax.devices("gpu")) != 1:
         raise SystemExit("preflight requires exactly one visible GPU")
-    results = [run_arm(arm, args.out) for arm in runner.ARM_ORDER]
+    arms = (runner.ARM_ORDER if args.arm is None else (args.arm,))
+    results = [run_arm(arm, args.out) for arm in arms]
     with open(os.path.join(args.out, "preflight.json"), "w") as handle:
         json.dump({"test_split_opened": False, "arms": results}, handle, indent=2)
     print(json.dumps(results, indent=2))
@@ -92,4 +93,5 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
+    parser.add_argument("--arm", choices=runner.ARM_ORDER, default=None)
     main(parser.parse_args())

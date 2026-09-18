@@ -20,5 +20,8 @@ test -z "$(git status --porcelain)"
 mkdir -p "$S5_THREE_ARM_PREFLIGHT_OUT/tmp" "$S5_THREE_ARM_PREFLIGHT_OUT/jax-cache"
 export TMPDIR="$S5_THREE_ARM_PREFLIGHT_OUT/tmp"
 export JAX_COMPILATION_CACHE_DIR="$S5_THREE_ARM_PREFLIGHT_OUT/jax-cache"
-exec "$PY" -u -m experiments.s5_three_arm_full.preflight \
-  --out "$S5_THREE_ARM_PREFLIGHT_OUT"
+preflight_args=(--out "$S5_THREE_ARM_PREFLIGHT_OUT")
+if [[ -n "${PREFLIGHT_ARM:-}" ]]; then
+  preflight_args+=(--arm "$PREFLIGHT_ARM")
+fi
+exec "$PY" -u -m experiments.s5_three_arm_full.preflight "${preflight_args[@]}"
