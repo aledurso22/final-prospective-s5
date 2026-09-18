@@ -11,6 +11,21 @@ import jax.numpy as jnp
 from experiments.s5_three_arm_full import runner
 
 
+PREFLIGHT_STAGE_ORDER = (
+    "telemetry",
+    "normal_compile",
+    "normal_steady_state",
+)
+PREFLIGHT_RESULT_FIELDS = frozenset(
+    {
+        "scientific_name", "code_identifier", "seed", "batch_size",
+        "sequence_length", "stage_order", "telemetry_compile_seconds",
+        "normal_compile_seconds", "steady_step_seconds", "peak_vram_bytes",
+        "finite_gradients", "finite_state",
+    }
+)
+
+
 def _block(value):
     return value.block_until_ready() if hasattr(value, "block_until_ready") else value
 
@@ -42,35 +57,64 @@ def run_arm(arm, output_dir):
     model = runner.model_for(arm, True)
     x = jnp.ones((16, 16000, 1), dtype=jnp.float32)
     y = jnp.arange(16, dtype=jnp.int32) % 10
-    _block_tree(state.params)
+    _block_tree(state)
     progress_path = os.path.join(output_dir, f"{arm}.progress.json")
-    print(f"[{arm}] compiling telemetry update", flush=True)
-    compile_start = time.perf_counter()
+    progress = {"code_identifier": arm, "stage_order": []}
+    print(f"[{arm}] telemetry compile+execute", flush=True)
+    telemetry_start = time.perf_counter()
     state, loss, gradients_finite = runner.train_one_batch_telemetry(
         state, jax.random.PRNGKey(301), x, y, model, 0, 1)
-    _block_tree(state.params)
-    compile_seconds = time.perf_counter() - compile_start
-    partial = {"code_identifier": arm, "compile_seconds": compile_seconds,
-               "gradients_finite": bool(gradients_finite)}
-    _record(progress_path, partial)
-    print(f"[{arm}] telemetry compiled in {compile_seconds:.3f}s", flush=True)
+    _block_tree(state)
+    telemetry_compile_seconds = time.perf_counter() - telemetry_start
+    progress.update({
+        "stage_order": ["telemetry"],
+        "telemetry_compile_seconds": telemetry_compile_seconds,
+        "finite_gradients": bool(gradients_finite),
+    })
+    _record(progress_path, progress)
+    print(f"[{arm}] telemetry complete in {telemetry_compile_seconds:.3f}s", flush=True)
     if not bool(gradients_finite):
         raise RuntimeError(f"non-finite gradients for {arm}")
-    print(f"[{arm}] timing normal update", flush=True)
-    step_start = time.perf_counter()
+
+    print(f"[{arm}] normal compile+execute", flush=True)
+    normal_compile_start = time.perf_counter()
     state, loss = runner.train_one_batch(
         state, jax.random.PRNGKey(302), x, y, model, 1, 1)
-    _block_tree(state.params)
-    step_seconds = time.perf_counter() - step_start
+    _block_tree(state)
+    normal_compile_seconds = time.perf_counter() - normal_compile_start
+    progress.update({
+        "stage_order": ["telemetry", "normal_compile"],
+        "normal_compile_seconds": normal_compile_seconds,
+    })
+    _record(progress_path, progress)
+    print(f"[{arm}] normal compile+execute complete in "
+          f"{normal_compile_seconds:.3f}s", flush=True)
+
+    print(f"[{arm}] normal steady-state step", flush=True)
+    steady_start = time.perf_counter()
+    state, loss = runner.train_one_batch(
+        state, jax.random.PRNGKey(303), x, y, model, 2, 1)
+    _block_tree(state)
+    steady_step_seconds = time.perf_counter() - steady_start
     finite_state = all(bool(jnp.all(jnp.isfinite(value)))
                        for value in jax.tree_util.tree_leaves(state))
     if not finite_state or not bool(jnp.isfinite(loss)):
         raise RuntimeError(f"non-finite update for {arm}")
+    progress.update({
+        "stage_order": list(PREFLIGHT_STAGE_ORDER),
+        "steady_step_seconds": steady_step_seconds,
+        "finite_state": finite_state,
+    })
+    _record(progress_path, progress)
+    print(f"[{arm}] steady-state step complete in {steady_step_seconds:.3f}s",
+          flush=True)
     result = {"scientific_name": runner.SCIENTIFIC_NAMES[arm],
               "code_identifier": arm, "seed": 301,
               "batch_size": 16, "sequence_length": 16000,
-              "compile_seconds": compile_seconds,
-              "step_seconds": step_seconds,
+              "stage_order": list(PREFLIGHT_STAGE_ORDER),
+              "telemetry_compile_seconds": telemetry_compile_seconds,
+              "normal_compile_seconds": normal_compile_seconds,
+              "steady_step_seconds": steady_step_seconds,
               "peak_vram_bytes": _peak_vram_bytes(),
               "finite_gradients": bool(gradients_finite),
               "finite_state": finite_state}

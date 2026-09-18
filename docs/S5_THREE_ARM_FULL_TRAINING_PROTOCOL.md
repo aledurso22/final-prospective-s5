@@ -193,8 +193,9 @@ DATA_ROOT=/Local/durso/speech_commands_v0.02 \
 bash bin/run_experiments/cluster_s5_three_arm_full.sh
 ```
 
-The requested one-epoch raw-audio preflight (compile each arm, measure one
-epoch, peak VRAM and throughput, and verify paired batches) has not been run
+The requested exact-shape raw-audio preflight (compile and execute the
+telemetry step, compile and execute the first normal step, then measure a
+steady-state normal step, peak VRAM and complete-state finiteness) has not been run
 from this workstation: cluster access and the current allocation are not
 available here, and this checkpoint is intentionally not launched. Its
 measurements must be recorded before production submission; no runtime or
@@ -207,7 +208,8 @@ EXPECTED_COMMIT=<authoritative-commit> \
   bash bin/run_experiments/cluster_s5_three_arm_preflight.sh
 ```
 
-It performs one exact-shape batch-16, sequence-16,000 forward/backward update
-per arm, records compile time, step time, peak VRAM, and finite-gradient
-status, and never opens the test split. Full training remains a separate
-command and must not be submitted until this preflight succeeds.
+It performs the three ordered exact-shape batch-16, sequence-16,000 stages per
+arm, records `telemetry_compile_seconds`, `normal_compile_seconds`, and
+`steady_step_seconds`, plus peak VRAM and finite-gradient/state status, and
+never opens the test split. Full training remains a separate command and must
+not be submitted until this preflight succeeds.

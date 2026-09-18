@@ -10,6 +10,7 @@ jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from experiments.s5_three_arm_full import data
+from experiments.s5_three_arm_full import preflight
 from experiments.s5_three_arm_full import runner
 from experiments.s5_three_arm_full.finalize import restore_and_evaluate
 from s5.generalized_prospective_ssm import (RHO_MIN,
@@ -214,3 +215,24 @@ def test_telemetry_step_matches_normal_step(monkeypatch):
     for left, right in zip(jax.tree_util.tree_leaves(normal_state),
                            jax.tree_util.tree_leaves(telemetry_state)):
         np.testing.assert_allclose(left, right, rtol=1e-6, atol=1e-7)
+
+
+def test_preflight_pins_three_stage_order_and_result_fields():
+    assert preflight.PREFLIGHT_STAGE_ORDER == (
+        "telemetry", "normal_compile", "normal_steady_state")
+    required = {
+        "stage_order",
+        "telemetry_compile_seconds",
+        "normal_compile_seconds",
+        "steady_step_seconds",
+        "peak_vram_bytes",
+        "finite_gradients",
+        "finite_state",
+    }
+    assert required <= preflight.PREFLIGHT_RESULT_FIELDS
+    assert "step_seconds" not in preflight.PREFLIGHT_RESULT_FIELDS
+    source = inspect.getsource(preflight.run_arm)
+    assert source.index("train_one_batch_telemetry") < source.index(
+        "normal compile+execute")
+    assert source.index("normal compile+execute") < source.index(
+        "normal steady-state step")
