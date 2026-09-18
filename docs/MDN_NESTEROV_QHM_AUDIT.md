@@ -230,6 +230,7 @@ and repair), not a re-implementation. `PD.DISPLAY`/`PD.CARRY` gain entries by
 | implemented recurrence = direct unrolled reference | `test_rollout_equals_a_direct_unrolled_reference` (float64, `1e-12`) |
 | finite outputs in the declared stable region | `test_outputs_stay_finite_in_the_declared_stable_region`, plus the exact Jury closed forms |
 | existing ordinary and generalized arms unchanged | `test_completed_arms_still_execute_their_documented_laws` (native, two-tap, literal-TSS and interior processing against the exact forms, float64); `test_the_ladder_shell_is_the_production_shell` |
+| full set primary; Nesterov failures retained as incorrect; primary vs descriptive contrasts | `test_paired_analysis_is_primary_on_the_complete_heldout_set`, `test_nonfinite_nesterov_logits_count_as_incorrect` |
 | the two-tap arm preserved exactly | `test_two_tap_arm_is_the_completed_implementation` (`ordinary.py` sha256 equal to the version executed at `f3227df`/`84389be`; the same start tree); `test_two_tap_hand_values_are_reproduced_bitwise` (`W = 3/4, 31/32, 259/256`, exact `test_hand_computed_two_tap_tokens`); `test_two_tap_ladder_evaluation_equals_the_completed_evaluation` (bit-for-bit against `temporal_response.evaluate_arm`) |
 | QHM is not the two-tap arm | exact `test_the_ladder_qhm_arm_equals_the_two_tap_arm_only_at_kappa_zero` |
 | Nesterov applicability and the stable subset | `test_episode_violations_and_the_common_stable_subset`, `test_grouped_aggregates_on_a_subset_of_whole_blocks` |
@@ -289,9 +290,12 @@ coefficient touches the held-out stream.** Nesterov has no coefficient.
 
 **Declared stability policy: instability is a result, not missing data.**
 
-- **Checkpoint level.** A literal-Nesterov checkpoint whose executed
-  frozen-token table (unit key, write table) contains an unstable transition
-  is **ineligible for selection**. It is not damped, clipped or rescaled.
+- **Checkpoint level (eligibility).** Eligibility uses **only
+  parameter-domain guarantees**: the executed frozen-token table, computed
+  from the checkpoint's parameters over every input at which a write can
+  occur (unit key). It **never** uses held-out gates. A literal-Nesterov
+  checkpoint whose table contains an unstable transition is **ineligible for
+  selection**. It is not damped, clipped or rescaled.
   **Every** such exclusion is reported:
   - the total denominator (Nesterov checkpoints evaluated);
   - each checkpoint's identity (stage, configuration, learning rate, seed,
@@ -303,24 +307,33 @@ coefficient touches the held-out stream.** Nesterov has no coefficient.
   If no checkpoint is eligible, Nesterov is **UNAVAILABLE**: reported as a
   finding against its applicability, and dropped from the applicable
   controls.
-- **Episode level.** For each final seed, the held-out episodes are marked
-  in which the Nesterov endpoint's **executed** write-token gates violate
-  that condition, computed in float64 on the gates the rollout returns.
-- Non-finite values fail the run for every arm. A QHM instability fails the
-  run, because it contradicts the derivation.
+- **Held-out failures stay in the denominator.** Every eligible endpoint is
+  evaluated on the **complete original held-out set**. No held-out episode
+  is excluded because Nesterov's realized gates violate the frozen-token
+  condition. If literal Nesterov produces a non-finite logit on a held-out
+  token, that query is a **Nesterov failure**: it counts as **incorrect**,
+  and the episode stays in the primary denominator. Failed episodes, failed
+  queries and episodes with non-finite state norms are reported per seed.
+  The run fails only if an accuracy aggregate itself is non-finite.
+- **Episode level (diagnostic only).** For each final seed, the held-out
+  episodes in which the Nesterov endpoint's realized write-token gates
+  violate the condition are recorded (float64, from the gates the rollout
+  returns). This feeds only the secondary diagnostic below.
+- Non-finite values during training or validation still fail the run for
+  every arm, as before. A QHM instability fails the run, because it
+  contradicts the derivation.
 
 **Analysis: paired, on the one common held-out set.**
 
-**Primary set.** For each seed, the primary set is the **common stable
-subset**: whole balanced 4-episode blocks containing no episode with a
-violating Nesterov write. **Every** pairwise comparison for that seed uses
-this one subset, so all arms are compared on identical episodes. The whole
-blocks keep the cells balanced.
+**Primary set: the complete original held-out set**, every episode, for
+every arm and seed. Nesterov failures are included as incorrect.
 
-Reported alongside:
-- the excluded episodes, blocks and fraction, per seed and per
-  family × condition;
-- the same comparisons on the **full** set, as secondary.
+**Secondary mechanism diagnostic, clearly labelled.** The **common
+Nesterov-stable subset** consists of whole balanced 4-episode blocks with no
+realized violating Nesterov write. The same comparisons are rerun on it, and
+the excluded episodes, blocks and fraction are reported per seed and per
+family × condition. It **never** enters the headline recommendation or the
+immediate-revision claim.
 
 The steps:
 
@@ -360,8 +373,13 @@ is ever compared with the margin, which is the flaw recorded in
 | `BETTER_BELOW_MARGIN` / `WORSE_BELOW_MARGIN` | significant, consistent in sign, not inside the margin, `abs(D) < 0.01` |
 | `INDETERMINATE` | anything else |
 
-**Comparisons.** All 15 pairs of the six arms, oriented later-versus-earlier
-in ladder order. A label of `b` against `a` is the mirror of `a` against `b`.
+**Planned primary contrasts.** Generalized prospectivity versus each of the
+five controls: native, the two-tap, literal TSS, literal Nesterov and QHM.
+
+**Descriptive.** The other ten pairs, reported with the same paired SE, CI
+and seed signs, but not planned contrasts. All 15 are oriented
+later-versus-earlier in ladder order; a label of `b` against `a` is the
+mirror of `a` against `b`.
 
 **Applicable controls.** native, the two-tap, literal TSS, literal Nesterov
 (unless UNAVAILABLE) and QHM. **No comparator is chosen from results**:
@@ -370,15 +388,18 @@ generalized prospectivity is compared with each control individually.
 **The immediate-revision claim** (question 5) holds only if generalized
 prospectivity is `BETTER` on immediate revised accuracy than **each**
 applicable control individually: every seed positive, paired lower bound
-above zero, and `D >= 1 pp`. Its later-revised and later labels against each
-control are reported with it (question 6).
+above zero, and `D >= 1 pp`, **on the full-set primary analysis**. Its
+later-revised and later labels against each control are reported with it
+(question 6).
 
-**Recommendation, mechanically, on the primary set, in this order:**
+**Recommendation, mechanically, on the full-set primary analysis, in this
+order:**
 
-1. `GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE`: generalized is `BETTER` than
-   **each** applicable control on revision, and not `WORSE` than any of them
-   on retention or recall.
-2. `RUN_LITERAL_NESTEROV_AT_SCALE`: all of the following hold.
+1. `GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE`: on the planned primary
+   contrasts, generalized is `BETTER` than **every** applicable control on
+   revision, and not `WORSE` than any of them on retention or recall.
+2. `RUN_LITERAL_NESTEROV_AT_SCALE` (the Nesterov-versus-control inputs are
+   descriptive contrasts): all of the following hold.
    - Nesterov is `BETTER` than native on revision.
    - It is not worse (at or below the margin) than the two-tap, TSS or QHM.
    - Generalized is not better than it (at or below the margin).
@@ -389,8 +410,8 @@ control are reported with it (question 6).
    and immediate revision.
 4. `NO_GO`: otherwise, or on an incomplete or failed run.
 
-The full-set recommendation is reported beside the primary one and does not
-replace it.
+The same mapping evaluated on the stable subset is printed as a
+**diagnostic** only and does not replace the full-set recommendation.
 
 `REDUNDANT_CONTROL_CONFIRMED` is reserved for an exact algebraic identity. §5
 ruled that out, so the experiment cannot return it.

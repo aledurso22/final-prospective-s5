@@ -80,24 +80,29 @@ def main(run_dir):
         print(f"    UNSTABLE {u['stage']}/{u['config']}/seed{u['seed']}/"
               f"u{u['update']}: {u['classification']} min Jury "
               f"{u['min_jury_expression']} closed form {u['closed_form']}")
+    print(f"  eligibility basis: {ap.get('eligibility_basis')}")
     for seed, e in (ap.get("heldout_endpoints") or {}).items():
         print(f"  held-out endpoint seed {seed}: table "
               f"{(e.get('endpoint_table') or {}).get('classification')}; "
-              f"episodes {e.get('episodes')}")
+              f"FAILURES RETAINED IN THE DENOMINATOR "
+              f"{e.get('failures_retained_in_denominator')}; realized-gate "
+              f"record {e.get('episodes')}")
     pa = res["paired_analysis"]
-    print(f"\n=== exclusions (common stable subset) ===")
-    for seed, e in pa["exclusions"].items():
+    print(f"\nplanned primary contrasts: {pa['planned_primary_contrasts']}")
+    print(f"\n=== SECONDARY DIAGNOSTIC: stable-subset exclusions ===")
+    for seed, e in pa["stable_subset_exclusions"].items():
         print(f"  seed {seed}: excluded {e['excluded_episodes']} of "
               f"{e['episodes']} episodes ({e['excluded_fraction']:.4f}), "
               f"{e['excluded_blocks']} of {e['blocks']} blocks; by cell "
               f"{e['by_family_and_condition']}")
-    for tag in ("stable_subset", "full"):
-        part = pa[tag]
+    for tag, key in (("full", "full"),
+                     ("stable_subset", "mechanism_diagnostic_stable_subset")):
+        part = pa[key]
         print(f"\n=== paired analysis on {tag.upper()} "
-              f"({'PRIMARY' if tag == pa['primary'] else 'secondary'}) ===")
+              f"({'PRIMARY' if tag == pa['primary'] else 'SECONDARY MECHANISM DIAGNOSTIC, not used for the recommendation'}) ===")
         print(f"  not computable: {part['not_computable']}")
         for name, c in part["comparisons"].items():
-            print(f"\n  {name}")
+            print(f"\n  {name}  [{c.get('role')}]")
             for m in SHOW:
                 x = c[m]
                 print(f"    {m:<30} D {fmt(x['D'])}  CI95 [{fmt(x['ci95'][0])}"
@@ -106,7 +111,9 @@ def main(run_dir):
                       f"{[round(d, 4) for d in x['per_seed'].values()]} "
                       f"signs {''.join(x['per_seed_sign'].values())} "
                       f"-> {x['label']}")
-        print(f"\n  recommendation on {tag}: {part['recommendation']}")
+        print(f"\n  recommendation on {tag}: "
+              f"{part.get('recommendation') or part.get('diagnostic_recommendation')}"
+              + ("" if tag == pa["primary"] else " (diagnostic only)"))
         print(f"  immediate claim on {tag}: {part['immediate_claim']}")
     print(f"\nRECOMMENDATION (primary): {pa['recommendation']}")
     print(f"basis: {pa['recommendation_basis']}")

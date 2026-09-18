@@ -476,3 +476,50 @@ def test_two_tap_ladder_evaluation_equals_the_completed_evaluation():
     for f in NL.METRICS.values():
         assert f(m_new) == f(m_old)
     assert m_new["state_norms"] == m_old["state_norms"]
+
+
+# ------------------------- full-set primary; failures stay in the denominator --
+def test_nonfinite_nesterov_logits_count_as_incorrect():
+    p = dict(params(), readout_b=jnp.full((8,), jnp.nan, F64))
+    ep = ep_at(episodes(seed=5), 0)
+    _, aux = NL._episode_loss(NL.NESTEROV, p, ep)
+    assert not onp.asarray(aux["finite_tokens"]).any()
+    assert float(onp.asarray(aux["correct"]).sum()) == 0.0
+
+
+def test_paired_analysis_is_primary_on_the_complete_heldout_set():
+    batch = TT.generate_batch(606, 32)
+    n = batch["event"].shape[0]
+    q = (batch["event"] == QUERY).astype(F64)
+    rng = onp.random.RandomState(8)
+    stable = onp.zeros(batch["event"].shape + (4,))
+    stable[..., 0], stable[..., 1], stable[..., 2], stable[..., 3] = \
+        0.5, 0.5, 0.5, 1.0
+    bad = stable.copy()
+    bad[:8, :, :] = (0.9, 1.0, 0.9, 1.9)        # realized violations
+    arrays = {}
+    for arm in NL.LADDER:
+        for s in NL.SOURCE_FINAL:
+            correct = (rng.rand(n, q.shape[1]) < 0.6) * q
+            ce = rng.rand(n, q.shape[1]) * q
+            m = TT.aggregate(correct, ce, batch)
+            g = bad if arm == NL.NAG_ARM else None
+            arrays[(arm, s)] = (correct, ce, g, m)
+    pa = NL.paired_analysis(arrays, batch, [])
+    assert pa["primary"] == "full"
+    assert pa["recommendation"] == pa["full"]["recommendation"]
+    assert set(pa["planned_primary_contrasts"]) == {
+        f"{NL.GEN}_vs_{c}" for c in NL.CONTROLS}
+    roles = {k: v["role"] for k, v in pa["full"]["comparisons"].items()}
+    assert sum(r == "planned_primary_contrast" for r in roles.values()) == 5
+    assert sum(r == "descriptive" for r in roles.values()) == 10
+    assert "DIAGNOSTIC" in pa["mechanism_diagnostic_stable_subset"]["role"]
+    for s, e in pa["stable_subset_exclusions"].items():
+        assert e["excluded_episodes"] == 8          # reported ...
+    # ... but the primary analysis uses every episode: its seed differences
+    # equal the differences of the full-set aggregates
+    c = pa["full"]["comparisons"][f"{NL.GEN}_vs_{NL.NAG_ARM}"]["revision"]
+    for s in NL.SOURCE_FINAL:
+        d = arrays[(NL.GEN, s)][3]["primary"] - arrays[(NL.NAG_ARM, s)][3][
+            "primary"]
+        assert c["per_seed"][str(s)] == pytest.approx(d, abs=0)

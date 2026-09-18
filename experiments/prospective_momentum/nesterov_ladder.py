@@ -155,6 +155,10 @@ METRICS = {
 #: EVERY pair of the ladder, oriented later-versus-earlier in ladder order
 COMPARISONS = tuple((LADDER[j], LADDER[i]) for j in range(len(LADDER))
                     for i in range(j))
+#: PLANNED PRIMARY CONTRASTS: generalized versus each of the five controls.
+#: The other ten pairs are DESCRIPTIVE.
+PRIMARY_CONTRASTS = tuple(f"{GEN}_vs_{c}" for c in
+                          (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM))
 FLIP = {"BETTER": "WORSE", "WORSE": "BETTER",
         "BETTER_BELOW_MARGIN": "WORSE_BELOW_MARGIN",
         "WORSE_BELOW_MARGIN": "BETTER_BELOW_MARGIN",
@@ -256,6 +260,12 @@ def _episode_loss(rule, p, ep):
         # the gates RETURNED by this rollout, for the episode-level
         # applicability record of the declared frozen-token condition
         aux["gates"] = jnp.stack(out["gates"], axis=-1)
+        # a non-finite logit is a Nesterov FAILURE on that query: it counts
+        # as incorrect (argmax of a NaN row is never taken as an answer) and
+        # the episode stays in the denominator
+        fin = jnp.all(jnp.isfinite(out["logits"]), axis=-1)
+        aux["finite_tokens"] = fin
+        aux["correct"] = aux["correct"] * fin.astype(jnp.float32)
     return jnp.sum(ce) / jnp.maximum(jnp.sum(q), 1.0), aux
 
 
@@ -390,12 +400,14 @@ def evaluate(arm, p, eps_np, chunk=128, keep_arrays=False):
     else:
         batch_fn = TC.eval_batch_f if law == FL.FILTERED else ST.eval_batch
     n = eps_np["event"].shape[0]
-    cs, ces, wn, an, procs, sink, gts = [], [], [], [], [], [], []
+    cs, ces, wn, an, procs, sink, gts, fins = ([], [], [], [], [], [], [],
+                                               [])
     for i in range(0, n, chunk):
         sl = {k: jnp.asarray(eps_np[k][i:i + chunk]) for k in TT.MODEL_INPUTS}
         aux = batch_fn(law, p, sl)
         if law == NESTEROV:
             gts.append(onp.asarray(aux["gates"], onp.float64))
+            fins.append(onp.asarray(aux["finite_tokens"]))
         cs.append(onp.asarray(aux["correct"]))
         ces.append(onp.asarray(aux["ce"]))
         wn.append(onp.asarray(aux["w_norm"]))
@@ -421,6 +433,21 @@ def evaluate(arm, p, eps_np, chunk=128, keep_arrays=False):
     if law == NESTEROV:
         m["nesterov_episode_applicability"] = episode_applicability(
             onp.concatenate(gts), eps_np["event"])
+        fin = onp.concatenate(fins)
+        q = onp.asarray(eps_np["event"]) == TK.QUERY
+        ep_fail = ~fin.all(axis=1)
+        m["nesterov_failures"] = dict(
+            definition=("a token whose logits are non-finite; its query "
+                        "counts as INCORRECT and the episode stays in the "
+                        "denominator"),
+            episodes=int(fin.shape[0]),
+            episodes_failed=int(ep_fail.sum()),
+            queries=int(q.sum()),
+            queries_failed=int((~fin & q).sum()),
+            state_norm_nonfinite_episodes=int(
+                (~onp.isfinite(wn).reshape(fin.shape[0], -1).all(axis=1)
+                 | ~onp.isfinite(an).reshape(fin.shape[0], -1).all(axis=1)
+                 ).sum()))
     if keep_arrays:
         return m, sets, (correct, ce,
                          onp.concatenate(gts) if gts else None)
@@ -950,12 +977,17 @@ def _comparisons(grouped):
 def paired_analysis(arrays, held_np, unavailable):
     """Episode-paired comparisons on the ONE common held-out set.
 
-    PRIMARY: per final seed, the COMMON STABLE SUBSET - whole balanced blocks
-    in which the literal-Nesterov endpoint's executed write gates all satisfy
-    its frozen-token condition - is used for EVERY pairwise comparison, so
-    all arms are compared on the same episodes. How much was excluded is
-    reported per seed. SECONDARY: the same comparisons on the full set.
-    The grouped full-sample aggregate must reproduce the evaluation's."""
+    PRIMARY: the COMPLETE original held-out set, every episode, for every
+    arm. Nesterov failures (non-finite logits) are counted as incorrect and
+    retained in the denominator. The planned primary contrasts are
+    generalized versus each of the five controls; the other ten pairs are
+    descriptive. The grouped full-sample aggregate must reproduce the
+    evaluation's.
+
+    SECONDARY MECHANISM DIAGNOSTIC ONLY: the common Nesterov-stable subset
+    (whole balanced blocks with no write token outside the frozen-token
+    condition, from the realized held-out gates). Its excluded fraction is
+    reported; it never enters the headline recommendation."""
     t0 = time.time()
     n = held_np["event"].shape[0]
     keep, excl = {}, {}
@@ -967,7 +999,7 @@ def paired_analysis(arrays, held_np, unavailable):
         keep[seed] = stable_subset(n, viol)
         excl[str(seed)] = exclusion_record(keep[seed], viol, held_np)
     out = {}
-    for tag in ("stable_subset", "full"):
+    for tag in ("full", "stable_subset"):
         grouped, bad = {}, []
         for (arm, seed), (correct, ce, _g, m) in arrays.items():
             if arm not in LADDER:
@@ -987,20 +1019,37 @@ def paired_analysis(arrays, held_np, unavailable):
                 continue
             grouped[(arm, seed)] = (full, loo)
         comp = _comparisons(grouped)
-        out[tag] = dict(comparisons=comp, not_computable=bad,
-                        recommendation=recommend(comp, unavailable)[0],
-                        immediate_claim=immediate_claim(comp, unavailable))
-    rec, why = recommend(out["stable_subset"]["comparisons"], unavailable)
+        for name, c in comp.items():
+            c["role"] = ("planned_primary_contrast" if name in
+                         PRIMARY_CONTRASTS else "descriptive")
+        out[tag] = dict(comparisons=comp, not_computable=bad)
+    out["full"].update(recommendation=None, immediate_claim=immediate_claim(
+        out["full"]["comparisons"], unavailable))
+    out["stable_subset"].update(
+        role=("SECONDARY MECHANISM DIAGNOSTIC: excludes held-out episodes "
+              "by realized Nesterov gates; never used for the headline "
+              "recommendation"),
+        diagnostic_recommendation=recommend(
+            out["stable_subset"]["comparisons"], unavailable)[0],
+        immediate_claim=immediate_claim(out["stable_subset"]["comparisons"],
+                                        unavailable))
+    rec, why = recommend(out["full"]["comparisons"], unavailable)
+    out["full"]["recommendation"] = rec
     return dict(
-        primary="stable_subset", stable_subset=out["stable_subset"],
-        full=out["full"], exclusions=excl,
+        primary="full", full=out["full"],
+        mechanism_diagnostic_stable_subset=out["stable_subset"],
+        stable_subset_exclusions=excl,
+        planned_primary_contrasts=list(PRIMARY_CONTRASTS),
         recommendation=rec, recommendation_basis=why,
-        immediate_claim=out["stable_subset"]["immediate_claim"],
+        immediate_claim=out["full"]["immediate_claim"],
         rule=("paired difference on the same held-out episodes; SE from a "
               "grouped jackknife over balanced 4-episode blocks, within each "
               "seed, combined across the three final seeds (SE_within); "
               "SE_between_seeds and every seed's sign reported; labels by "
-              "`verdict`; primary on the common stable subset"),
+              "`verdict`. PRIMARY: the complete original held-out set; "
+              "planned primary contrasts are generalized versus each of the "
+              "five controls; the other ten pairs are descriptive; the "
+              "Nesterov-stable subset is a secondary diagnostic only"),
         margin=MARGIN, n_groups=N_GROUPS, wall_s=time.time() - t0)
 
 
@@ -1282,7 +1331,15 @@ def run_study(args, status, out, deadline, save):
         m, sets, (correct, ce, gts) = evaluate(
             arm, endpoints[(arm, row["seed"])], held_np, keep_arrays=True)
         row["heldout"] = m
-        if not TR.metrics_finite(m) or (
+        if LAW[arm] == NESTEROV:
+            # Nesterov failures are RESULTS: counted incorrect, retained in
+            # the denominator (m["nesterov_failures"]); the run fails only if
+            # an accuracy aggregate itself is not finite
+            if not all(onp.isfinite(f(m)) for f in METRICS.values()):
+                status["failed"] = (f"non-finite accuracy aggregate "
+                                    f"{arm}/{row['seed']}")
+                return 4, "FAILED"
+        elif not TR.metrics_finite(m) or (
                 LAW[arm] == FL.FILTERED and (
                     not m["processing_state"]["finite"]
                     or any(FL.filter_failure(FL.filter_report(ex))
@@ -1299,8 +1356,13 @@ def run_study(args, status, out, deadline, save):
     applicability["heldout_endpoints"] = {
         str(r["seed"]): dict(
             endpoint_table=r.get("frozen_token_table"),
-            episodes=r["heldout"].get("nesterov_episode_applicability"))
+            episodes=r["heldout"].get("nesterov_episode_applicability"),
+            failures_retained_in_denominator=r["heldout"].get(
+                "nesterov_failures"))
         for r in final_rows if r["rule"] == NAG_ARM}
+    applicability["eligibility_basis"] = (
+        "parameter-domain only: the executed frozen-token table over every "
+        "input at which a write can occur; never held-out gates")
     applicability["unavailable"] = NAG_ARM in unavailable
     status["nesterov_applicability"] = applicability
     status["work_completed"] = dict(
@@ -1322,16 +1384,21 @@ def run_study(args, status, out, deadline, save):
     ST.write(os.path.join(out, "results.json"), results)
     print(f"[nesterov] checkpoints evaluated "
           f"{applicability['checkpoints_evaluated']}, unstable "
-          f"{applicability['checkpoints_unstable']}; held-out exclusions "
-          + str({s: e['excluded_fraction']
-                 for s, e in analysis['exclusions'].items()}))
-    print(f"[recommendation] {analysis['recommendation']} (primary: common "
-          f"stable subset; full-set: {analysis['full']['recommendation']})")
+          f"{applicability['checkpoints_unstable']}; held-out failures "
+          + str({s: (e.get('failures_retained_in_denominator') or {}).get(
+              'episodes_failed')
+              for s, e in applicability['heldout_endpoints'].items()})
+          + "; diagnostic stable-subset exclusions "
+          + str({s: e['excluded_fraction'] for s, e in
+                 analysis['stable_subset_exclusions'].items()}))
+    print(f"[recommendation] {analysis['recommendation']} (primary: full "
+          f"held-out set; diagnostic stable subset: "
+          f"{analysis['mechanism_diagnostic_stable_subset']['diagnostic_recommendation']})")
     print(f"[immediate claim] holds="
           f"{analysis['immediate_claim']['claim_holds']} "
           f"{analysis['immediate_claim']['immediate_revised']}")
-    for name, c in analysis["stable_subset"]["comparisons"].items():
-        print(f"[paired] {name:<48} revision {c['revision']['D']:+.4f} "
+    for name, c in analysis["full"]["comparisons"].items():
+        print(f"[paired:{c['role'][:7]}] {name:<48} revision {c['revision']['D']:+.4f} "
               f"({c['revision']['label']}) immediate "
               f"{c['immediate_revised']['D']:+.4f} "
               f"{''.join(c['immediate_revised']['per_seed_sign'].values())} "
