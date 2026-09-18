@@ -15,6 +15,7 @@ from flax.training import train_state
 from flax.traverse_util import flatten_dict
 
 from dataloaders import speech_commands10 as SC
+from experiments.s5_three_arm_full import data as EXPERIMENT_DATA
 from s5.gp_ssm import init_gp_ssm
 from s5.gp_second_order import init_second_order_ssm
 from s5.seq_model import BatchClassificationModel
@@ -224,14 +225,14 @@ def arm_summary(rows):
 
 
 def run(args):
-    cache = SC.load_splits(args.data_cache, ("train", "val"))[0]
+    cache = EXPERIMENT_DATA.load_official(args.data_cache, ("train", "val"))[0]
     data = {"train": cache["train"], "val": cache["val"]}
     rows = []
     for seed in SEEDS:
         for arm in ARM_ORDER:
             print(f"TRAIN seed={seed} arm={SCIENTIFIC_NAMES[arm]}", flush=True)
             rows.append(train_arm(arm, seed, data))
-    test = SC.load_splits(args.data_cache, ("test",))[0]["test"]
+    test = EXPERIMENT_DATA.load_official(args.data_cache, ("test",))[0]["test"]
     for row in rows:
         state = row.pop("_selected_state")
         eval_model = model_for(row["code_identifier"], False)

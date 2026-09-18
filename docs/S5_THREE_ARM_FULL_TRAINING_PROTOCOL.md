@@ -113,10 +113,11 @@ pooling, GELU/half-GLU configuration fixed in the launcher, no dropout and
 tokenwise LayerNorm. Only the recurrence and its necessary recurrence
 parameters differ.
 
-Speech Commands v0.02 uses the repository's 10-word subset, deterministic
-split seed 0, 70/15/15 stratification, and the cached MFCC manifest. The
-training and validation arrays are opened before training; the test arrays are
-opened exactly once, after validation checkpoint selection.
+Speech Commands v0.02 uses the repository's 10-word subset and the official
+`validation_list.txt` and `testing_list.txt` assignments. MFCC extraction and
+training-split-only standardization are recorded in a dedicated official-list
+cache manifest. The training and validation arrays are opened before training;
+the test arrays are opened exactly once, after validation checkpoint selection.
 
 Each seed trains every arm from scratch. The same seed initializes corresponding
 shared parameters wherever shapes permit and produces the same epoch-wise

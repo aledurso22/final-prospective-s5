@@ -5,6 +5,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/cluster_env.sh"
 cd "$PROSPECTIVE_REPO"
 
+DATA_CACHE="${S5_THREE_ARM_DATA:-$PROSPECTIVE_RUNS/sc10_official_cache}"
 OUT_ROOT="${OUT_ROOT:-$PROSPECTIVE_RUNS/s5-three-arm-full-training}"
 STAMP="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT="$OUT_ROOT/$STAMP"
@@ -14,11 +15,11 @@ echo "scientific arms: Native matched S5 | Zucchet prospective S5 recurrence | G
 echo "branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "commit: $(git rev-parse HEAD)"
 echo "gpu: $(CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$PY" -c 'import jax; print(jax.devices())')"
-echo "data cache: ${PROSPECTIVE_DATA}"
+echo "data cache: ${DATA_CACHE} (official validation/testing lists)"
 echo "output: $OUT"
 
 exec "$PY" -u -m experiments.s5_three_arm_full.runner \
-  --data-cache "$PROSPECTIVE_DATA" \
+  --data-cache "$DATA_CACHE" \
   --out "$OUT" \
   --protocol "$PROSPECTIVE_REPO/docs/S5_THREE_ARM_FULL_TRAINING_PROTOCOL.md" \
   --commit "$(git rev-parse HEAD)" \
