@@ -1,4 +1,4 @@
-# MDN Nesterov/QHM equivalence audit and controlled ladder
+# Momentum DeltaNet equivalence audit and controlled six-arm study
 
 18 September 2026. Branch `mdn-nesterov-qhm-audit`, from `53e89f3`. Every
 completed prospective and generalized-prospective result is frozen: nothing
@@ -18,36 +18,40 @@ internal identifiers only.
 
 | Scientific name | Code alias | Executed recurrence |
 |---|---|---|
-| native MDN | `native_full` | MDN Eqs. (4)-(5) |
-| ordinary prospective — finite-difference realization | `operator_full` (`ordinary_prospective`) | `Rpros = (1 + kappa) R_t - kappa R_(t-1)`, i.e. the generalized recurrence at `M = 0`, `gamma + T = h`, `kappa = T/h` |
-| ordinary prospective — adaptive-state realization | `tss_processing` | Zucchet et al. Eq. (17); exactly the forward-Euler adaptive-current Eq. (7) at `tau_a = h` |
-| generalized prospective — finite-difference realization ≡ adaptive-state realization | `generalized_processing` | the single recurrence `y = a y - b y_prev + c R - d R_prev`; the two realizations are `EXACTLY_EQUIVALENT_REALIZATIONS` |
-| literal Nesterov | `literal_nesterov` | §2 |
-| QHM | `qhm` | §6 |
+| Native Momentum DeltaNet | `native_full` | MDN Eqs. (4)-(5) |
+| Zucchet prospective dynamics, matched time constants \(\tau'=\tau\) | `tss_processing` | Zucchet et al. Eqs. (5) and (17), with `M = gamma = 0` and learned `T` |
+| Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\) | `operator_full` (`ordinary_prospective`) | Zucchet et al. Eq. (10), discretized as Eq. (17): `Rpros = (1 + kappa) R_t - kappa R_(t-1)`, with membrane `tau = h` and learned `tau' = kappa h` |
+| Generalized prospective dynamics \((M,\gamma,T)\) | `generalized_processing` | the already-audited recurrence `y = a y - b y_prev + c R - d R_prev` |
+| Literal Nesterov Momentum DeltaNet | `literal_nesterov` | §2 |
+| QHM Momentum DeltaNet | `qhm` | §6 |
 
 The proofs, the boundary maps and the Zucchet mapping (with its `tau_a = h`
 condition) are in `docs/PROSPECTIVE_REALIZATION_AUDIT.md`. Structural
-phrases such as "two-tap correction" describe filter shape, not a method.
+Technical phrases describing a recurrence or filter shape are not scientific
+arm names. Zucchet adaptive-current dynamics with `tau_a` are outside this
+experiment and do not appear as an arm.
 
 ## 0. Answers
 
 | # | Question | Answer |
 |---|---|---|
-| 1 | Is our ordinary prospective MDN literally Nesterov? | **No.** Neither the ordinary prospective — adaptive-state realization (`tss_processing`) nor the ordinary prospective — finite-difference realization (`ordinary_prospective`) is literal Nesterov, not even with fixed gates (§3–§5) |
-| 2 | What breaks it? | For the ordinary prospective — finite-difference realization: **(a)** it stores and reads Nesterov's *lookahead*, not its iterate, even at fixed gates; **(b)** `alpha != 1` needs a step rescale the arm does not have; **(c)** token-varying `beta_t`, `mu_t` make the bridge non-causal, because it would need the *next* token's gates; **(d)** token-varying `eta_t` breaks the momentum map. The residual's key dependence (`k_t k_t^T`), masks and the linear delta-rule loss do **not** break it. For the ordinary prospective — adaptive-state realization: the processing pole `1 - h/T` for `T != h`, and at `T = h` a correction weight 1 where Nesterov needs `alpha mu/(alpha + mu - alpha mu) < 1` |
-| 3 | QHM, two-tap prediction correction, or both? | The ordinary prospective — finite-difference realization is **both**: literally a two-tap correction of the residual and, when `mu`, `eta` are constant, **exactly QHM** for any `alpha_t`, `beta_t`, keys and masks. The ordinary prospective — adaptive-state realization is a two-tap correction with an **EMA-smoothed** difference (PID with averaged D, `K_d = 1`), and QHM only at `T = h` |
-| 4 | Does the generalized prospective — finite-difference realization ≡ adaptive-state realization beat the ordinary prospective — adaptive-state realization, literal Nesterov and QHM (and the ordinary prospective — finite-difference realization and native MDN)? | **Pending the run** (§8). The pre-registered rule compares it with **each applicable control individually**; no comparator is chosen from results |
-| 5 | Is the +5.2–5.3 pp immediate-revision advantage still present against literal Nesterov? | **Pending the run** |
-| 6 | Does any advantage persist later? | **Pending the run**. The completed runs show immediate +5.34 / +5.21 with later −0.12 / −0.26 against the ordinary prospective — adaptive-state realization |
-| 7 | Distinct degree of freedom, or a standard optimizer reparameterized? | **Algebraically distinct in one direction.** The generalized prospective — finite-difference realization ≡ adaptive-state realization (`(M, gamma, T)`) contains the ordinary prospective — finite-difference realization for `kappa <= 1`, hence QHM points (fixed `mu`, `eta`) and a Nesterov-read-ahead point (`kappa = mu`, `alpha = 1`, fixed gates). `M > 0` adds a second-order smoother of the difference that none of these optimizers has. It does **not** contain literal Nesterov, whose correction follows the token gate `beta_t mu_t` and which reads the iterate. Whether the extra freedom helps is question 4 |
+| 1 | Are the two Zucchet prospective arms literally Nesterov? | **No.** Neither Zucchet prospective dynamics, matched time constants \(\tau'=\tau\), nor Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\), is Literal Nesterov Momentum DeltaNet, not even with fixed gates (§3–§5) |
+| 2 | What breaks it? | For Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\): **(a)** it stores and reads Nesterov's *lookahead*, not its iterate, even at fixed gates; **(b)** `alpha != 1` needs a step rescale the arm does not have; **(c)** token-varying `beta_t`, `mu_t` make the bridge non-causal, because it would need the *next* token's gates; **(d)** token-varying `eta_t` breaks the momentum map. The residual's key dependence (`k_t k_t^T`), masks and the linear delta-rule loss do **not** break it. For Zucchet prospective dynamics, matched time constants \(\tau'=\tau\), the processing pole `1 - h/T` for `T != h`, and at `T = h` a correction weight 1 where Nesterov needs `alpha mu/(alpha + mu - alpha mu) < 1` |
+| 3 | QHM, a finite residual difference, or both? | Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\), is **both**: a finite residual difference and, when `mu`, `eta` are constant, exactly QHM for any `alpha_t`, `beta_t`, keys and masks. Zucchet prospective dynamics, matched time constants \(\tau'=\tau\), uses an EMA-smoothed difference (PID with averaged D, `K_d = 1`) and is QHM only at `T = h` |
+| 4 | Does Generalized prospective dynamics \((M,\gamma,T)\) beat each of the other five arms? | **Pending the run** (§8). The pre-registered rule compares it with **each applicable control individually**; no comparator is chosen from results |
+| 5 | Is the +5.2–5.3 pp immediate-revision advantage still present against Literal Nesterov Momentum DeltaNet? | **Pending the run** |
+| 6 | Does any advantage persist later? | **Pending the run**. The completed runs show immediate +5.34 / +5.21 with later −0.12 / −0.26 against Zucchet prospective dynamics, matched time constants \(\tau'=\tau\) |
+| 7 | Distinct degree of freedom, or a standard optimizer reparameterized? | **Algebraically distinct in one direction.** Generalized prospective dynamics \((M,\gamma,T)\) contains the mismatch recurrence for `kappa <= 1`, hence QHM points (fixed `mu`, `eta`) and a Nesterov-read-ahead point (`kappa = mu`, `alpha = 1`, fixed gates). `M > 0` adds a second-order smoother of the difference that none of these optimizers has. It does **not** contain Literal Nesterov Momentum DeltaNet, whose correction follows the token gate `beta_t mu_t` and which reads the iterate. Whether the extra freedom helps is question 4 |
 
-**Algebraic gate: `DISTINCT_UPDATE`** for the ordinary prospective — adaptive-state realization,
-and `QHM_EQUIVALENT_NOT_LITERAL_NAG` for the ordinary prospective — finite-difference realization. Neither is
+**Algebraic gate: `DISTINCT_UPDATE`** for Zucchet prospective dynamics,
+matched time constants \(\tau'=\tau\), and `QHM_EQUIVALENT_NOT_LITERAL_NAG`
+for Zucchet prospective dynamics, learned time-constant mismatch
+\(\tau'\neq\tau\). Neither is
 `EXACT_EQUIVALENCE_FULL_MDN` or `EXACT_EQUIVALENCE_FIXED_GATES_ONLY` with
-respect to literal Nesterov, so the literal-Nesterov control is
+respect to literal Nesterov, so Literal Nesterov Momentum DeltaNet is
 **non-redundant**. It is implemented and pre-registered in §8, not yet run.
-The completed ordinary prospective — finite-difference realization is kept in the ladder with its exact
-implementation. QHM does **not** substitute for it (§4a).
+The completed learned-mismatch arm is kept with its exact implementation.
+QHM Momentum DeltaNet does **not** substitute for it (§4a).
 
 ## 1. The recurrence, in the repository's orientation
 
@@ -155,11 +159,11 @@ comparison below uses the recurrent oracle, which is exact.
 
 | Arm (code) | Update into the native momentum |
 |---|---|
-| native MDN (`native_full`) | `U_t = mu U + eta R_t` |
-| ordinary prospective — finite-difference realization (`operator_full`, `ordinary_prospective`, `ordinary.py`) | `U_t = mu U + eta [(1 + kappa) R_t - kappa R_(t-1)]` |
-| ordinary prospective — adaptive-state realization (`tss_processing`, `filtered.py`, `M = gamma = 0`, `T` trains) | `y_t = (1 - h/T) y_(t-1) + (1 + h/T) R_t - R_(t-1)`, `U_t = mu U + eta y_t`; equivalently `y = R + (1/T)(1 - z^-1)/(1 - (1 - h/T) z^-1) R` |
-| generalized prospective — finite-difference realization ≡ adaptive-state realization (`generalized_processing`, `M, gamma, T` train) | `y_t = a y - b y_prev + c R_t - d R_(t-1)`, `U_t = mu U + eta y_t` |
-| `prospective_momentum` (first candidate) | maps onto the ordinary prospective — finite-difference realization exactly for constant `eta`, `mu` (`docs/PROSPECTIVE_SAME_BACKBONE_AUDIT.md`), so it inherits the ordinary prospective — finite-difference realization's classification |
+| Native Momentum DeltaNet (`native_full`) | `U_t = mu U + eta R_t` |
+| Zucchet prospective dynamics, matched time constants \(\tau'=\tau\) (`tss_processing`, `filtered.py`, `M = gamma = 0`, `T` trains) | `y_t = (1 - h/T) y_(t-1) + (1 + h/T) R_t - R_(t-1)`, `U_t = mu U + eta y_t`; equivalently `y = R + (1/T)(1 - z^-1)/(1 - (1 - h/T) z^-1) R` |
+| Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\) (`operator_full`, `ordinary_prospective`, `ordinary.py`) | `U_t = mu U + eta [(1 + kappa) R_t - kappa R_(t-1)]` |
+| Generalized prospective dynamics \((M,\gamma,T)\) (`generalized_processing`, `M, gamma, T` train) | `y_t = a y - b y_prev + c R_t - d R_(t-1)`, `U_t = mu U + eta y_t` |
+| `prospective_momentum` (first candidate) | maps onto the learned-mismatch recurrence exactly for constant `eta`, `mu` (`docs/PROSPECTIVE_SAME_BACKBONE_AUDIT.md`), so it inherits that recurrence's classification |
 
 ## 4. The coefficient map, with every assumption
 
@@ -167,52 +171,55 @@ comparison below uses the recurrent oracle, which is exact.
 |---|---|---|---|
 | two-tap(`kappa`) = **QHM**, `nu = 1 - kappa/(mu(1 + kappa))`, step `(1 + kappa) beta` | constant `mu` and `eta`; **any** `alpha_t`, `beta_t`, keys, values, masks; closed loop; no condition on decay placement | `eta_t` or `mu_t` varies. The exact condition is that `eta_s(1 + kappa) - kappa eta_(s+1)/mu_(s+1)` is constant over the history | `test_two_tap_is_qhm_exactly_when_mu_and_eta_are_constant`, `test_token_varying_eta_breaks_the_qhm_bridge` |
 | QHM `nu` in `[0, 1]` | `0 <= kappa <= mu/(1 - mu)`; `kappa = mu` gives `nu = mu/(1 + mu)`; `kappa = mu/(1 - mu)` gives `nu = 0` (first-order delta rule, the PM boundary of the prior-art record) | — | `test_qhm_weights_of_the_two_tap` |
-| ordinary prospective — finite-difference realization at `kappa = mu` and literal Nesterov share the gradient sequence, with its stored `W_t` equal to Nesterov's next lookahead `L_(t+1)` | fixed `beta`, `mu`, `eta` and **`alpha = 1`**; any keys, values, masks | **always read at different points**: already after the first write, `W_1 = -beta eta (1 + mu) g_1` versus `X_1 = -beta eta g_1` | `test_fixed_gates_alpha_one_two_tap_at_kappa_mu_is_nesterov_read_ahead` |
+| Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\), at `kappa = mu`, and literal Nesterov share the gradient sequence, with its stored `W_t` equal to Nesterov's next lookahead `L_(t+1)` | fixed `beta`, `mu`, `eta` and **`alpha = 1`**; any keys, values, masks | **always read at different points**: already after the first write, `W_1 = -beta eta (1 + mu) g_1` versus `X_1 = -beta eta g_1` | `test_fixed_gates_alpha_one_two_tap_at_kappa_mu_is_nesterov_read_ahead` |
 | Same, for fixed `alpha != 1` | `kappa* = alpha mu/(alpha + mu - alpha mu)` **and** a step `beta' = beta (alpha + mu - alpha mu)/alpha`, which the executed arm cannot express | with the executed `beta`, no `kappa` works unless `alpha = 1` | `test_fixed_gates_general_alpha_needs_a_rescaled_step` |
 | Any causal two-tap or processing state equal to Nesterov's lookahead | never, with token gates: `L_2` depends on token 2's `(beta_2, mu_2)` | two sequences equal through token 1 have equal causal states but different `L_2` | `test_token_gates_make_the_two_tap_bridge_noncausal` (the smallest counterexample, two tokens) |
-| ordinary prospective — adaptive-state realization = ordinary prospective — finite-difference realization at `kappa = 1` | `T = h`, closed loop, any gates | `T != h`: an extra pole `1 - h/T`, not cancelled (zero `T/(T + h)`) | `test_tss_at_T_equal_h_is_the_two_tap_at_kappa_one`, `test_literal_tss_is_never_nesterov` |
-| ordinary prospective — adaptive-state realization = literal Nesterov | **never** in the pinned gates: at `T = h` it would need `alpha mu/(alpha + mu - alpha mu) = 1`, i.e. `alpha = mu = 1`; for `T != h` the pole | — | `test_literal_tss_is_never_nesterov` |
+| Zucchet prospective dynamics, matched time constants \(\tau'=\tau\), equals the learned-mismatch recurrence at `kappa = 1` | `T = h`, closed loop, any gates | `T != h`: an extra pole `1 - h/T`, not cancelled (zero `T/(T + h)`) | `test_tss_at_T_equal_h_is_the_two_tap_at_kappa_one`, `test_literal_tss_is_never_nesterov` |
+| Zucchet prospective dynamics, matched time constants \(\tau'=\tau\), equals literal Nesterov | **never** in the pinned gates: at `T = h` it would need `alpha mu/(alpha + mu - alpha mu) = 1`, i.e. `alpha = mu = 1`; for `T != h` the pole | — | `test_literal_tss_is_never_nesterov` |
 | generalized family contains two-tap(`kappa`) | `(M, gamma, T) = (0, h(1 - kappa), kappa h)` with `kappa <= 1` under the passive domain (`kappa > 1` needs `gamma < 0`) | — | `test_generalized_family_contains_the_two_tap_up_to_kappa_one` |
 | zero-momentum and boundary reductions | `mu = 0`: Nesterov = native = gated delta. `nu = 1`: QHM = native. `nu = 0`: delta rule on `Wbar`. `kappa = 0`: native. `m = 0`: Nesterov = native | — | `test_zero_momentum_and_nonwrite_boundaries`, `test_qhm_boundaries` |
 
 **No containment hierarchy is claimed.** The only exact inclusions are the
 ones in this table, under the assumptions stated in its rows.
 
-### 4a. QHM versus the ordinary prospective — finite-difference realization: the exact equality conditions
+### 4a. QHM versus Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\): exact equality conditions
 
 1. **Algebraic (optimizer level).** Two-tap(`kappa`) equals QHM with
    `nu = 1 - kappa/(mu(1 + kappa))` **and step `(1 + kappa) beta`**, token by
    token and closed loop, iff `eta_s(1 + kappa) - kappa eta_(s+1)/mu_(s+1)`
    is constant over the history. Constant `mu` and `eta` is sufficient.
    `alpha_t`, `beta_t`, keys, values and masks are unrestricted.
-2. **Arm level (what the ladder runs).** The ladder's QHM arm has step
-   `beta [nu U + (1 - nu) eta R]`, whose weights sum to 1. The ordinary prospective — finite-difference realization's
+2. **Arm level (what the study runs).** QHM Momentum DeltaNet has step
+   `beta [nu U + (1 - nu) eta R]`, whose weights sum to 1. The
+   learned-mismatch arm's
    weights sum to `1 + kappa`. So even with constant `mu` and `eta` the two
    **arms** agree token by token **only at `kappa = 0`, `nu = 1`**, where both
    are native (exact: `test_the_ladder_qhm_arm_equals_the_two_tap_arm_only_at_kappa_zero`).
 3. **Domains.** QHM's `nu in [0, 1]` corresponds to `0 <= kappa <= mu/(1 - mu)`.
-   The ordinary prospective — finite-difference realization's `kappa` is projected to its own frozen-token bound (from
+   The learned-mismatch arm's `kappa` is projected to its own frozen-token bound (from
    `dynamics.kappa_bound`), which is a different set. The projections alone
    can break a mapping.
 4. **Production.** The MDN gates `mu_t`, `eta_t` are token dependent, so
    condition 1 does not hold, and no token-by-token equality has been
-   verified. **The ordinary prospective — finite-difference realization is kept explicitly and QHM is not used as its
+   verified. **Zucchet prospective dynamics, learned time-constant mismatch
+   \(\tau'\neq\tau\), is kept explicitly and QHM Momentum DeltaNet is not used as its
    substitute.**
 
 ## 5. Classification
 
-- **Ordinary prospective — adaptive-state realization: `DISTINCT_UPDATE`.** It is not
+- **Zucchet prospective dynamics, matched time constants \(\tau'=\tau\): `DISTINCT_UPDATE`.** It is not
   literal Nesterov under any admissible gates. It is QHM only at `T = h` with
   constant `mu >= 1/2` and constant `eta`.
-- **Ordinary prospective — finite-difference realization (`ordinary_prospective`): `QHM_EQUIVALENT_NOT_LITERAL_NAG`.**
+- **Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\) (`ordinary_prospective`): `QHM_EQUIVALENT_NOT_LITERAL_NAG`.**
   It is exact QHM with constant `mu`, `eta`. It matches Nesterov only as a
   read-ahead of Nesterov's trajectory at fixed gates and `alpha = 1`, never
   in the stored coordinates.
 
 Full equivalence fails, so, per the brief, the distinct literal-Nesterov
 control is implemented (`experiments/prospective_momentum/nesterov_ladder.py`)
-and QHM is included as a separate arm. With token gates, QHM is distinct from
-both the ordinary prospective — adaptive-state realization and literal Nesterov (§4).
+and QHM Momentum DeltaNet is included as a separate arm. With token gates,
+QHM is distinct from both Zucchet prospective dynamics, matched time constants
+\(\tau'=\tau\), and Literal Nesterov Momentum DeltaNet (§4).
 
 ## 6. Implementation
 
@@ -231,7 +238,8 @@ additions are:
 - `bin/run_experiments/cluster_prospective_nesterov_ladder.sh`;
 - the two test files.
 
-Native MDN, the ordinary prospective — adaptive-state realization and the generalized prospective — finite-difference realization ≡ adaptive-state realization run through the completed
+Native Momentum DeltaNet, Zucchet prospective dynamics, matched time constants
+\(\tau'=\tau\), and Generalized prospective dynamics \((M,\gamma,T)\) run through the completed
 study's own code (`temporal_response.host_step`, `tss_containment` validation
 and repair), not a re-implementation. `PD.DISPLAY`/`PD.CARRY` gain entries by
 `setdefault` only.
@@ -247,10 +255,10 @@ and repair), not a re-implementation. `PD.DISPLAY`/`PD.CARRY` gain entries by
 | zero-momentum / boundary reductions | `test_zero_momentum_and_nonwrite_boundaries`, `test_qhm_boundaries` |
 | implemented recurrence = direct unrolled reference | `test_rollout_equals_a_direct_unrolled_reference` (float64, `1e-12`) |
 | finite outputs in the declared stable region | `test_outputs_stay_finite_in_the_declared_stable_region`, plus the exact Jury closed forms |
-| existing arms unchanged | `test_completed_arms_still_execute_their_documented_laws` (native MDN, the ordinary prospective — finite-difference realization, the ordinary prospective — adaptive-state realization and interior generalized points against the exact forms, float64); `test_the_ladder_shell_is_the_production_shell` |
+| existing arms unchanged | `test_completed_arms_still_execute_their_documented_laws` (Native Momentum DeltaNet, both Zucchet prospective dynamics arms, and interior generalized points against the exact forms, float64); `test_the_ladder_shell_is_the_production_shell` |
 | full set primary; Nesterov failures retained as incorrect; primary vs descriptive contrasts | `test_paired_analysis_is_primary_on_the_complete_heldout_set`, `test_nonfinite_nesterov_logits_count_as_incorrect` |
-| the ordinary prospective — finite-difference realization preserved exactly | `test_two_tap_arm_is_the_completed_implementation` (`ordinary.py` sha256 equal to the version executed at `f3227df`/`84389be`; the same start tree); `test_two_tap_hand_values_are_reproduced_bitwise` (`W = 3/4, 31/32, 259/256`, exact `test_hand_computed_two_tap_tokens`); `test_two_tap_ladder_evaluation_equals_the_completed_evaluation` (bit-for-bit against `temporal_response.evaluate_arm`) |
-| QHM is not the ordinary prospective — finite-difference realization | exact `test_the_ladder_qhm_arm_equals_the_two_tap_arm_only_at_kappa_zero` |
+| Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\), preserved exactly | `test_two_tap_arm_is_the_completed_implementation` (`ordinary.py` sha256 equal to the version executed at `f3227df`/`84389be`; the same start tree); `test_two_tap_hand_values_are_reproduced_bitwise` (`W = 3/4, 31/32, 259/256`, exact `test_hand_computed_two_tap_tokens`); `test_two_tap_ladder_evaluation_equals_the_completed_evaluation` (bit-for-bit against `temporal_response.evaluate_arm`) |
+| QHM Momentum DeltaNet is not Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\) | exact `test_the_ladder_qhm_arm_equals_the_two_tap_arm_only_at_kappa_zero` |
 | Nesterov applicability and the stable subset | `test_episode_violations_and_the_common_stable_subset`, `test_grouped_aggregates_on_a_subset_of_whole_blocks` |
 | each control individually; every pair; seed signs | `test_recommendation_mapping_uses_each_control_individually`, `test_immediate_claim_needs_every_applicable_control`, `test_all_fifteen_pairs_and_orientation`, `test_combine_reports_every_seed_sign` |
 
@@ -268,21 +276,22 @@ and repair), not a re-implementation. `PD.DISPLAY`/`PD.CARRY` gain entries by
   revision CE, then fewer updates, then lower learning rate), identical for
   every arm.
 
-**Ladder** (the order is declared):
+**Six-arm display order** (declared; training and selection remain unchanged):
 
 | Arm | Law | Extra params | Executed carry | Start |
 |---|---|---|---|---|
-| native MDN (`native_full`) | MDN | 0 | 128 | source |
-| ordinary prospective — finite-difference realization (`operator_full`, `ordinary_prospective`) | the completed implementation, unchanged: `kappa` learned, projected to its frozen-token bound | 1 | 192 | `kappa = 0` |
-| ordinary prospective — adaptive-state realization (`tss_processing`) | processing, `M = gamma = 0`, `T` trains | 1 | 320 | `T0 = h` |
-| literal Nesterov | `c_t = beta_t mu_t` | 0 | 128 | source (same tree as native) |
-| QHM | `nu in [0, 1]`, projected after each update | 1 | 128 | `nu = 1` (native function) |
-| generalized prospective — finite-difference realization ≡ adaptive-state realization (`generalized_processing`) | `M, gamma, T` train | 3 | 320 | `T0 = h` |
+| Native Momentum DeltaNet (`native_full`) | MDN | 0 | 128 | source |
+| Zucchet prospective dynamics, matched time constants \(\tau'=\tau\) (`tss_processing`) | Eqs. (5) and (17), `M = gamma = 0`, `T` trains | 1 | 320 | `T0 = h` |
+| Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\) (`operator_full`, `ordinary_prospective`) | Eq. (10), membrane `tau = h`, `tau' = kappa h` learned and projected to its frozen-token bound | 1 | 192 | `kappa = 0` |
+| Generalized prospective dynamics \((M,\gamma,T)\) (`generalized_processing`) | `M, gamma, T` train | 3 | 320 | `T0 = h` |
+| Literal Nesterov Momentum DeltaNet (`literal_nesterov`) | `c_t = beta_t mu_t` | 0 | 128 | source (same tree as native) |
+| QHM Momentum DeltaNet (`qhm`) | `nu in [0, 1]`, projected after each update | 1 | 128 | `nu = 1` (native function) |
 
 Update budgets are identical. Parameters and state are matched where the laws
 allow, and the unavoidable differences are the table's.
 
-The ordinary prospective — finite-difference realization is **preserved exactly**. It runs through the completed code
+Zucchet prospective dynamics, learned time-constant mismatch
+\(\tau'\neq\tau\), is **preserved exactly**. It runs through the completed code
 paths (`temporal_response.host_step`, `tss_containment.validate`,
 `tss_containment.start_tree`, `study.eval_batch`), with the same coefficient
 selection, checkpoints and evaluation. `ordinary.py` is byte-identical to the
@@ -295,7 +304,7 @@ the arm, it does not re-report them. The mechanism diagnostic and the
 matched-operating-point analysis are not repeated. The completed study's own checks run inside the cap; its law
 modules are byte-identical and are covered by the unchanged-arms test.
 
-**New coefficient.** QHM's `nu` is learned by BPTT on the training stream,
+**New coefficient.** QHM Momentum DeltaNet's `nu` is learned by BPTT on the training stream,
 and its endpoint is chosen on the development validation stream. **No new
 coefficient touches the held-out stream.** Nesterov has no coefficient.
 
@@ -304,7 +313,8 @@ coefficient touches the held-out stream.** Nesterov has no coefficient.
 - On the completed study's representative episodes, and at its tolerance
   `TRAJ32`, this file's shell running the native step and QHM at `nu = 1`
   both reproduce the production native logits.
-- The ordinary prospective — adaptive-state realization start is accepted as before.
+- The start of Zucchet prospective dynamics, matched time constants
+  \(\tau'=\tau\), is accepted as before.
 
 **Declared stability policy: instability is a result, not missing data.**
 
@@ -391,19 +401,26 @@ is ever compared with the margin, which is the flaw recorded in
 | `BETTER_BELOW_MARGIN` / `WORSE_BELOW_MARGIN` | significant, consistent in sign, not inside the margin, `abs(D) < 0.01` |
 | `INDETERMINATE` | anything else |
 
-**Planned primary contrasts.** The generalized prospective — finite-difference realization ≡ adaptive-state realization versus each of the
-five controls: native MDN, the ordinary prospective — finite-difference realization, the ordinary prospective — adaptive-state realization, literal Nesterov and QHM; and the ordinary prospective — finite-difference realization versus the ordinary prospective — adaptive-state realization (see `docs/PROSPECTIVE_REALIZATION_AUDIT.md`).
+**Five planned primary contrasts.** Generalized prospective dynamics
+\((M,\gamma,T)\) versus each of: Native Momentum DeltaNet; Zucchet prospective
+dynamics, matched time constants \(\tau'=\tau\); Zucchet prospective dynamics,
+learned time-constant mismatch \(\tau'\neq\tau\); Literal Nesterov Momentum
+DeltaNet; and QHM Momentum DeltaNet. For revision, retention, recall,
+immediate revision and later revision, every contrast reports the paired
+difference, within-seed SE, 95% CI and all three seed signs.
 
 **Descriptive.** The other ten pairs, reported with the same paired SE, CI
 and seed signs, but not planned contrasts. All 15 are oriented
 later-versus-earlier in ladder order; a label of `b` against `a` is the
 mirror of `a` against `b`.
 
-**Applicable controls.** native MDN, the ordinary prospective — finite-difference realization, the ordinary prospective — adaptive-state realization, literal Nesterov
-(unless UNAVAILABLE) and QHM. **No comparator is chosen from results**:
-the generalized prospective — finite-difference realization ≡ adaptive-state realization is compared with each control individually.
+**Applicable controls.** Native Momentum DeltaNet; both named Zucchet
+prospective dynamics arms; Literal Nesterov Momentum DeltaNet (unless
+UNAVAILABLE); and QHM Momentum DeltaNet. **No comparator is chosen from
+results:** Generalized prospective dynamics \((M,\gamma,T)\) is compared with
+each control individually.
 
-**The immediate-revision claim** (question 5) holds only if the generalized prospective — finite-difference realization ≡ adaptive-state realization
+**The immediate-revision claim** (question 5) holds only if Generalized prospective dynamics \((M,\gamma,T)\)
 is `BETTER` on immediate revised accuracy than **each**
 applicable control individually: every seed positive, paired lower bound
 above zero, and `D >= 1 pp`, **on the full-set primary analysis**. Its
@@ -414,17 +431,18 @@ later-revised and later labels against each control are reported with it
 order:**
 
 1. `GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE`: on the planned primary
-   contrasts, the generalized prospective — finite-difference realization ≡ adaptive-state realization is `BETTER` than **every** applicable control on
+   contrasts, Generalized prospective dynamics \((M,\gamma,T)\) is `BETTER` than **every** applicable control on
    revision, and not `WORSE` than any of them on retention or recall.
 2. `RUN_LITERAL_NESTEROV_AT_SCALE` (the Nesterov-versus-control inputs are
    descriptive contrasts): all of the following hold.
-   - Nesterov is `BETTER` than native on revision.
-   - It is not worse (at or below the margin) than the ordinary prospective — finite-difference realization, the ordinary prospective — adaptive-state realization or QHM.
-   - The generalized prospective — finite-difference realization ≡ adaptive-state realization is not better than it (at or below the margin).
-   - Its retention and recall are not `WORSE` than native.
+   - Literal Nesterov Momentum DeltaNet is `BETTER` than Native Momentum DeltaNet on revision.
+   - It is not worse (at or below the margin) than either Zucchet prospective dynamics arm or QHM Momentum DeltaNet.
+   - Generalized prospective dynamics \((M,\gamma,T)\) is not better than it (at or below the margin).
+   - Its retention and recall are not `WORSE` than Native Momentum DeltaNet.
 3. `GENERALIZED_GP_REDUCES_TO_KNOWN_OPTIMIZER`: for at least one known
-   optimizer arm (the ordinary prospective — finite-difference realization, literal Nesterov or QHM),
-   the generalized prospective — finite-difference realization ≡ adaptive-state realization is `EQUIVALENT_WITHIN_MARGIN` or worse on **both** revision
+   optimizer arm (Zucchet prospective dynamics, learned time-constant mismatch
+   \(\tau'\neq\tau\); Literal Nesterov Momentum DeltaNet; or QHM Momentum DeltaNet),
+   Generalized prospective dynamics \((M,\gamma,T)\) is `EQUIVALENT_WITHIN_MARGIN` or worse on **both** revision
    and immediate revision.
 4. `NO_GO`: otherwise, or on an incomplete or failed run.
 

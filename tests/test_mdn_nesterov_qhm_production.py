@@ -509,16 +509,13 @@ def test_paired_analysis_is_primary_on_the_complete_heldout_set():
     assert pa["primary"] == "full"
     assert pa["recommendation"] == pa["full"]["recommendation"]
     assert set(pa["planned_primary_contrasts"]) == {
-        f"{NL.GEN}_vs_{c}" for c in NL.CONTROLS} | {
-        f"{NL.TSS}_vs_{NL.OPERATOR}"}
+        f"{NL.GEN}_vs_{c}" for c in NL.CONTROLS}
     roles = {k: v["role"] for k, v in pa["full"]["comparisons"].items()}
-    assert sum(r == "planned_primary_contrast" for r in roles.values()) == 6
-    assert sum(r == "descriptive" for r in roles.values()) == 9
-    assert pa["realization_classification"] == \
-        "EXACTLY_EQUIVALENT_REALIZATIONS"
-    fac = pa["law_realization_factorial"]["revision"]
-    assert fac["realization_effect_generalized"]["D"] == 0.0
-    assert fac["interaction"]["identifiable"] is False
+    assert sum(r == "planned_primary_contrast" for r in roles.values()) == 5
+    assert sum(r == "descriptive" for r in roles.values()) == 10
+    assert pa["primary_metrics"] == list(NL.PRIMARY_METRICS)
+    assert pa["display_order"] == list(NL.DISPLAY_ORDER)
+    assert "γ≥0" in pa["generalized_scope"]
     assert "DIAGNOSTIC" in pa["mechanism_diagnostic_stable_subset"]["role"]
     for s, e in pa["stable_subset_exclusions"].items():
         assert e["excluded_episodes"] == 8          # reported ...
@@ -589,31 +586,28 @@ def test_generalized_at_its_fd_boundary_is_the_executed_ordinary_fd_arm():
             assert maxrel(a["logits"], b["logits"]) <= TOL
 
 
-ALLOWED_NAMES = {
-    "ordinary prospective \u2014 finite-difference realization",
-    "ordinary prospective \u2014 adaptive-state realization",
-    "generalized prospective \u2014 finite-difference realization",
-    "generalized prospective \u2014 adaptive-state realization",
-    "literal Nesterov", "QHM", "native MDN"}
+ALLOWED_NAMES = (
+    "Native Momentum DeltaNet",
+    "Zucchet prospective dynamics, matched time constants τ′=τ",
+    "Zucchet prospective dynamics, learned time-constant mismatch τ′≠τ",
+    "Generalized prospective dynamics (M,γ,T)",
+    "Literal Nesterov Momentum DeltaNet",
+    "QHM Momentum DeltaNet",
+)
 
 
 def test_every_arm_carries_only_the_declared_scientific_names():
-    for arm in NL.LADDER:
-        parts = NL.SCIENTIFIC_NAME[arm].split(" \u2261 ")
-        assert all(
-            (p if p in ALLOWED_NAMES else
-             "generalized prospective \u2014 " + p) in ALLOWED_NAMES
-            for p in parts), NL.SCIENTIFIC_NAME[arm]
+    assert tuple(NL.SCIENTIFIC_NAME[a] for a in NL.DISPLAY_ORDER) == \
+        ALLOWED_NAMES
+    assert NL.SCIENTIFIC_NAME[NL.ANCHOR] == ALLOWED_NAMES[0]
 
 
-def test_factorial_mirrors_the_ordinary_realization_contrast():
-    comp = {f"{NL.TSS}_vs_{NL.OPERATOR}": {m: dict(
-        D=0.02, ci95=[0.01, 0.03], se_within=0.005,
-        per_seed={"501": 0.02, "502": 0.01, "503": 0.03},
-        per_seed_sign={"501": "+", "502": "+", "503": "+"}, label="BETTER")
-        for m in NL.METRICS}}
-    f = NL.factorial_decomposition(comp)["revision"]
-    r = f["realization_effect_ordinary"]
-    assert r["D"] == -0.02 and r["ci95"] == [-0.03, -0.01]
-    assert r["label"] == "WORSE" and set(r["per_seed_sign"].values()) == {"-"}
-    assert f["interaction"]["equals_minus_ordinary_realization_effect"] == 0.02
+def test_display_order_and_primary_contrasts_are_preregistered_exactly():
+    assert NL.DISPLAY_ORDER == (
+        NL.NATIVE, NL.TSS, NL.OPERATOR, NL.GEN, NL.NAG_ARM, NL.QHM_ARM)
+    assert NL.PRIMARY_CONTRASTS == tuple(
+        f"{NL.GEN}_vs_{arm}" for arm in
+        (NL.NATIVE, NL.TSS, NL.OPERATOR, NL.NAG_ARM, NL.QHM_ARM))
+    assert NL.PRIMARY_METRICS == (
+        "revision", "retention", "recall", "immediate_revised",
+        "later_revised")

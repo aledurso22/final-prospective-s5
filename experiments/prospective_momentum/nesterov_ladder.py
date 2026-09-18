@@ -22,10 +22,12 @@ gates, after the native decay as MDN Eqs. (4)-(5) apply it).
 The ladder reuses the completed temporal-response protocol UNCHANGED: task,
 episode construction, sources (seed 500 development, 501-503 final, read
 only), stream seeds, learning rates, checkpoints, selection ordering and
-metric definitions. The ladder is native, the completed two-tap operator
-(`ordinary_prospective`, frozen implementation), literal TSS, literal
-Nesterov, QHM and generalized prospectivity. Its native, two-tap,
-literal-TSS and generalized arms are executed by the completed study's own
+metric definitions. In display order the arms are Native Momentum
+DeltaNet, Zucchet prospective dynamics with matched time constants, Zucchet
+prospective dynamics with a learned time-constant mismatch (the completed
+implementation, unchanged), Generalized prospective dynamics (M, gamma, T),
+Literal Nesterov Momentum DeltaNet and QHM Momentum DeltaNet. The first four
+arms are executed by the completed study's own
 code paths (`temporal_response.host_step`, `tss_containment`), not
 re-implemented here. Every completed module is left
 byte-identical; the two new rules live in this file. Registry additions are
@@ -78,10 +80,8 @@ QHM_NU0 = 1.0
 QHM_DOMAIN = (0.0, 1.0)
 CARRY_REALS = 2 * NM.D_V * NM.D_K                 # (W, U), as native
 
-PD.DISPLAY.setdefault(NESTEROV, "Literal Nesterov momentum on the MDN write "
-                      "path (c_t = beta_t mu_t, no parameter)")
-PD.DISPLAY.setdefault(QHM, "Quasi-hyperbolic momentum on the MDN write path "
-                      "(nu in [0, 1])")
+PD.DISPLAY.setdefault(NESTEROV, "Literal Nesterov Momentum DeltaNet")
+PD.DISPLAY.setdefault(QHM, "QHM Momentum DeltaNet")
 PD.CARRY.setdefault(NESTEROV, CARRY_REALS)
 PD.CARRY.setdefault(QHM, CARRY_REALS)
 
@@ -98,26 +98,38 @@ LAW = {NATIVE: "momentum_delta", OPERATOR: OD.ORDINARY, TSS: FL.FILTERED,
        GEN: FL.FILTERED, NAG_ARM: NESTEROV, QHM_ARM: QHM,
        ANCHOR: "momentum_delta"}
 NEW_ARMS = (NAG_ARM, QHM_ARM)
-#: SCIENTIFIC names (docs/PROSPECTIVE_REALIZATION_AUDIT.md). The arm keys
-#: above are internal code aliases only. The generalized finite-difference and
-#: adaptive-state realizations are EXACTLY EQUIVALENT (the same recurrence), so
-#: one executed arm carries both names.
+#: SCIENTIFIC names, the ONLY method names used in user-facing outputs. The
+#: arm keys above are internal repository identifiers.
+#:   Zucchet matched  = Zucchet et al. Eqs. (5) and (17), tau' = tau (= T,
+#:                      learned);
+#:   Zucchet mismatch = Zucchet et al. Eq. (10), tau u' = -u + f + tau' f',
+#:                      discretized as Eq. (17), membrane tau fixed at one
+#:                      step h and tau' = kappa h learned;
+#:   both are the audited recurrence at M = 0, gamma = tau - tau', T = tau'.
 SCIENTIFIC_NAME = {
-    NATIVE: "native MDN",
-    OPERATOR: "ordinary prospective \u2014 finite-difference realization",
-    TSS: "ordinary prospective \u2014 adaptive-state realization",
-    GEN: ("generalized prospective \u2014 finite-difference realization "
-          "\u2261 adaptive-state realization"),
-    NAG_ARM: "literal Nesterov",
-    QHM_ARM: "QHM",
-    ANCHOR: "native MDN (frozen source, evaluation only)"}
+    NATIVE: "Native Momentum DeltaNet",
+    TSS: "Zucchet prospective dynamics, matched time constants \u03c4\u2032=\u03c4",
+    OPERATOR: ("Zucchet prospective dynamics, learned time-constant mismatch "
+               "\u03c4\u2032\u2260\u03c4"),
+    GEN: "Generalized prospective dynamics (M,\u03b3,T)",
+    NAG_ARM: "Literal Nesterov Momentum DeltaNet",
+    QHM_ARM: "QHM Momentum DeltaNet",
+    ANCHOR: "Native Momentum DeltaNet"}
+#: the user-facing display order
+DISPLAY_ORDER = (NATIVE, TSS, OPERATOR, GEN, NAG_ARM, QHM_ARM)
+#: scope of the generalized verdict (declared before execution)
+GENERALIZED_SCOPE = (
+    "Generalized prospective dynamics (M,γ,T) is tested on its declared "
+    "domain γ≥0 (M,T≥0), with the completed protocol's feasibility "
+    "repair. The verdict is scoped to that declared domain; this is not the "
+    "unrestricted generalized family. Endpoints of Zucchet prospective "
+    "dynamics, learned time-constant mismatch τ′≠τ with τ′>τ "
+    "require γ=τ−τ′<0 and are not contained in the tested arm.")
 REALIZATION_CLASSIFICATION = "EXACTLY_EQUIVALENT_REALIZATIONS"
 #: the controls generalized prospectivity must beat INDIVIDUALLY
 CONTROLS = (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM)
-DISPLAY = {NATIVE: TC.ARM_DISPLAY[NATIVE], OPERATOR: TC.ARM_DISPLAY[OPERATOR],
-           TSS: TC.ARM_DISPLAY[TSS], GEN: TC.ARM_DISPLAY[GEN],
-           ANCHOR: TC.ARM_DISPLAY[ANCHOR],
-           NAG_ARM: PD.DISPLAY[NESTEROV], QHM_ARM: PD.DISPLAY[QHM]}
+#: user-facing display strings are the scientific names
+DISPLAY = {a: SCIENTIFIC_NAME[a] for a in LAW}
 EXTRA_PARAMETERS = {NATIVE: 0, OPERATOR: 1, TSS: 1, NAG_ARM: 0, QHM_ARM: 1,
                     GEN: 3}
 CARRY_EXECUTED = {NATIVE: 2 * NM.D_V * NM.D_K, OPERATOR: OD.CARRY_REALS,
@@ -125,7 +137,7 @@ CARRY_EXECUTED = {NATIVE: 2 * NM.D_V * NM.D_K, OPERATOR: OD.CARRY_REALS,
                   QHM_ARM: CARRY_REALS, GEN: FL.CARRY_EXECUTED}
 #: extra per-token work over native, in multiply-adds on the d_v x d_k state
 EXTRA_WORK = {NATIVE: "none",
-              OPERATOR: "two-tap Rpros: 1 matrix axpy; previous residual "
+              OPERATOR: "prospective input: 1 matrix axpy; previous residual "
                         "carried",
               TSS: "processing filter: 4 matrix axpys",
               NAG_ARM: "lookahead L = Wbar - (beta mu) U: 1 matrix axpy",
@@ -169,18 +181,14 @@ METRICS = {
 #: EVERY pair of the ladder, oriented later-versus-earlier in ladder order
 COMPARISONS = tuple((LADDER[j], LADDER[i]) for j in range(len(LADDER))
                     for i in range(j))
-#: PLANNED PRIMARY CONTRASTS (matched):
-#:   generalized vs ordinary, finite-difference realization  (GEN vs OPERATOR)
-#:   generalized vs ordinary, adaptive-state realization     (GEN vs TSS)
-#:   ordinary finite-difference vs ordinary adaptive-state   (OPERATOR vs TSS,
-#:                                         run as TSS_vs_OPERATOR, mirrored)
-#:   generalized vs native MDN, literal Nesterov and QHM
-#: generalized finite-difference vs generalized adaptive-state is IDENTICALLY
-#: ZERO (one arm, exactly equivalent realizations) and is not estimated.
-#: The other pairs are DESCRIPTIVE.
+#: The FIVE PLANNED PRIMARY CONTRASTS: Generalized prospective dynamics versus
+#: native, Zucchet matched, Zucchet learned mismatch, literal Nesterov and
+#: QHM. The other ten pairs are DESCRIPTIVE.
 PRIMARY_CONTRASTS = tuple(f"{GEN}_vs_{c}" for c in
-                          (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM)) + (
-    f"{TSS}_vs_{OPERATOR}",)
+                          (NATIVE, TSS, OPERATOR, NAG_ARM, QHM_ARM))
+#: the metrics reported for every planned primary contrast
+PRIMARY_METRICS = ("revision", "retention", "recall", "immediate_revised",
+                   "later_revised")
 FLIP = {"BETTER": "WORSE", "WORSE": "BETTER",
         "BETTER_BELOW_MARGIN": "WORSE_BELOW_MARGIN",
         "WORSE_BELOW_MARGIN": "BETTER_BELOW_MARGIN",
@@ -1046,8 +1054,7 @@ def paired_analysis(arrays, held_np, unavailable):
                          PRIMARY_CONTRASTS else "descriptive")
         out[tag] = dict(comparisons=comp, not_computable=bad)
     out["full"].update(recommendation=None, immediate_claim=immediate_claim(
-        out["full"]["comparisons"], unavailable),
-        factorial=factorial_decomposition(out["full"]["comparisons"]))
+        out["full"]["comparisons"], unavailable))
     out["stable_subset"].update(
         role=("SECONDARY MECHANISM DIAGNOSTIC: excludes held-out episodes "
               "by realized Nesterov gates; never used for the headline "
@@ -1063,9 +1070,10 @@ def paired_analysis(arrays, held_np, unavailable):
         mechanism_diagnostic_stable_subset=out["stable_subset"],
         stable_subset_exclusions=excl,
         planned_primary_contrasts=list(PRIMARY_CONTRASTS),
-        scientific_names={a: SCIENTIFIC_NAME[a] for a in LADDER},
-        realization_classification=REALIZATION_CLASSIFICATION,
-        law_realization_factorial=out["full"]["factorial"],
+        scientific_names={a: SCIENTIFIC_NAME[a] for a in DISPLAY_ORDER},
+        display_order=list(DISPLAY_ORDER),
+        primary_metrics=list(PRIMARY_METRICS),
+        generalized_scope=GENERALIZED_SCOPE,
         recommendation=rec, recommendation_basis=why,
         immediate_claim=out["full"]["immediate_claim"],
         rule=("paired difference on the same held-out episodes; SE from a "
@@ -1077,57 +1085,6 @@ def paired_analysis(arrays, held_np, unavailable):
               "five controls; the other ten pairs are descriptive; the "
               "Nesterov-stable subset is a secondary diagnostic only"),
         margin=MARGIN, n_groups=N_GROUPS, wall_s=time.time() - t0)
-
-
-def factorial_decomposition(comp):
-    """LAW (ordinary -> generalized) versus REALIZATION (finite-difference ->
-    adaptive-state), from the planned primary contrasts. Differences are
-    first minus second as named; D, CI95 and seed signs are those of the
-    paired analysis (mirrored when the pair was run the other way).
-
-    Because the two generalized realizations are EXACTLY EQUIVALENT, the
-    generalized realization effect is zero by construction and the
-    interaction equals minus the ordinary realization effect: it is not
-    separately identifiable. The two ordinary arms are two points of ONE
-    recurrence (gamma + T = h versus gamma = 0), so their difference is a
-    parameter-boundary difference, not a change of discretization."""
-    def signed(a, b, metric):
-        c = comp.get(f"{a}_vs_{b}")
-        if c is not None:
-            x = c[metric]
-            return dict(D=x["D"], ci95=x["ci95"], se_within=x["se_within"],
-                        per_seed=x["per_seed"], per_seed_sign=x["per_seed_sign"],
-                        label=x["label"])
-        c = comp.get(f"{b}_vs_{a}")
-        if c is None:
-            return None
-        x = c[metric]
-        return dict(D=-x["D"], ci95=[-x["ci95"][1], -x["ci95"][0]],
-                    se_within=x["se_within"],
-                    per_seed={s: -d for s, d in x["per_seed"].items()},
-                    per_seed_sign={s: {"+": "-", "-": "+"}.get(v, v)
-                                   for s, v in x["per_seed_sign"].items()},
-                    label=FLIP[x["label"]])
-    out = {}
-    for metric in ("revision", "immediate_revised", "later_revised", "later",
-                   "retention", "recall"):
-        rz_ord = signed(OPERATOR, TSS, metric)
-        out[metric] = dict(
-            law_effect_finite_difference=signed(GEN, OPERATOR, metric),
-            law_effect_adaptive_state=signed(GEN, TSS, metric),
-            realization_effect_ordinary=rz_ord,
-            realization_effect_generalized=dict(
-                D=0.0, note="identical arm: exactly equivalent realizations"),
-            interaction=dict(
-                identifiable=False,
-                equals_minus_ordinary_realization_effect=(
-                    None if rz_ord is None else -rz_ord["D"])))
-    out["caveat"] = (
-        "the ordinary finite-difference and adaptive-state arms are the M = 0 "
-        "points gamma + T = h and gamma = 0 of the same recurrence; a "
-        "distinct adaptive-state realization would need an adaptive current "
-        "with tau_a != h, which is not executed")
-    return out
 
 
 def nesterov_applicability(status):
@@ -1190,18 +1147,25 @@ def main():
     os.makedirs(out, exist_ok=True)
     status = dict(
         run_id=run_id, out=out, backend=backend,
-        study=("MDN Nesterov/QHM ladder: native, the frozen two-tap "
-               "operator, literal TSS, literal Nesterov, QHM and generalized "
-               "prospectivity on the completed temporal-response protocol"),
+        study=("Six-arm Momentum DeltaNet comparison: Native Momentum "
+               "DeltaNet; Zucchet prospective dynamics, matched time "
+               "constants; Zucchet prospective dynamics, learned "
+               "time-constant mismatch; Generalized prospective dynamics "
+               "(M,γ,T); Literal Nesterov Momentum DeltaNet; QHM "
+               "Momentum DeltaNet - on the completed temporal-response "
+               "protocol"),
         audit="docs/MDN_NESTEROV_QHM_AUDIT.md",
         protocol_reused="docs/PROSPECTIVE_TEMPORAL_RESPONSE_PROTOCOL.md",
         completed_run_same_streams=COMPLETED_RUN,
         source_run=args.source_run,
         source_seeds=dict(development=SOURCE_DEV, final=list(SOURCE_FINAL)),
         ladder=list(LADDER), arm_law=dict(LAW),
-        scientific_names={a: SCIENTIFIC_NAME[a] for a in LADDER},
+        scientific_names={a: SCIENTIFIC_NAME[a] for a in
+                          (*DISPLAY_ORDER, ANCHOR)},
+        display_order=list(DISPLAY_ORDER),
+        generalized_scope=GENERALIZED_SCOPE,
         realization_classification=REALIZATION_CLASSIFICATION,
-        code_display=dict(DISPLAY),
+        display=dict(DISPLAY),
         extra_parameters=dict(EXTRA_PARAMETERS),
         carry_executed=dict(CARRY_EXECUTED), extra_work=dict(EXTRA_WORK),
         updates=UPDATES, checkpoints_at=list(VAL_AT),
@@ -1210,9 +1174,12 @@ def main():
                         "only after every selection and endpoint is frozen; "
                         "never used for selection"),
         declared_departures=[
-            "arms: literal Nesterov and QHM are added; the two-tap operator "
+            "arms: Literal Nesterov Momentum DeltaNet and QHM Momentum "
+            "DeltaNet are added; "
+            "Zucchet prospective dynamics with a learned mismatch "
             "is kept with its exact completed implementation and is NOT "
-            "substituted by QHM (production gates are token dependent)",
+            "substituted by QHM Momentum DeltaNet (production gates are token "
+            "dependent)",
             "the controlled mechanism diagnostic and the matched-operating-"
             "point analysis of the completed study are not repeated",
             "the completed study's float64/float32 law checks are not "
@@ -1347,9 +1314,9 @@ def run_study(args, status, out, deadline, save):
     status["frozen_before_finals"] = copy.deepcopy(frozen)
     status["final_plan"] = fplan
     ST.write(os.path.join(out, "selection.json"), frozen)
-    for arm in LADDER:
+    for arm in DISPLAY_ORDER:
         s = sel.get(arm)
-        print(f"[selection] {SCIENTIFIC_NAME[arm]} ({arm}) " + (
+        print(f"[selection] {SCIENTIFIC_NAME[arm]} " + (
             "UNAVAILABLE" if s is None else
             f"lr {s['lr']} update {s['update']:>3} revision "
             f"{s['primary']:.4f} immediate {s['immediate_revision']:.4f} "
@@ -1450,7 +1417,10 @@ def run_study(args, status, out, deadline, save):
         checkpoints_validated_and_persisted=len(status["checkpoint_log"]),
         total_updates=sum(r["updates"] for r in dev_rows + traj_rows))
     results = dict(run_id=status["run_id"], ladder=list(LADDER),
-                   scientific_names={a: SCIENTIFIC_NAME[a] for a in LADDER},
+                   display_order=list(DISPLAY_ORDER),
+                   generalized_scope=GENERALIZED_SCOPE,
+                   scientific_names={a: SCIENTIFIC_NAME[a] for a in
+                                     (*DISPLAY_ORDER, ANCHOR)},
                    unavailable=unavailable,
                    selection={a: {k: s[k] for k in ("config", "lr", "update",
                                                     "primary",
@@ -1478,8 +1448,27 @@ def run_study(args, status, out, deadline, save):
     print(f"[immediate claim] holds="
           f"{analysis['immediate_claim']['claim_holds']} "
           f"{analysis['immediate_claim']['immediate_revised']}")
+    print(f"[scope] {GENERALIZED_SCOPE}")
+    for name in PRIMARY_CONTRASTS:
+        c = analysis["full"]["comparisons"].get(name)
+        if c is None:
+            other = name.split("_vs_", 1)[1]
+            print(f"[primary] {SCIENTIFIC_NAME[GEN]} vs "
+                  f"{SCIENTIFIC_NAME[other]}: not computable")
+            continue
+        other = name.split("_vs_", 1)[1]
+        for mt in PRIMARY_METRICS:
+            x = c[mt]
+            print(f"[primary] {SCIENTIFIC_NAME[GEN]} vs "
+                  f"{SCIENTIFIC_NAME[other]} | {mt}: "
+                  f"D {x['D']:+.4f} SE {x['se_within']:.4f} CI95 "
+                  f"[{x['ci95'][0]:+.4f}, {x['ci95'][1]:+.4f}] signs "
+                  f"{''.join(x['per_seed_sign'].values())} -> {x['label']}")
     for name, c in analysis["full"]["comparisons"].items():
-        print(f"[paired:{c['role'][:7]}] {name:<48} revision {c['revision']['D']:+.4f} "
+        first, second = name.split("_vs_", 1)
+        comparison = f"{SCIENTIFIC_NAME[first]} vs {SCIENTIFIC_NAME[second]}"
+        print(f"[paired:{c['role'][:7]}] {comparison} | "
+              f"revision {c['revision']['D']:+.4f} "
               f"({c['revision']['label']}) immediate "
               f"{c['immediate_revised']['D']:+.4f} "
               f"{''.join(c['immediate_revised']['per_seed_sign'].values())} "

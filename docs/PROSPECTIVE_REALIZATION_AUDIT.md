@@ -1,4 +1,4 @@
-# Prospective realizations on the MDN write path: equivalence audit
+# Prospective dynamics on the MDN write path: recurrence audit
 
 19 September 2026. Branch `mdn-nesterov-qhm-audit`. This extends
 `docs/MDN_NESTEROV_QHM_AUDIT.md` and leaves unchanged every full-held-out-set,
@@ -16,8 +16,8 @@ the cluster's fail-closed stage, are in
 |---|---|
 | Classification | **`EXACTLY_EQUIVALENT_REALIZATIONS`**: the direct finite-difference realization of the generalized law **is** the executed generalized recurrence, token by token, with the same transfer function |
 | New arm | **none**. A generalized finite-difference arm would duplicate the executed one; **six arms** are retained |
-| Ordinary finite-difference boundary | `M = 0`, `gamma + T = h`, `kappa = T/h`. Derived: it is the only place where the recurrence carries no auxiliary state |
-| Ordinary adaptive-state boundary | `M = gamma = 0`: Zucchet et al. Eq. (17) |
+| Zucchet learned-mismatch boundary | `M = 0`, `gamma + T = h`, `kappa = T/h`. Derived: it is the only place where the recurrence carries no auxiliary state |
+| Zucchet matched-time-constants boundary | `M = gamma = 0`: Zucchet et al. Eqs. (5) and (17) |
 | Zucchet adaptive current (Eq. 7) | **exact at `tau_a = h`** under forward Euler, for both the ordinary and the generalized law. The paper's own exactness condition, `tau_a -> 0`, is **not** what is executed |
 
 ## 1. The placement and the law
@@ -89,14 +89,15 @@ added.
 
 ## 4. Boundaries (derived)
 
-**Ordinary finite-difference realization.** `a = 0` and `b = 0` hold together
+**Zucchet prospective dynamics, learned time-constant mismatch
+\(\tau'\neq\tau\).** `a = 0` and `b = 0` hold together
 **iff** `M = 0` and `gamma + T = h`
 (`test_ordinary_finite_difference_boundary_is_gamma_plus_T_equal_h`). There,
 
     c = 1 + T/h,  d = T/h:   y_t = R_t + (T/h)(R_t - R_(t-1)),
 
-which is the executed ordinary finite-difference arm (`ordinary.py`) with
-`kappa = T/h`. It is exact in closed loop on the full MDN write path, with
+which is the executed learned-mismatch arm (`ordinary.py`) with `kappa = T/h`,
+membrane `tau = h` and `tau' = kappa h`. It is exact in closed loop on the full MDN write path, with
 token gates and masks, for every `kappa`, including `kappa > 1`, where
 `gamma = h(1 - kappa) < 0`:
 - exact: `test_generalized_recurrence_recovers_the_ordinary_fd_arm_closed_loop`;
@@ -109,13 +110,14 @@ this boundary only for `kappa <= 1`. The completed ordinary
 finite-difference runs learned `kappa ~ 1.87-2.14`. The containment is
 algebraic; within the executed domain it is partial.
 
-**Ordinary adaptive-state realization.** `M = gamma = 0` gives
+**Zucchet prospective dynamics, matched time constants \(\tau'=\tau\).**
+`M = gamma = 0` gives
 `a = 1 - h/T`, `b = 0`, `c = 1 + h/T`, `d = 1`, which is Eq. (17), the
-executed `tss_processing` arm. It coincides with the finite-difference
+executed `tss_processing` arm. It coincides with the learned-mismatch
 boundary only at `T = h`
 (`test_the_ordinary_adaptive_state_boundary_is_M_gamma_zero`).
 
-So both ordinary arms are `M = 0` points of **one** recurrence, at
+So both Zucchet prospective dynamics arms are `M = 0` points of **one** recurrence, at
 `gamma = h - T` and `gamma = 0`. They differ by the damping boundary, not by
 a change of discretization
 (`test_the_two_ordinary_arms_differ_by_gamma_not_by_realization`).
@@ -145,58 +147,53 @@ generalized law, with `M s'' + (gamma + tau) s' + s` on the left:
 `test_adaptive_current_with_tau_a_equal_step_is_exactly_eq17`.
 
 **What this does and does not establish.**
-- The executed ordinary adaptive-state arm is **exactly** Zucchet's
+- The executed matched-time-constants arm is **exactly** Zucchet's
   adaptive-current realization at `tau_a = h`, and simultaneously **exactly**
   his Eq. (17). The paper itself presents Eq. (17) as its finite-difference
   scheme.
-- The "adaptive-state" label is therefore exact only with the qualification
-  `tau_a = h` (forward Euler). It is **not** the paper's `tau_a -> 0` limit.
+- This adaptive-current equivalence holds only with the qualification
+  `tau_a = h` (forward Euler). It is **not** the paper's `tau_a -> 0` limit,
+  and adaptive-current dynamics are not an arm in this experiment.
 - Any other `tau_a` gives a distinct realization. Minimal counterexample: at
   `tau_a = 2h` the first write has amplitude `1 + T/tau_a = 3/2` against
   Eq. (17)'s `2` (`T = h`).
 - `tau_a < h/2` makes the forward-Euler map of `a` unstable, so the
   `tau_a -> 0` limit is not reachable at a fixed step.
-- **No** off-step adaptive-state realization is executed. Adding one would
+- **No** off-step adaptive-current realization is executed. Adding one would
   be a new model, with a new parameter `tau_a`, and is not done here.
 
-## 6. Consequence for the law × realization analysis
+## 6. Consequence for the accepted recurrence audit
 
-What changes between the requested cells:
+The earlier realization question reduces to parameter boundaries of one
+accepted recurrence:
 
-| | finite-difference | adaptive-state |
+| Scientific arm | Recurrence boundary |
+|---|---|
+| Zucchet prospective dynamics, matched time constants \(\tau'=\tau\) | `M = gamma = 0` |
+| Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\) | `M = 0`, `gamma + T = h` |
+| Generalized prospective dynamics \((M,\gamma,T)\) | the recurrence with trainable `M, gamma, T` on the declared `gamma >= 0` domain |
+
+The accepted proof therefore justifies one generalized arm, not an additional
+arm. The final experiment does not label the Zucchet arms by implementation
+style and does not report a law-by-realization factorial. It reports the five
+pre-registered comparisons in §7.
+
+## 7. Final pre-registered primary contrasts
+
+| Scientific contrast | Executed as | Status |
 |---|---|---|
-| ordinary | the recurrence at `M = 0`, `gamma + T = h` | the recurrence at `M = gamma = 0` |
-| generalized | the recurrence, `(M, gamma, T)` free | **the same arm** |
-
-- The **law effect** is estimable at each ordinary boundary: generalized vs
-  ordinary finite-difference, and generalized vs ordinary adaptive-state.
-- The **realization effect** is **zero by construction** for the generalized
-  law (one arm). For the ordinary law it is estimable as ordinary
-  finite-difference vs ordinary adaptive-state, but within the executed
-  scheme that contrast is a **damping-boundary** contrast
-  (`gamma + T = h` vs `gamma = 0`), not a discretization contrast.
-- The **interaction** equals minus the ordinary realization effect. It is
-  **not separately identifiable**, and is reported as such.
-
-`nesterov_ladder.factorial_decomposition` reports exactly these quantities,
-with paired CIs and per-seed signs, from the full-set primary analysis.
-
-## 7. Pre-registered matched primary contrasts (added to `e134ab1`'s)
-
-| Requested contrast | Executed as | Status |
-|---|---|---|
-| generalized finite-difference vs ordinary finite-difference | `generalized_processing_vs_operator_full` | primary |
-| generalized adaptive-state vs ordinary adaptive-state | `generalized_processing_vs_tss_processing` | primary |
-| generalized finite-difference vs generalized adaptive-state | — | **identically zero** (one arm), not estimated |
-| ordinary finite-difference vs ordinary adaptive-state | `tss_processing_vs_operator_full`, mirrored | primary (damping-boundary caveat, §6) |
-| each generalized realization vs native MDN, literal Nesterov, QHM | `generalized_processing_vs_{native_full, literal_nesterov, qhm}` | primary |
+| Generalized prospective dynamics \((M,\gamma,T)\) vs Native Momentum DeltaNet | `generalized_processing_vs_native_full` | primary |
+| Generalized prospective dynamics \((M,\gamma,T)\) vs Zucchet prospective dynamics, matched time constants \(\tau'=\tau\) | `generalized_processing_vs_tss_processing` | primary |
+| Generalized prospective dynamics \((M,\gamma,T)\) vs Zucchet prospective dynamics, learned time-constant mismatch \(\tau'\neq\tau\) | `generalized_processing_vs_operator_full` | primary |
+| Generalized prospective dynamics \((M,\gamma,T)\) vs Literal Nesterov Momentum DeltaNet | `generalized_processing_vs_literal_nesterov` | primary |
+| Generalized prospective dynamics \((M,\gamma,T)\) vs QHM Momentum DeltaNet | `generalized_processing_vs_qhm` | primary |
 
 Everything else is unchanged from `e134ab1`:
 - the six arms;
 - sources, streams, seeds, selection ordering and update budget;
 - the full held-out set as the primary set, with non-finite outcomes kept in
   the denominator;
-- the recommendation rule (the generalized prospective arm must beat every
+- the recommendation rule (Generalized prospective dynamics \((M,\gamma,T)\) must beat every
   applicable control on the full-set primary analysis);
 - the Nesterov applicability records;
 - the secondary stable-subset diagnostic.
@@ -209,11 +206,11 @@ arms and still refuses rather than trims.
 | Required | Where |
 |---|---|
 | elimination and direct FD realization | `test_eliminating_the_auxiliary_state_gives_the_same_transfer_function`, `test_direct_finite_difference_realization_is_the_executed_recurrence`, production `test_executed_generalized_is_the_direct_fd_realization` |
-| ordinary finite-difference boundary | `test_ordinary_finite_difference_boundary_is_gamma_plus_T_equal_h`, `test_generalized_recurrence_recovers_the_ordinary_fd_arm_closed_loop`, production `test_generalized_at_its_fd_boundary_is_the_executed_ordinary_fd_arm` |
-| ordinary adaptive-state boundary | `test_the_ordinary_adaptive_state_boundary_is_M_gamma_zero` |
+| Zucchet learned-mismatch boundary | `test_ordinary_finite_difference_boundary_is_gamma_plus_T_equal_h`, `test_generalized_recurrence_recovers_the_ordinary_fd_arm_closed_loop`, production `test_generalized_at_its_fd_boundary_is_the_executed_ordinary_fd_arm` |
+| Zucchet matched-time-constants boundary | `test_the_ordinary_adaptive_state_boundary_is_M_gamma_zero` |
 | Zucchet mapping and its limit | `test_adaptive_current_with_tau_a_equal_step_is_exactly_eq17`, `test_adaptive_current_with_tau_a_off_the_step_is_a_distinct_realization` |
-| naming and the factorial | production `test_every_arm_carries_only_the_declared_scientific_names`, `test_factorial_mirrors_the_ordinary_realization_contrast` |
-| discrete stability domain | unchanged: `docs/PROSPECTIVE_COEFFICIENT_DOMAIN.md`. The ordinary finite-difference boundary has `a = b = 0`, an FIR filter, stable for every `kappa` |
+| exact naming, display order and five primary contrasts | production `test_every_arm_carries_only_the_declared_scientific_names`, `test_display_order_and_primary_contrasts_are_preregistered_exactly` |
+| discrete stability domain | unchanged: `docs/PROSPECTIVE_COEFFICIENT_DOMAIN.md`. The learned-mismatch boundary has `a = b = 0`, an FIR filter, stable for every `kappa` |
 | unchanged outputs of every existing arm | `test_completed_arms_still_execute_their_documented_laws`, `test_two_tap_arm_is_the_completed_implementation`, `test_two_tap_ladder_evaluation_equals_the_completed_evaluation` |
 
 Because no arm is added, the new-arm tests (hand-computed updates,

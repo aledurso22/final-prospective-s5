@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# MDN NESTEROV/QHM LADDER: native, the frozen two-tap operator
-# (ordinary_prospective), literal TSS, literal Nesterov, QHM and generalized
-# prospectivity on the completed temporal-response protocol
+# SIX-ARM MOMENTUM DELTANET STUDY: Native Momentum DeltaNet; Zucchet
+# prospective dynamics, matched time constants tau'=tau; Zucchet prospective
+# dynamics, learned time-constant mismatch tau'!=tau; Generalized prospective
+# dynamics (M,gamma,T); Literal Nesterov Momentum DeltaNet; and QHM Momentum
+# DeltaNet, on the completed temporal-response protocol
 # (same task, sources, streams, learning rates, checkpoints, selection and
 # metrics). NOT AUTHORIZED TO RUN until docs/MDN_NESTEROV_QHM_AUDIT.md s8 is
 # cleared.
@@ -80,7 +82,7 @@ echo "backend: outcome=$PM_OUTCOME rc=$PM_RC"
 stage_end backend
 
 # ---- 2. FAIL-CLOSED gate: exact identities and the float64 production
-#         checks (new rules, the unchanged two-tap arm, the analysis). A
+#         checks (new rules, unchanged existing arms, and the analysis). A
 #         non-zero exit ends the dispatch here: no experiment runs.
 pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
   "$PY" -u -m pytest tests/test_mdn_nesterov_qhm_identities.py \
@@ -108,7 +110,7 @@ pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
     --deadline "$DEADLINE" --reserve_s "$RESERVE_S" \
     > "$LOG_DIR/study.log" 2>&1
 echo "--- study tail ---"; tail -30 "$LOG_DIR/study.log"
-grep -E "PROSPECTIVE_MOMENTUM_STATUS|SOURCE_UNCHANGED|PREFLIGHT_|\[source\]|\[preflight\]|\[selection\]|\[nesterov\]|\[paired\]|\[immediate claim\]|\[recommendation\]|\[!\]" \
+grep -E "PROSPECTIVE_MOMENTUM_STATUS|SOURCE_UNCHANGED|PREFLIGHT_|\[source\]|\[preflight\]|\[selection\]|\[nesterov\]|\[paired|\[primary\]|\[scope\]|\[immediate claim\]|\[recommendation\]|\[!\]" \
   "$LOG_DIR/study.log" || true
 echo "study: outcome=$PM_OUTCOME rc=$PM_RC"
 pm_finish "$RUN_DIR" study "$PM_OUTCOME" "$PM_RC"

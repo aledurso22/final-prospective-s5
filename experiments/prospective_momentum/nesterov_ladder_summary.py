@@ -9,8 +9,11 @@ import json
 import os
 import sys
 
-LADDER_ORDER = ("native_full", "operator_full", "tss_processing",
-                "literal_nesterov", "qhm", "generalized_processing")
+#: user-facing display order (internal identifiers)
+LADDER_ORDER = ("native_full", "tss_processing", "operator_full",
+                "generalized_processing", "literal_nesterov", "qhm")
+PRIMARY_METRICS = ("revision", "retention", "recall", "immediate_revised",
+                   "later_revised")
 SHOW = ("revision", "retention", "recall", "immediate_revised",
         "later_revised", "later", "untouched_keys", "revised_idle_gap",
         "revised_intervening_writes", "untouched_idle_gap",
@@ -29,11 +32,10 @@ def main(run_dir):
           f"failed={st.get('failed')} incomplete={st.get('incomplete')} "
           f"wall={st.get('wall_s')}")
     print(f"study: {st.get('study')}")
-    print(f"ladder: {st.get('ladder')}")
-    for arm, name in (st.get("scientific_names") or {}).items():
-        print(f"  {name}   [code alias {arm}]")
-    print(f"realization classification: "
-          f"{st.get('realization_classification')}")
+    names = st.get("scientific_names") or {}
+    for i, arm in enumerate(st.get("display_order") or LADDER_ORDER, 1):
+        print(f"  {i}. {names.get(arm, arm)}")
+    print(f"scope: {st.get('generalized_scope')}")
     print(f"extra parameters: {st.get('extra_parameters')}")
     print(f"executed carry (reals): {st.get('carry_executed')}")
     print(f"extra per-token work: {st.get('extra_work')}")
@@ -42,7 +44,8 @@ def main(run_dir):
     print(f"\npreflight projected {pf.get('projected_remaining_s')} s, "
           f"retraced {pf.get('retraced_any')}, failures {pf.get('failures')}")
     for r in pf.get("rows", []):
-        print(f"  {r['arm']:<24} step {r['step_s'] * 1e3:7.2f} ms  checkpoint "
+        print(f"  {names.get(r['arm'], r['arm']):<64} step "
+              f"{r['step_s'] * 1e3:7.2f} ms  checkpoint "
               f"{r['checkpoint_s']:5.2f} s  eval {r['evaluation_s']:5.2f} s")
     for seed, s in (st.get("start_points") or {}).items():
         t = s.get("nesterov_start_table") or {}
@@ -56,7 +59,7 @@ def main(run_dir):
     print(f"unavailable: {sel.get('unavailable')}")
     for row in sel.get("table", []):
         c = row.get("chosen")
-        print(f"  {row['arm']:<24} " + (
+        print(f"  {names.get(row['arm'], row['arm']):<64} " + (
             "UNAVAILABLE" if c is None else
             f"lr {c['lr']} update {c['update']:>3} revision {c['primary']:.4f}"
             f" immediate {c['immediate_revision']:.4f} later {c['later']:.4f}")
@@ -68,14 +71,17 @@ def main(run_dir):
     print("\n=== held-out metrics per arm and seed ===")
     print("  " + "arm/seed".ljust(34)
           + "".join(m[:10].rjust(11) for m in SHOW))
+    rnames = res.get("scientific_names") or names
     for key in sorted(res["heldout"], key=lambda k: (
             LADDER_ORDER.index(k.split("/")[0])
             if k.split("/")[0] in LADDER_ORDER else 99, k)):
         v = res["heldout"][key]
-        print("  " + key.ljust(34)
-              + "".join(f"{v[m]:11.4f}" for m in SHOW))
+        arm, seed = key.split("/")
+        print("  " + f"{rnames.get(arm, arm)} / seed {seed}")
+        print("  " + " " * 34 + "".join(f"{v[m]:11.4f}" for m in SHOW))
     ap = res.get("nesterov_applicability") or {}
-    print(f"\n=== literal-Nesterov applicability ({ap.get('condition')}) ===")
+    print(f"\n=== Literal Nesterov Momentum DeltaNet applicability "
+          f"({ap.get('condition')}) ===")
     print(f"  checkpoints evaluated {ap.get('checkpoints_evaluated')}, "
           f"unstable {ap.get('checkpoints_unstable')} "
           f"(fraction {ap.get('unstable_fraction')}); unavailable "
@@ -92,7 +98,10 @@ def main(run_dir):
               f"{e.get('failures_retained_in_denominator')}; realized-gate "
               f"record {e.get('episodes')}")
     pa = res["paired_analysis"]
-    print(f"\nplanned primary contrasts: {pa['planned_primary_contrasts']}")
+    print("\nplanned primary contrasts:")
+    for name in pa["planned_primary_contrasts"]:
+        first, second = name.split("_vs_", 1)
+        print(f"  {rnames.get(first, first)} vs {rnames.get(second, second)}")
     print(f"\n=== SECONDARY DIAGNOSTIC: stable-subset exclusions ===")
     for seed, e in pa["stable_subset_exclusions"].items():
         print(f"  seed {seed}: excluded {e['excluded_episodes']} of "
@@ -106,7 +115,9 @@ def main(run_dir):
               f"({'PRIMARY' if tag == pa['primary'] else 'SECONDARY MECHANISM DIAGNOSTIC, not used for the recommendation'}) ===")
         print(f"  not computable: {part['not_computable']}")
         for name, c in part["comparisons"].items():
-            print(f"\n  {name}  [{c.get('role')}]")
+            first, second = name.split("_vs_", 1)
+            print(f"\n  {rnames.get(first, first)} vs "
+                  f"{rnames.get(second, second)}  [{c.get('role')}]")
             for m in SHOW:
                 x = c[m]
                 print(f"    {m:<30} D {fmt(x['D'])}  CI95 [{fmt(x['ci95'][0])}"
@@ -119,21 +130,21 @@ def main(run_dir):
               f"{part.get('recommendation') or part.get('diagnostic_recommendation')}"
               + ("" if tag == pa["primary"] else " (diagnostic only)"))
         print(f"  immediate claim on {tag}: {part['immediate_claim']}")
-    print("\n=== law versus realization (full-set primary contrasts) ===")
-    fac = pa.get("law_realization_factorial") or {}
-    for metric, row in fac.items():
-        if metric == "caveat":
-            print(f"  caveat: {row}")
+    print("\n=== PLANNED PRIMARY CONTRASTS (complete held-out set): "
+          "Generalized prospective dynamics (M,\u03b3,T) versus ... ===")
+    print(f"  scope: {pa.get('generalized_scope')}")
+    for name in pa["planned_primary_contrasts"]:
+        c = pa["full"]["comparisons"].get(name)
+        other = name.split("_vs_", 1)[1]
+        print(f"\n  versus {rnames.get(other, other)}")
+        if c is None:
+            print("    not computable")
             continue
-        for k, v in row.items():
-            if v is None:
-                print(f"  {metric:<18} {k:<32} n/a")
-            elif "ci95" in v:
-                print(f"  {metric:<18} {k:<32} D {fmt(v['D'])} CI95 "
-                      f"[{fmt(v['ci95'][0])}, {fmt(v['ci95'][1])}] signs "
-                      f"{''.join(v['per_seed_sign'].values())} -> {v['label']}")
-            else:
-                print(f"  {metric:<18} {k:<32} {v}")
+        for m in PRIMARY_METRICS:
+            x = c[m]
+            print(f"    {m:<18} D {fmt(x['D'])}  SE {x['se_within']:.4f}  CI95 "
+                  f"[{fmt(x['ci95'][0])}, {fmt(x['ci95'][1])}]  seed signs "
+                  f"{''.join(x['per_seed_sign'].values())} -> {x['label']}")
     print(f"\nRECOMMENDATION (primary): {pa['recommendation']}")
     print(f"basis: {pa['recommendation_basis']}")
 
