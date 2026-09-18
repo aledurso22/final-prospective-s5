@@ -23,7 +23,7 @@ from s5.three_arm_factory import (init_S5SSM,
                                   init_generalized_prospective_S5SSM,
                                   init_prospective_S5SSM)
 from s5.train_helpers import (cosine_annealing, create_train_state,
-                              linear_warmup, train_step,
+                              linear_warmup, train_step, train_step_telemetry,
                               update_learning_rate_per_step, eval_step)
 
 
@@ -205,6 +205,13 @@ def train_one_batch(state, rng, xb, yb, model, step, steps_per_epoch):
     state = apply_scheduled_learning_rate(state, step, steps_per_epoch)
     return train_step(state, rng, xb, yb,
                       jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
+
+
+def train_one_batch_telemetry(state, rng, xb, yb, model, step,
+                              steps_per_epoch):
+    state = apply_scheduled_learning_rate(state, step, steps_per_epoch)
+    return train_step_telemetry(
+        state, rng, xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
 
 
 def evaluate(state, model, x, y):

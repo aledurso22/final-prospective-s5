@@ -1,4 +1,4 @@
-from functools import partial
+from functools import partial, reduce
 import jax
 import jax.numpy as np
 from jax.nn import one_hot
@@ -400,16 +400,8 @@ def validate(state, model, testloader, seq_len, in_dim, batchnorm, step_rescale=
     return aveloss, aveaccu
 
 
-@partial(jax.jit, static_argnums=(5, 6))
-def train_step(state,
-               rng,
-               batch_inputs,
-               batch_labels,
-               batch_integration_timesteps,
-               model,
-               batchnorm,
-               ):
-    """Performs a single training step given a batch of data"""
+def _train_step_impl(state, rng, batch_inputs, batch_labels,
+                     batch_integration_timesteps, model, batchnorm):
     def loss_fn(params):
 
         if batchnorm:
@@ -432,12 +424,47 @@ def train_step(state,
         return loss, (mod_vars, logits)
 
     (loss, (mod_vars, logits)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+    finite = reduce(
+        np.logical_and,
+        [np.all(np.isfinite(value))
+         for value in jax.tree_util.tree_leaves(grads)])
 
     if batchnorm:
         state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
     else:
         state = state.apply_gradients(grads=grads)
+    return state, loss, finite
+
+
+@partial(jax.jit, static_argnums=(5, 6))
+def train_step(state,
+               rng,
+               batch_inputs,
+               batch_labels,
+               batch_integration_timesteps,
+               model,
+               batchnorm,
+               ):
+    """Performs one production training update."""
+    state, loss, _ = _train_step_impl(
+        state, rng, batch_inputs, batch_labels, batch_integration_timesteps,
+        model, batchnorm)
     return state, loss
+
+
+@partial(jax.jit, static_argnums=(5, 6))
+def train_step_telemetry(state,
+                         rng,
+                         batch_inputs,
+                         batch_labels,
+                         batch_integration_timesteps,
+                         model,
+                         batchnorm,
+                         ):
+    """Production-equivalent update returning only scalar gradient telemetry."""
+    return _train_step_impl(
+        state, rng, batch_inputs, batch_labels, batch_integration_timesteps,
+        model, batchnorm)
 
 
 @partial(jax.jit, static_argnums=(4, 5))

@@ -196,3 +196,21 @@ def test_actual_train_step_sees_scheduled_optimizer_rates(monkeypatch):
     expected = [runner.learning_rate_at_step(step, steps_per_epoch)[0]
                 for step in (0, 9, 10, 399)]
     np.testing.assert_allclose(captured, expected, rtol=1e-6, atol=1e-8)
+
+
+def test_telemetry_step_matches_normal_step(monkeypatch):
+    monkeypatch.setattr(runner, "BATCH_SIZE", 2)
+    monkeypatch.setattr(runner, "SEQ_LEN", 8)
+    state = runner.init_state("native_matched_s5", 301)
+    model = runner.model_for("native_matched_s5", True)
+    x = jnp.ones((2, 8, 1), dtype=jnp.float32)
+    y = jnp.asarray([0, 1])
+    normal_state, normal_loss = runner.train_one_batch(
+        state, jax.random.PRNGKey(91), x, y, model, 0, 10)
+    telemetry_state, telemetry_loss, finite = runner.train_one_batch_telemetry(
+        state, jax.random.PRNGKey(91), x, y, model, 0, 10)
+    assert bool(finite)
+    np.testing.assert_allclose(normal_loss, telemetry_loss, rtol=1e-6, atol=1e-7)
+    for left, right in zip(jax.tree_util.tree_leaves(normal_state),
+                           jax.tree_util.tree_leaves(telemetry_state)):
+        np.testing.assert_allclose(left, right, rtol=1e-6, atol=1e-7)

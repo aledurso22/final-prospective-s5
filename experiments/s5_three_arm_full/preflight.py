@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 
 from experiments.s5_three_arm_full import runner
-from s5.train_helpers import cross_entropy_loss
 
 
 def _block(value):
@@ -30,17 +29,10 @@ def _peak_vram_bytes():
     raise RuntimeError(f"GPU peak-memory telemetry is unavailable: {stats}")
 
 
-def _finite_gradients(state, model, x, y):
-    def loss_fn(params):
-        logits, _ = model.apply(
-            {"params": params, "batch_stats": state.batch_stats}, x,
-            jnp.ones((16, 16000)), rngs={"dropout": jax.random.PRNGKey(303)},
-            mutable=["batch_stats"])
-        return jnp.mean(cross_entropy_loss(logits, y))
-
-    _, gradients = jax.value_and_grad(loss_fn)(state.params)
-    return all(bool(jnp.all(jnp.isfinite(value)))
-               for value in jax.tree_util.tree_leaves(gradients))
+def _record(path, result):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(result, handle, indent=2)
 
 
 def run_arm(arm, output_dir):
@@ -51,20 +43,28 @@ def run_arm(arm, output_dir):
     x = jnp.ones((16, 16000, 1), dtype=jnp.float32)
     y = jnp.arange(16, dtype=jnp.int32) % 10
     _block_tree(state.params)
+    progress_path = os.path.join(output_dir, f"{arm}.progress.json")
+    print(f"[{arm}] compiling telemetry update", flush=True)
     compile_start = time.perf_counter()
-    state, loss = runner.train_one_batch(
+    state, loss, gradients_finite = runner.train_one_batch_telemetry(
         state, jax.random.PRNGKey(301), x, y, model, 0, 1)
     _block_tree(state.params)
     compile_seconds = time.perf_counter() - compile_start
+    partial = {"code_identifier": arm, "compile_seconds": compile_seconds,
+               "gradients_finite": bool(gradients_finite)}
+    _record(progress_path, partial)
+    print(f"[{arm}] telemetry compiled in {compile_seconds:.3f}s", flush=True)
+    if not bool(gradients_finite):
+        raise RuntimeError(f"non-finite gradients for {arm}")
+    print(f"[{arm}] timing normal update", flush=True)
     step_start = time.perf_counter()
     state, loss = runner.train_one_batch(
         state, jax.random.PRNGKey(302), x, y, model, 1, 1)
     _block_tree(state.params)
     step_seconds = time.perf_counter() - step_start
-    finite_gradients = _finite_gradients(state, model, x, y)
     finite_state = all(bool(jnp.all(jnp.isfinite(value)))
-                 for value in jax.tree_util.tree_leaves(state.params))
-    if not finite_gradients or not finite_state or not bool(jnp.isfinite(loss)):
+                       for value in jax.tree_util.tree_leaves(state))
+    if not finite_state or not bool(jnp.isfinite(loss)):
         raise RuntimeError(f"non-finite update for {arm}")
     result = {"scientific_name": runner.SCIENTIFIC_NAMES[arm],
               "code_identifier": arm, "seed": 301,
@@ -72,11 +72,12 @@ def run_arm(arm, output_dir):
               "compile_seconds": compile_seconds,
               "step_seconds": step_seconds,
               "peak_vram_bytes": _peak_vram_bytes(),
-              "finite_gradients": finite_gradients,
+              "finite_gradients": bool(gradients_finite),
               "finite_state": finite_state}
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, f"{arm}.json"), "w") as handle:
         json.dump(result, handle, indent=2)
+    print(f"[{arm}] complete: {json.dumps(result)}", flush=True)
     return result
 
 
