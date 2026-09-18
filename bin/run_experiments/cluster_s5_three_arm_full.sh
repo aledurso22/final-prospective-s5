@@ -14,13 +14,16 @@ mkdir -p "$OUT"
 echo "scientific arms: Native matched S5 | Zucchet prospective S5 recurrence | Generalized prospective S5 recurrence (M,gamma,T)"
 echo "branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "commit: $(git rev-parse HEAD)"
-echo "gpu: $(CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$PY" -c 'import jax; print(jax.devices())')"
 echo "data cache: ${DATA_CACHE} (official validation/testing lists)"
 echo "output: $OUT"
 
-exec "$PY" -u -m experiments.s5_three_arm_full.runner \
-  --data-cache "$DATA_CACHE" \
-  --out "$OUT" \
-  --protocol "$PROSPECTIVE_REPO/docs/S5_THREE_ARM_FULL_TRAINING_PROTOCOL.md" \
-  --commit "$(git rev-parse HEAD)" \
-  2>&1 | tee "$OUT/console.log"
+ARRAY_JOB="$(sbatch --parsable \
+  --array=0-8%4 \
+  --export=ALL,S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
+  "$PROSPECTIVE_REPO/bin/slurm/s5_three_arm_full_array.sbatch")"
+FINALIZER_JOB="$(sbatch --parsable \
+  --dependency="afterok:${ARRAY_JOB}" \
+  --export=ALL,S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
+  "$PROSPECTIVE_REPO/bin/slurm/s5_three_arm_full_finalize.sbatch")"
+
+printf 'array job: %s\nfinalizer job: %s\n' "$ARRAY_JOB" "$FINALIZER_JOB"

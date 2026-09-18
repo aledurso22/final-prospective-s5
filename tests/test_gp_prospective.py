@@ -413,13 +413,18 @@ def test_5_prospective_input_leaves_the_generator_unchanged():
 # =====================================================================
 
 @pytest.mark.parametrize("kw,match", [
-    (dict(bidirectional=True), "unidirectional"),
     (dict(discretization="bilinear"), "ZOH"),
 ])
 def test_6_unsupported_configurations_are_rejected(kw, match):
     mod = build("gp_diagonal", **kw)
     with pytest.raises(ValueError, match=match):
         mod.init(jax.random.PRNGKey(0), inputs())
+
+
+def test_6_bidirectional_generalized_response_is_supported():
+    mod = build("gp_diagonal", bidirectional=True)
+    variables = mod.init(jax.random.PRNGKey(0), inputs())
+    assert variables["params"]["C1"].shape == variables["params"]["C2"].shape
 
 
 def test_6_non_unit_step_rescale_is_rejected():

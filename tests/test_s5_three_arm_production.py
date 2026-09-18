@@ -23,10 +23,10 @@ def test_production_models_initialize_and_are_finite():
 
 
 def test_production_state_sizes_are_declared():
-    assert recurrent_state_size("native_matched_s5")["real_values_total"] == 128
-    assert recurrent_state_size("zucchet_prospective_s5")["real_values_total"] == 128
-    assert recurrent_state_size("generalized_prospective_s5")["real_values_total"] == 256
-    assert BATCH_SIZE == 32
+    assert recurrent_state_size("native_matched_s5")["real_values_total"] == 768
+    assert recurrent_state_size("zucchet_prospective_s5")["real_values_total"] == 768
+    assert recurrent_state_size("generalized_prospective_s5")["real_values_total"] == 1536
+    assert BATCH_SIZE == 16
 
 
 def test_shared_initial_parameters_are_identical_where_shapes_permit():

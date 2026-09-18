@@ -46,12 +46,13 @@ _SCALAR_MECHANISMS = ("gp_scalar", "prospective_input", "full_state_pc")
 GP_PARAM_NAME = "gp_response_raw"
 
 
-def gp_scan(a_bar, b_bar, input_sequence):
+def gp_scan(a_bar, b_bar, input_sequence, reverse=False):
     """h_k = a_bar h_{k-1} + b_bar x_k via the ORIGINAL diagonal scan."""
     Lambda_elements = a_bar * np.ones((input_sequence.shape[0], a_bar.shape[0]))
     Bu_elements = jax.vmap(lambda u: b_bar @ u)(input_sequence)
     _, hs = jax.lax.associative_scan(binary_operator,
-                                     (Lambda_elements, Bu_elements))
+                                     (Lambda_elements, Bu_elements),
+                                     reverse=reverse)
     return hs
 
 
@@ -134,10 +135,6 @@ class GPSSM(S5SSM):
             raise ValueError(
                 f"GPSSM does not handle mechanism={self.mechanism!r}; the "
                 f"factory returns the original S5SSM for 'plain'.")
-        if self.bidirectional:
-            raise ValueError(
-                "generalized prospective response is causal and supports only "
-                "unidirectional S5; set bidirectional=False.")
         if self.discretization != "zoh":
             raise ValueError(
                 f"generalized response currently supports ZOH only, got "
@@ -191,7 +188,13 @@ class GPSSM(S5SSM):
     def __call__(self, input_sequence, reset_mask=None):
         c = self.coefficients()
         hs = gp_scan_reset(c["a_bar"], c["b_bar"], input_sequence, reset_mask)
-        ys = gp_readout(hs, c["d_x"], self.C_tilde, input_sequence,
+        d_x = c["d_x"]
+        if self.bidirectional:
+            hs_reverse = gp_scan(c["a_bar"], c["b_bar"], input_sequence,
+                                 reverse=True)
+            hs = np.concatenate((hs, hs_reverse), axis=-1)
+            d_x = np.concatenate((d_x, d_x), axis=0)
+        ys = gp_readout(hs, d_x, self.C_tilde, input_sequence,
                         self.conj_sym)
         Du = jax.vmap(lambda u: self.D * u)(input_sequence)
         return ys + Du

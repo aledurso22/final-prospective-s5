@@ -11,10 +11,10 @@ mkdir -p "$DATA_CACHE"
 "$PY" - "$DATA_ROOT" "$DATA_CACHE" <<'PYEOF'
 import json
 import sys
-from experiments.s5_three_arm_full.data import prepare_official
+from experiments.s5_three_arm_full.data import prepare_official_raw
 
-manifest = prepare_official(sys.argv[1], sys.argv[2])
+manifest = prepare_official_raw(sys.argv[1], sys.argv[2])
 print(json.dumps({"split_definition": manifest["split_definition"],
                   "counts": manifest["counts"],
-                  "mfcc": manifest["mfcc"]}, indent=2))
+                  "representation": manifest["representation"]}, indent=2))
 PYEOF

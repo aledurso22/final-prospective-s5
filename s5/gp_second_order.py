@@ -94,7 +94,8 @@ def second_order_zoh(a, b, t, mu):
     return dict(A_bar=A_bar, B_bar=B_bar, F=F, B=B)
 
 
-def second_order_scan(A_bar, B_bar, input_sequence, h0=None, reset_mask=None):
+def second_order_scan(A_bar, B_bar, input_sequence, h0=None, reset_mask=None,
+                      reverse=False):
     """h_k = A_bar h_{k-1} + B_bar x_k, over 2x2 blocks, via a block scan."""
     L = input_sequence.shape[0]
     P = A_bar.shape[0]
@@ -106,7 +107,8 @@ def second_order_scan(A_bar, B_bar, input_sequence, h0=None, reset_mask=None):
     if h0 is not None:
         # fold a non-zero prehistory into the first element
         B_elems = B_elems.at[0].add((A_elems[0] @ h0[..., None])[..., 0])
-    _, hs = jax.lax.associative_scan(block_binary_operator, (A_elems, B_elems))
+    _, hs = jax.lax.associative_scan(
+        block_binary_operator, (A_elems, B_elems), reverse=reverse)
     return hs                                                     # (L, P, 2)
 
 
@@ -146,10 +148,8 @@ class SecondOrderGPSSM(S5SSM):
 
     def setup(self):
         super().setup()
-        if self.bidirectional or self.discretization != "zoh" \
-                or self.step_rescale != 1.0:
-            raise ValueError("second-order prototype: causal, ZOH, unit clock "
-                             "only")
+        if self.discretization != "zoh" or self.step_rescale != 1.0:
+            raise ValueError("second-order prototype: ZOH, unit clock only")
         if not self.clip_eigs:
             raise ValueError("second-order prototype requires clip_eigs=True: "
                              "stability assumes Re(j) > 0")
@@ -195,6 +195,10 @@ class SecondOrderGPSSM(S5SSM):
         c = self.coefficients()
         hs = second_order_scan(c["A_bar"], c["B_bar"], input_sequence,
                                reset_mask=reset_mask)
+        if self.bidirectional:
+            hs_reverse = second_order_scan(
+                c["A_bar"], c["B_bar"], input_sequence, reverse=True)
+            hs = np.concatenate((hs, hs_reverse), axis=1)
         return second_order_readout(hs, self.C_tilde, self.D, input_sequence,
                                     self.conj_sym)
 

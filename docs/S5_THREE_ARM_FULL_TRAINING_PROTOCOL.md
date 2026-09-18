@@ -1,4 +1,4 @@
-# Three-arm full-training S5 recurrence experiment
+# Three-arm full-training raw-audio S5 recurrence experiment
 
 Status: preregistered; no training run has been launched.
 
@@ -20,10 +20,21 @@ scientific names above.
 
 ## Exact equations
 
-The S5 continuous-time pole and input row are clock-absorbed as
-\(a=\Delta\lambda\) and \(b=\Delta\widetilde B\), with \(\operatorname{Re}(a)<0\).
-Each token input is held over one unit interval and discretized with an exact
-unit-interval zero-order hold.
+The upstream S5 continuous-time pole and input row are clock-absorbed as
+\(a=\Delta\lambda\) and \(b=\Delta\widetilde B\), where the learned S5 step
+\(\Delta\) is measured in raw-audio sample intervals and
+\(\operatorname{Re}(a)<0\). The physical sample interval is
+\(h=1/16000\) seconds; the implementation uses the equivalent computational
+clock \(h=1\) per raw sample.
+
+\(\phi_1(a)=(e^a-1)/a\), evaluated by the repository's cancellation-safe
+implementation and defined continuously as \(\phi_1(0)=1\).
+
+The discrete raw waveform is represented as a piecewise-constant held input
+inside each sample interval. Thus \(\dot x=0\) in the interval interior and
+sample jumps are represented by the derivative-free prospective feedthrough
+term. This is the interpolation assumption under which the ZOH transition is
+exact; a piecewise-linear interpolation would be a different experiment.
 
 ### Native matched S5
 
@@ -102,31 +113,36 @@ second-order state gives the Zucchet prospective recurrence above. Production
 uses \(M>0\) because the finite-dimensional second-order parameterization is
 singular at exactly zero mass. The equation/identity tests verify the exact
 zero-mass coefficient boundary and convergence of the production transition
-to it as \(M\downarrow0\) within the declared numerical domain.
+to it as \(M\downarrow0\) within the declared numerical domain. In production,
+\(\gamma=1\) is fixed as the normalized damping gauge; only \(T\) and the
+positive mass ratio \(M/T\) are learned. Allowing \(\gamma\) to learn would
+add a fourth recurrence degree of freedom and is not part of this comparison.
 
 ## Training contract
 
-All arms use the same outer architecture: four causal unidirectional S5
-layers, `d_model=32`, nominal S5 size 32, conjugate symmetry, ZOH
-discretization, featurewise standardized 20-coefficient MFCC inputs, mean
-pooling, GELU/half-GLU configuration fixed in the launcher, no dropout and
-tokenwise LayerNorm. Only the recurrence and its necessary recurrence
-parameters differ.
+All arms use the upstream S5 Speech Commands architecture: bidirectional S5,
+depth 6, feature width `H=96`, nominal latent size `P=128`, 16 HiPPO blocks,
+`half_glu1`, batch normalization, dropout `0.1`, and mean pooling. The decoder
+is the upstream decoder with only its output width changed from 35 to 10.
+Only the recurrence and its necessary recurrence parameters differ.
 
-Speech Commands v0.02 uses the repository's 10-word subset and the official
-`validation_list.txt` and `testing_list.txt` assignments. MFCC extraction and
-training-split-only standardization are recorded in a dedicated official-list
-cache manifest. The training and validation arrays are opened before training;
-the test arrays are opened exactly once, after validation checkpoint selection.
+Speech Commands v0.02 uses the ten selected keywords, raw waveforms of length
+16,000, and the official `validation_list.txt` and `testing_list.txt`
+assignments. Training-derived per-sample-position raw-audio normalization
+follows upstream S5's `normalize_all_data` convention and is recorded in a
+dedicated cache manifest. Training and validation arrays are opened by array
+tasks; the test array is opened once, only by the finalizer after all nine
+tasks succeed.
 
 Each seed trains every arm from scratch. The same seed initializes corresponding
 shared parameters wherever shapes permit and produces the same epoch-wise
 training permutation for all three arms. No checkpoint or historical metric is
 reused.
 
-The fixed schedule is 40 epochs, batch size 32, AdamW, global learning rate
-`1e-3`, SSM learning rate `1e-3`, weight decay `1e-4`, global gradient clip 1.0,
-one warm-up epoch, cosine decay to `1e-6`, and paired seeds `301, 302, 303`.
+The fixed schedule is 40 epochs, batch size 16, global learning rate `0.008`,
+SSM learning rate `0.002`, upstream `noBCdecay` parameter-group exceptions,
+weight decay `0.04`, one warm-up epoch, cosine annealing, and paired seeds `301`,
+`302`, `303`.
 The checkpoint is the first epoch attaining the highest validation accuracy;
 validation cross-entropy breaks ties. Test accuracy and test cross-entropy are
 computed only from that selected checkpoint.
@@ -143,3 +159,28 @@ errors, and 95% paired confidence intervals.
 The report must not call the generalized method better unless it beats Zucchet
 prospective S5 recurrence consistently across seeds and does not materially
 worsen test accuracy or cross-entropy relative to Native matched S5.
+
+## Slurm execution and preflight
+
+The production launch is one array with exactly nine tasks (`3 arms × 3
+seeds`) and at most four concurrent tasks. Each task requests partition
+`pgi15-single-gpu`, node `pgi15-gpu3`, one RTX 3090, 10 CPUs, and 50 GB RAM.
+The array script gives every task separate temporary, JAX compilation-cache,
+log, checkpoint, and output directories. The finalizer is submitted with an
+`afterok` dependency; it verifies all nine task manifests, selects checkpoints,
+opens the test split once, and writes the paired report.
+
+Prepare the cache, then submit without changing the checkout:
+
+```bash
+DATA_ROOT=/Local/durso/speech_commands_v0.02 \
+  bash bin/run_experiments/cluster_prepare_s5_three_arm_full_data.sh
+bash bin/run_experiments/cluster_s5_three_arm_full.sh
+```
+
+The requested one-epoch raw-audio preflight (compile each arm, measure one
+epoch, peak VRAM and throughput, and verify paired batches) has not been run
+from this workstation: cluster access and the current allocation are not
+available here, and this checkpoint is intentionally not launched. Its
+measurements must be recorded before production submission; no runtime or
+VRAM value is claimed by this protocol.
