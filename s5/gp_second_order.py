@@ -47,6 +47,8 @@ from jax.scipy.linalg import expm
 
 from .gp_coefficients import absorb_clock
 from .ssm import S5SSM
+from .three_arm_recurrences import (generalized_prospective_s5_generator,
+                                    generalized_prospective_s5_zoh)
 
 #: uniform sufficient STABILITY bound from the brief: mu <= t
 MU_RATIO_MAX = 1.0
@@ -80,28 +82,16 @@ def block_binary_operator(q_i, q_j):
 
 def second_order_generator(a, b, t, mu):
     """Continuous (F, B) per mode, in clocked units. Shapes (P,2,2), (P,2,H)."""
-    j = -a
-    tm = (t / mu).astype(a.dtype)
-    inv_mu = (1.0 / mu).astype(a.dtype)
-    t_c = t.astype(a.dtype)
-    F = np.stack([
-        np.stack([-t_c * j * inv_mu, inv_mu * np.ones_like(j)], axis=-1),
-        np.stack([(tm - 1.0) * j, -inv_mu * np.ones_like(j)], axis=-1),
-    ], axis=-2)                                             # (P, 2, 2)
-    B = np.stack([t_c[:, None] * b * inv_mu[:, None],
-                  (1.0 - tm)[:, None] * b], axis=-2)        # (P, 2, H)
-    return F, B
+    return generalized_prospective_s5_generator(
+        a, b, mu, np.ones_like(mu), t)
 
 
 def second_order_zoh(a, b, t, mu):
     """Exact unit-interval ZOH via an augmented matrix exponential."""
     F, B = second_order_generator(a, b, t, mu)
-    P, _, H = B.shape
-    n = 2 + H
-    aug = np.zeros((P, n, n), dtype=F.dtype)
-    aug = aug.at[:, :2, :2].set(F).at[:, :2, 2:].set(B)
-    E = jax.vmap(expm)(aug)
-    return dict(A_bar=E[:, :2, :2], B_bar=E[:, :2, 2:], F=F, B=B)
+    A_bar, B_bar = generalized_prospective_s5_zoh(
+        a, b, mu, np.ones_like(mu), t)
+    return dict(A_bar=A_bar, B_bar=B_bar, F=F, B=B)
 
 
 def second_order_scan(A_bar, B_bar, input_sequence, h0=None, reset_mask=None):

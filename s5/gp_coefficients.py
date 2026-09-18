@@ -55,6 +55,8 @@ import math as _math
 import jax
 import jax.numpy as np
 
+from .three_arm_recurrences import zucchet_prospective_s5_coefficients
+
 # phi1 switch thresholds, chosen from MEASURED error, per dtype.
 #
 # Two errors fight each other:
@@ -166,11 +168,8 @@ def gp_response_coefficients(a, b, t):
     Returns:
         dict with m, a_eff, b_hist, d_x, a_bar, b_bar.
     """
-    t_c = t.astype(a.dtype)
-    m = 1.0 - t_c * a
-    a_eff = a / m
-    b_hist = b / (m ** 2)[:, None]
-    d_x = (t_c / m)[:, None] * b
+    a_eff, b_hist, d_x = zucchet_prospective_s5_coefficients(a, b, t)
+    m = 1.0 - t.astype(a.dtype) * a
     return dict(m=m, a_eff=a_eff, b_hist=b_hist, d_x=d_x,
                 a_bar=np.exp(a_eff), b_bar=phi1(a_eff)[:, None] * b_hist)
 
