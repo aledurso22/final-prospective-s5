@@ -21,9 +21,10 @@ cd "$PROSPECTIVE_REPO"
 test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
 test -z "$(git status --porcelain)"
 
-ARMS=(native_matched_s5 zucchet_prospective_s5 generalized_prospective_s5)
+# Dispatch longest-running arms first; reporting order remains runner.ARM_ORDER.
+DISPATCH_ARMS=(generalized_prospective_s5 zucchet_prospective_s5 native_matched_s5)
 SEEDS=(301 302 303)
-ARM="${ARMS[$((SLURM_ARRAY_TASK_ID / 3))]}"
+ARM="${DISPATCH_ARMS[$((SLURM_ARRAY_TASK_ID / 3))]}"
 SEED="${SEEDS[$((SLURM_ARRAY_TASK_ID % 3))]}"
 TASK_ROOT="$S5_THREE_ARM_RUN_ROOT/$ARM/$SEED"
 mkdir -p "$TASK_ROOT/tmp" "$TASK_ROOT/jax-cache" "$TASK_ROOT/logs"

@@ -1,6 +1,6 @@
 # Three-arm full-training raw-audio S5 recurrence experiment
 
-Status: preregistered; no training run has been launched.
+Status: preregistered; full preflight complete; no training run has been launched.
 
 This protocol compares exactly three scientific arms on one full, from-scratch
 Speech Commands experiment. It does not include prospective input coupling,
@@ -185,6 +185,27 @@ log, checkpoint, and output directories. The finalizer is submitted with an
 `afterok` dependency; it verifies all nine task manifests, selects checkpoints,
 opens the test split once, and writes the paired report.
 
+### Authoritative isolated preflight
+
+The isolated full preflight passed at commit
+`507f4d26905cb1b6c1c99eb28190e375cd85edea`.
+It used artifact directory
+`/Users/durso/s5-runs/s5-three-arm-preflight/isolated-final-20260918-233014`.
+The measurements below are in scientific/reporting order; all gradients and
+complete states were finite.
+
+| Scientific arm | Steady step (s) | Peak VRAM (bytes) |
+|---|---:|---:|
+| Native S5 recurrence under the shared stability constraint | 0.1261024214 | 7,418,702,080 |
+| Zucchet prospective S5 recurrence | 0.1564851347 | 7,419,634,688 |
+| Generalized prospective S5 recurrence \((M,\gamma,T)\) | 0.2704331186 | 12,219,229,952 |
+
+The Slurm dispatch map is intentionally longest-first for scheduler
+efficiency—generalized seeds `301`, `302`, `303`, then Zucchet seeds `301`,
+`302`, `303`, then Native seeds `301`, `302`, `303`. This changes dispatch
+order only; scientific/reporting order, equations, initialization, data,
+metrics, and finalization behavior are unchanged.
+
 Prepare the cache, then submit without changing the checkout:
 
 ```bash
@@ -193,13 +214,9 @@ DATA_ROOT=/Local/durso/speech_commands_v0.02 \
 bash bin/run_experiments/cluster_s5_three_arm_full.sh
 ```
 
-The requested exact-shape raw-audio preflight (compile and execute the
-telemetry step, compile and execute the first normal step, then measure a
-steady-state normal step, peak VRAM and complete-state finiteness) has not been run
-from this workstation: cluster access and the current allocation are not
-available here, and this checkpoint is intentionally not launched. Its
-measurements must be recorded before production submission; no runtime or
-VRAM value is claimed by this protocol.
+The exact-shape raw-audio preflight has completed successfully in isolated
+processes; the authoritative measurements are recorded above. No training
+array has been launched.
 
 The preflight-only command is:
 

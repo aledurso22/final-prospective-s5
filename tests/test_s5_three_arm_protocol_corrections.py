@@ -282,3 +282,26 @@ def test_full_preflight_propagates_child_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight.subprocess, "run", child)
     with pytest.raises(RuntimeError, match="child failed"):
         preflight._run_all_arms(str(tmp_path))
+
+
+def test_slurm_dispatch_map_is_longest_first_and_covers_each_task_once():
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bin", "slurm", "s5_three_arm_full_array.sbatch")
+    with open(path) as handle:
+        source = handle.read()
+    assert "#SBATCH --array=0-8%4" in source
+    assert "DISPATCH_ARMS=(generalized_prospective_s5 zucchet_prospective_s5 native_matched_s5)" in source
+    assert "ARM=\"${DISPATCH_ARMS[$((SLURM_ARRAY_TASK_ID / 3))]}\"" in source
+    dispatch_arms = (
+        "generalized_prospective_s5",
+        "zucchet_prospective_s5",
+        "native_matched_s5",
+    )
+    expected = [(arm, seed) for arm in dispatch_arms for seed in (301, 302, 303)]
+    actual = [(dispatch_arms[index // 3], (301, 302, 303)[index % 3])
+              for index in range(9)]
+    assert actual == expected
+    assert len(set(actual)) == 9
+    assert {arm for arm, _ in actual} == set(runner.ARM_ORDER)
+    assert {seed for _, seed in actual} == {301, 302, 303}
