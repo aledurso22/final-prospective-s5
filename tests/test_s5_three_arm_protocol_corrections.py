@@ -1,10 +1,13 @@
+import json
 import os
 import sys
 import inspect
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -236,3 +239,46 @@ def test_preflight_pins_three_stage_order_and_result_fields():
         "normal compile+execute")
     assert source.index("normal compile+execute") < source.index(
         "normal steady-state step")
+
+
+def test_full_preflight_uses_separate_children_and_fixed_order(monkeypatch, tmp_path):
+    calls = []
+
+    def child(command, check):
+        assert check is False
+        arm = command[-1]
+        calls.append(arm)
+        result = {
+            "scientific_name": runner.SCIENTIFIC_NAMES[arm],
+            "code_identifier": arm,
+            "seed": 301,
+            "batch_size": 16,
+            "sequence_length": 16000,
+            "stage_order": list(preflight.PREFLIGHT_STAGE_ORDER),
+            "telemetry_compile_seconds": 1.0,
+            "normal_compile_seconds": 2.0,
+            "steady_step_seconds": 0.1,
+            "peak_vram_bytes": 123,
+            "finite_gradients": True,
+            "finite_state": True,
+        }
+        with open(tmp_path / f"{arm}.json", "w") as handle:
+            json.dump(result, handle)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(preflight.subprocess, "run", child)
+    aggregate = preflight._run_all_arms(str(tmp_path))
+    assert calls == list(runner.ARM_ORDER)
+    assert [row["code_identifier"] for row in aggregate["arms"]] == list(
+        runner.ARM_ORDER)
+    with open(tmp_path / "preflight.json") as handle:
+        assert json.load(handle) == aggregate
+
+
+def test_full_preflight_propagates_child_failure(monkeypatch, tmp_path):
+    def child(command, check):
+        return SimpleNamespace(returncode=17)
+
+    monkeypatch.setattr(preflight.subprocess, "run", child)
+    with pytest.raises(RuntimeError, match="child failed"):
+        preflight._run_all_arms(str(tmp_path))
