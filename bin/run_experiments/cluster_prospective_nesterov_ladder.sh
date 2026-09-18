@@ -84,6 +84,7 @@ stage_end backend
 #         non-zero exit ends the dispatch here: no experiment runs.
 pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
   "$PY" -u -m pytest tests/test_mdn_nesterov_qhm_identities.py \
+  tests/test_prospective_realizations.py \
   tests/test_mdn_nesterov_qhm_production.py \
   -q -rP --durations=10 > "$LOG_DIR/production_checks.log" 2>&1
 echo "--- exact and float64 production checks ---"

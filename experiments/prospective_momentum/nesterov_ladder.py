@@ -98,6 +98,20 @@ LAW = {NATIVE: "momentum_delta", OPERATOR: OD.ORDINARY, TSS: FL.FILTERED,
        GEN: FL.FILTERED, NAG_ARM: NESTEROV, QHM_ARM: QHM,
        ANCHOR: "momentum_delta"}
 NEW_ARMS = (NAG_ARM, QHM_ARM)
+#: SCIENTIFIC names (docs/PROSPECTIVE_REALIZATION_AUDIT.md). The arm keys
+#: above are internal code aliases only. The generalized finite-difference and
+#: adaptive-state realizations are EXACTLY EQUIVALENT (the same recurrence), so
+#: one executed arm carries both names.
+SCIENTIFIC_NAME = {
+    NATIVE: "native MDN",
+    OPERATOR: "ordinary prospective \u2014 finite-difference realization",
+    TSS: "ordinary prospective \u2014 adaptive-state realization",
+    GEN: ("generalized prospective \u2014 finite-difference realization "
+          "\u2261 adaptive-state realization"),
+    NAG_ARM: "literal Nesterov",
+    QHM_ARM: "QHM",
+    ANCHOR: "native MDN (frozen source, evaluation only)"}
+REALIZATION_CLASSIFICATION = "EXACTLY_EQUIVALENT_REALIZATIONS"
 #: the controls generalized prospectivity must beat INDIVIDUALLY
 CONTROLS = (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM)
 DISPLAY = {NATIVE: TC.ARM_DISPLAY[NATIVE], OPERATOR: TC.ARM_DISPLAY[OPERATOR],
@@ -155,10 +169,18 @@ METRICS = {
 #: EVERY pair of the ladder, oriented later-versus-earlier in ladder order
 COMPARISONS = tuple((LADDER[j], LADDER[i]) for j in range(len(LADDER))
                     for i in range(j))
-#: PLANNED PRIMARY CONTRASTS: generalized versus each of the five controls.
-#: The other ten pairs are DESCRIPTIVE.
+#: PLANNED PRIMARY CONTRASTS (matched):
+#:   generalized vs ordinary, finite-difference realization  (GEN vs OPERATOR)
+#:   generalized vs ordinary, adaptive-state realization     (GEN vs TSS)
+#:   ordinary finite-difference vs ordinary adaptive-state   (OPERATOR vs TSS,
+#:                                         run as TSS_vs_OPERATOR, mirrored)
+#:   generalized vs native MDN, literal Nesterov and QHM
+#: generalized finite-difference vs generalized adaptive-state is IDENTICALLY
+#: ZERO (one arm, exactly equivalent realizations) and is not estimated.
+#: The other pairs are DESCRIPTIVE.
 PRIMARY_CONTRASTS = tuple(f"{GEN}_vs_{c}" for c in
-                          (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM))
+                          (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM)) + (
+    f"{TSS}_vs_{OPERATOR}",)
 FLIP = {"BETTER": "WORSE", "WORSE": "BETTER",
         "BETTER_BELOW_MARGIN": "WORSE_BELOW_MARGIN",
         "WORSE_BELOW_MARGIN": "BETTER_BELOW_MARGIN",
@@ -1024,7 +1046,8 @@ def paired_analysis(arrays, held_np, unavailable):
                          PRIMARY_CONTRASTS else "descriptive")
         out[tag] = dict(comparisons=comp, not_computable=bad)
     out["full"].update(recommendation=None, immediate_claim=immediate_claim(
-        out["full"]["comparisons"], unavailable))
+        out["full"]["comparisons"], unavailable),
+        factorial=factorial_decomposition(out["full"]["comparisons"]))
     out["stable_subset"].update(
         role=("SECONDARY MECHANISM DIAGNOSTIC: excludes held-out episodes "
               "by realized Nesterov gates; never used for the headline "
@@ -1040,6 +1063,9 @@ def paired_analysis(arrays, held_np, unavailable):
         mechanism_diagnostic_stable_subset=out["stable_subset"],
         stable_subset_exclusions=excl,
         planned_primary_contrasts=list(PRIMARY_CONTRASTS),
+        scientific_names={a: SCIENTIFIC_NAME[a] for a in LADDER},
+        realization_classification=REALIZATION_CLASSIFICATION,
+        law_realization_factorial=out["full"]["factorial"],
         recommendation=rec, recommendation_basis=why,
         immediate_claim=out["full"]["immediate_claim"],
         rule=("paired difference on the same held-out episodes; SE from a "
@@ -1051,6 +1077,57 @@ def paired_analysis(arrays, held_np, unavailable):
               "five controls; the other ten pairs are descriptive; the "
               "Nesterov-stable subset is a secondary diagnostic only"),
         margin=MARGIN, n_groups=N_GROUPS, wall_s=time.time() - t0)
+
+
+def factorial_decomposition(comp):
+    """LAW (ordinary -> generalized) versus REALIZATION (finite-difference ->
+    adaptive-state), from the planned primary contrasts. Differences are
+    first minus second as named; D, CI95 and seed signs are those of the
+    paired analysis (mirrored when the pair was run the other way).
+
+    Because the two generalized realizations are EXACTLY EQUIVALENT, the
+    generalized realization effect is zero by construction and the
+    interaction equals minus the ordinary realization effect: it is not
+    separately identifiable. The two ordinary arms are two points of ONE
+    recurrence (gamma + T = h versus gamma = 0), so their difference is a
+    parameter-boundary difference, not a change of discretization."""
+    def signed(a, b, metric):
+        c = comp.get(f"{a}_vs_{b}")
+        if c is not None:
+            x = c[metric]
+            return dict(D=x["D"], ci95=x["ci95"], se_within=x["se_within"],
+                        per_seed=x["per_seed"], per_seed_sign=x["per_seed_sign"],
+                        label=x["label"])
+        c = comp.get(f"{b}_vs_{a}")
+        if c is None:
+            return None
+        x = c[metric]
+        return dict(D=-x["D"], ci95=[-x["ci95"][1], -x["ci95"][0]],
+                    se_within=x["se_within"],
+                    per_seed={s: -d for s, d in x["per_seed"].items()},
+                    per_seed_sign={s: {"+": "-", "-": "+"}.get(v, v)
+                                   for s, v in x["per_seed_sign"].items()},
+                    label=FLIP[x["label"]])
+    out = {}
+    for metric in ("revision", "immediate_revised", "later_revised", "later",
+                   "retention", "recall"):
+        rz_ord = signed(OPERATOR, TSS, metric)
+        out[metric] = dict(
+            law_effect_finite_difference=signed(GEN, OPERATOR, metric),
+            law_effect_adaptive_state=signed(GEN, TSS, metric),
+            realization_effect_ordinary=rz_ord,
+            realization_effect_generalized=dict(
+                D=0.0, note="identical arm: exactly equivalent realizations"),
+            interaction=dict(
+                identifiable=False,
+                equals_minus_ordinary_realization_effect=(
+                    None if rz_ord is None else -rz_ord["D"])))
+    out["caveat"] = (
+        "the ordinary finite-difference and adaptive-state arms are the M = 0 "
+        "points gamma + T = h and gamma = 0 of the same recurrence; a "
+        "distinct adaptive-state realization would need an adaptive current "
+        "with tau_a != h, which is not executed")
+    return out
 
 
 def nesterov_applicability(status):
@@ -1121,7 +1198,10 @@ def main():
         completed_run_same_streams=COMPLETED_RUN,
         source_run=args.source_run,
         source_seeds=dict(development=SOURCE_DEV, final=list(SOURCE_FINAL)),
-        ladder=list(LADDER), arm_law=dict(LAW), display=dict(DISPLAY),
+        ladder=list(LADDER), arm_law=dict(LAW),
+        scientific_names={a: SCIENTIFIC_NAME[a] for a in LADDER},
+        realization_classification=REALIZATION_CLASSIFICATION,
+        code_display=dict(DISPLAY),
         extra_parameters=dict(EXTRA_PARAMETERS),
         carry_executed=dict(CARRY_EXECUTED), extra_work=dict(EXTRA_WORK),
         updates=UPDATES, checkpoints_at=list(VAL_AT),
@@ -1269,7 +1349,7 @@ def run_study(args, status, out, deadline, save):
     ST.write(os.path.join(out, "selection.json"), frozen)
     for arm in LADDER:
         s = sel.get(arm)
-        print(f"[selection] {arm:<24} " + (
+        print(f"[selection] {SCIENTIFIC_NAME[arm]} ({arm}) " + (
             "UNAVAILABLE" if s is None else
             f"lr {s['lr']} update {s['update']:>3} revision "
             f"{s['primary']:.4f} immediate {s['immediate_revision']:.4f} "
@@ -1370,6 +1450,7 @@ def run_study(args, status, out, deadline, save):
         checkpoints_validated_and_persisted=len(status["checkpoint_log"]),
         total_updates=sum(r["updates"] for r in dev_rows + traj_rows))
     results = dict(run_id=status["run_id"], ladder=list(LADDER),
+                   scientific_names={a: SCIENTIFIC_NAME[a] for a in LADDER},
                    unavailable=unavailable,
                    selection={a: {k: s[k] for k in ("config", "lr", "update",
                                                     "primary",

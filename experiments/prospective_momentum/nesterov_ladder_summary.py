@@ -30,6 +30,10 @@ def main(run_dir):
           f"wall={st.get('wall_s')}")
     print(f"study: {st.get('study')}")
     print(f"ladder: {st.get('ladder')}")
+    for arm, name in (st.get("scientific_names") or {}).items():
+        print(f"  {name}   [code alias {arm}]")
+    print(f"realization classification: "
+          f"{st.get('realization_classification')}")
     print(f"extra parameters: {st.get('extra_parameters')}")
     print(f"executed carry (reals): {st.get('carry_executed')}")
     print(f"extra per-token work: {st.get('extra_work')}")
@@ -115,6 +119,21 @@ def main(run_dir):
               f"{part.get('recommendation') or part.get('diagnostic_recommendation')}"
               + ("" if tag == pa["primary"] else " (diagnostic only)"))
         print(f"  immediate claim on {tag}: {part['immediate_claim']}")
+    print("\n=== law versus realization (full-set primary contrasts) ===")
+    fac = pa.get("law_realization_factorial") or {}
+    for metric, row in fac.items():
+        if metric == "caveat":
+            print(f"  caveat: {row}")
+            continue
+        for k, v in row.items():
+            if v is None:
+                print(f"  {metric:<18} {k:<32} n/a")
+            elif "ci95" in v:
+                print(f"  {metric:<18} {k:<32} D {fmt(v['D'])} CI95 "
+                      f"[{fmt(v['ci95'][0])}, {fmt(v['ci95'][1])}] signs "
+                      f"{''.join(v['per_seed_sign'].values())} -> {v['label']}")
+            else:
+                print(f"  {metric:<18} {k:<32} {v}")
     print(f"\nRECOMMENDATION (primary): {pa['recommendation']}")
     print(f"basis: {pa['recommendation_basis']}")
 

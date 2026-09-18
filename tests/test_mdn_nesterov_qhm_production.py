@@ -509,10 +509,16 @@ def test_paired_analysis_is_primary_on_the_complete_heldout_set():
     assert pa["primary"] == "full"
     assert pa["recommendation"] == pa["full"]["recommendation"]
     assert set(pa["planned_primary_contrasts"]) == {
-        f"{NL.GEN}_vs_{c}" for c in NL.CONTROLS}
+        f"{NL.GEN}_vs_{c}" for c in NL.CONTROLS} | {
+        f"{NL.TSS}_vs_{NL.OPERATOR}"}
     roles = {k: v["role"] for k, v in pa["full"]["comparisons"].items()}
-    assert sum(r == "planned_primary_contrast" for r in roles.values()) == 5
-    assert sum(r == "descriptive" for r in roles.values()) == 10
+    assert sum(r == "planned_primary_contrast" for r in roles.values()) == 6
+    assert sum(r == "descriptive" for r in roles.values()) == 9
+    assert pa["realization_classification"] == \
+        "EXACTLY_EQUIVALENT_REALIZATIONS"
+    fac = pa["law_realization_factorial"]["revision"]
+    assert fac["realization_effect_generalized"]["D"] == 0.0
+    assert fac["interaction"]["identifiable"] is False
     assert "DIAGNOSTIC" in pa["mechanism_diagnostic_stable_subset"]["role"]
     for s, e in pa["stable_subset_exclusions"].items():
         assert e["excluded_episodes"] == 8          # reported ...
@@ -523,3 +529,91 @@ def test_paired_analysis_is_primary_on_the_complete_heldout_set():
         d = arrays[(NL.GEN, s)][3]["primary"] - arrays[(NL.NAG_ARM, s)][3][
             "primary"]
         assert c["per_seed"][str(s)] == pytest.approx(d, abs=0)
+
+
+# --------------------------- realizations (docs/PROSPECTIVE_REALIZATION_AUDIT) --
+def _fd_reference(p, ep, out, M, gam, T, h=1.0):
+    """Direct finite-difference realization of the law on the processing
+    state, solved from its own terms (not from a, b, c, d), float64, feeding
+    the native momentum exactly as the executed placement does."""
+    toks, gs = shell_inputs(p, ep), gates_of(out)
+    W = onp.zeros((NM.D_V, NM.D_K))
+    U, s, s_prev, R_prev = (onp.zeros_like(W) for _ in range(4))
+    lead = M / h ** 2 + (gam + T) / h
+    Ws = []
+    for (k, v, m), (al, be, mu, eta) in zip(toks, gs):
+        k, v = onp.asarray(k), onp.asarray(v)
+        Wb = al * W
+        R = m * onp.outer(Wb @ k - v, k)
+        rest = (M * (-2 * s + s_prev) / h ** 2 - gam * s / h + (s - R)
+                + T * (-s - (R - R_prev)) / h)
+        s1 = -rest / lead
+        U = mu * U + eta * s1
+        W = Wb - be * U
+        s, s_prev, R_prev = s1, s, R
+        Ws.append(W.copy())
+    return Ws
+
+
+def test_executed_generalized_is_the_direct_fd_realization():
+    p0 = params(seed=21)
+    batch = episodes(seed=88)
+    for M, gam, T in ((0.3, 0.2, 1.5), (0.8, -0.1, 0.9), (0.0, 0.0, 2.0)):
+        p = dict(p0, fil_M=jnp.asarray([M], F64),
+                 fil_gamma=jnp.asarray([gam], F64),
+                 fil_T=jnp.asarray([T], F64))
+        for i in range(0, batch["event"].shape[0], 3):
+            ep = ep_at(batch, i)
+            out = PM.rollout(FL.FILTERED, p, ep, trace=True)
+            assert maxrel(out["W_trace"],
+                          _fd_reference(p, ep, out, M, gam, T)) <= TOL
+
+
+def test_generalized_at_its_fd_boundary_is_the_executed_ordinary_fd_arm():
+    """M = 0, gamma = h - T: the executed generalized recurrence reproduces
+    the executed ordinary finite-difference arm with kappa = T/h, including
+    kappa > 1 (gamma < 0), on the production rollouts."""
+    p0 = params(seed=23)
+    batch = episodes(seed=89)
+    for kappa in (0.5, 1.0, 1.5):
+        p_gen = dict(p0, fil_M=jnp.asarray([0.0], F64),
+                     fil_gamma=jnp.asarray([1.0 - kappa], F64),
+                     fil_T=jnp.asarray([kappa], F64))
+        p_ord = dict(PM.convert_momentum(p0, OD.ORDINARY),
+                     kappa=jnp.asarray([kappa], F64))
+        for i in range(0, batch["event"].shape[0], 3):
+            ep = ep_at(batch, i)
+            a = PM.rollout(FL.FILTERED, p_gen, ep, trace=True)
+            b = PM.rollout(OD.ORDINARY, p_ord, ep, trace=True)
+            assert maxrel(a["W_trace"], b["W_trace"]) <= TOL
+            assert maxrel(a["logits"], b["logits"]) <= TOL
+
+
+ALLOWED_NAMES = {
+    "ordinary prospective \u2014 finite-difference realization",
+    "ordinary prospective \u2014 adaptive-state realization",
+    "generalized prospective \u2014 finite-difference realization",
+    "generalized prospective \u2014 adaptive-state realization",
+    "literal Nesterov", "QHM", "native MDN"}
+
+
+def test_every_arm_carries_only_the_declared_scientific_names():
+    for arm in NL.LADDER:
+        parts = NL.SCIENTIFIC_NAME[arm].split(" \u2261 ")
+        assert all(
+            (p if p in ALLOWED_NAMES else
+             "generalized prospective \u2014 " + p) in ALLOWED_NAMES
+            for p in parts), NL.SCIENTIFIC_NAME[arm]
+
+
+def test_factorial_mirrors_the_ordinary_realization_contrast():
+    comp = {f"{NL.TSS}_vs_{NL.OPERATOR}": {m: dict(
+        D=0.02, ci95=[0.01, 0.03], se_within=0.005,
+        per_seed={"501": 0.02, "502": 0.01, "503": 0.03},
+        per_seed_sign={"501": "+", "502": "+", "503": "+"}, label="BETTER")
+        for m in NL.METRICS}}
+    f = NL.factorial_decomposition(comp)["revision"]
+    r = f["realization_effect_ordinary"]
+    assert r["D"] == -0.02 and r["ci95"] == [-0.03, -0.01]
+    assert r["label"] == "WORSE" and set(r["per_seed_sign"].values()) == {"-"}
+    assert f["interaction"]["equals_minus_ordinary_realization_effect"] == 0.02
