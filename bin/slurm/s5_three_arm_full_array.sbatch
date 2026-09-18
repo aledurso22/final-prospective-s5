@@ -17,6 +17,9 @@ cd "$PROSPECTIVE_REPO"
 
 : "${S5_THREE_ARM_DATA:?set S5_THREE_ARM_DATA to the prepared official raw cache}"
 : "${S5_THREE_ARM_RUN_ROOT:?set S5_THREE_ARM_RUN_ROOT to the run directory}"
+: "${EXPECTED_COMMIT:?set EXPECTED_COMMIT to the final authoritative commit}"
+test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+test -z "$(git status --porcelain)"
 
 ARMS=(native_matched_s5 zucchet_prospective_s5 generalized_prospective_s5)
 SEEDS=(301 302 303)

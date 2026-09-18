@@ -69,7 +69,7 @@ def update_learning_rate_per_step(lr_params, state):
 NO_BC_DECAY_SSM_KEYS = frozenset({
     "B", "C", "C1", "C2", "D", "Lambda_re", "Lambda_im", "log_step",
     "norm", "gp_response_raw", "so_response_raw", "so_mu_ratio_raw",
-    "prospective_T_raw", "generalized_T_raw", "generalized_M_raw",
+    "prospective_T_raw", "generalized_T_raw", "generalized_rho_raw",
 })
 
 

@@ -12,10 +12,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from experiments.s5_three_arm_full import data
 from experiments.s5_three_arm_full import runner
 from experiments.s5_three_arm_full.finalize import restore_and_evaluate
-from s5.generalized_prospective_ssm import generalized_zoh_coefficients
+from s5.generalized_prospective_ssm import (RHO_MIN,
+                                            generalized_zoh_coefficients,
+                                            response_and_mass)
 from s5.prospective_ssm import _clocked_coefficients
 from s5.ssm import discretize_zoh
 from s5.train_helpers import no_bc_decay_group
+from s5.three_arm_recurrences import generalized_prospective_s5_zoh
 
 
 def test_protocol_uses_upstream_initializer_and_shared_stability_constraint():
@@ -52,8 +55,11 @@ def test_learning_rate_boundaries_are_fail_closed():
 
 def test_all_prospective_response_leaves_use_the_ssm_group():
     for key in ("prospective_T_raw", "generalized_T_raw",
-                "generalized_M_raw"):
+                "generalized_rho_raw"):
         assert no_bc_decay_group(key) == "ssm"
+    assert runner.T_INIT == 0.05
+    assert runner.ssm_factory("zucchet_prospective_s5")().response_init == runner.T_INIT
+    assert runner.ssm_factory("generalized_prospective_s5")().response_init == runner.T_INIT
 
 
 def test_prospective_T_zero_recovers_native_coefficients():
@@ -88,6 +94,55 @@ def test_generalized_small_mass_recovers_prospective_dynamics():
                                rtol=3e-2, atol=3e-3)
 
 
+def test_extreme_mass_ratio_raw_values_are_bounded():
+    raw = jnp.asarray([-100.0, -10.0, 0.0, 10.0, 100.0])
+    T, M = response_and_mass(raw, raw)
+    assert bool(jnp.all(T > 0))
+    assert bool(jnp.all(M > 0))
+    assert bool(jnp.all(M <= T))
+    assert bool(jnp.all(jnp.asarray(RHO_MIN) <= M / T))
+
+
+def test_generalized_spectral_radius_is_stable_for_extreme_ratios():
+    modes = jnp.asarray([-0.2 + 0.4j, -0.7 - 0.2j])
+    B = jnp.ones((2, 1), dtype=jnp.complex128)
+    step = jnp.ones(2)
+    for raw in (-4.0, 0.0, 4.0):
+        T, M = response_and_mass(jnp.full(2, raw), jnp.full(2, raw))
+        A_bar, _ = generalized_zoh_coefficients(modes, B, step, T, M)
+        radius = jnp.max(jnp.abs(jnp.linalg.eigvals(A_bar)))
+        assert float(radius) < 1.0
+
+
+def test_four_by_four_zoh_matches_large_reference_and_gradients():
+    modes = jnp.asarray([-0.3 + 0.1j, -0.6 - 0.2j])
+    B = jnp.asarray([[0.2 + 0.1j], [0.1 - 0.3j]])
+    step = jnp.asarray([0.4, 0.7])
+
+    def exact(T, M):
+        return generalized_zoh_coefficients(modes, B, step, T, M)
+
+    def reference(T, M):
+        a, b = modes * step, step[:, None] * B
+        A_bar, B_bar = generalized_prospective_s5_zoh(
+            a, b, M, jnp.ones_like(M), T)
+        return A_bar, B_bar
+
+    T, M = jnp.asarray([0.05, 0.08]), jnp.asarray([0.025, 0.04])
+    got = exact(T, M)
+    want = reference(T, M)
+    for left, right in zip(got, want):
+        np.testing.assert_allclose(left, right, rtol=1e-6, atol=1e-7)
+    for index in (0, 1):
+        grad_exact = jax.grad(lambda t, m: jnp.real(exact(t, m)[index]).sum(),
+                              argnums=(0, 1))(T, M)
+        grad_reference = jax.grad(
+            lambda t, m: jnp.real(reference(t, m)[index]).sum(),
+            argnums=(0, 1))(T, M)
+        for left, right in zip(grad_exact, grad_reference):
+            np.testing.assert_allclose(left, right, rtol=1e-5, atol=1e-6)
+
+
 def test_runner_has_no_historical_gp_production_imports():
     source = inspect.getsource(runner)
     assert "s5.gp_ssm" not in source
@@ -105,8 +160,8 @@ def test_one_actual_training_step_checkpoint_restore_and_finalizer_eval(monkeypa
     for arm in runner.ARM_ORDER:
         state = runner.init_state(arm, 301)
         model = runner.model_for(arm, True)
-        state, loss = runner.train_step(
-            state, jax.random.PRNGKey(77), x, y, jnp.ones((2, 8)), model, True)
+        state, loss = runner.train_one_batch(
+            state, jax.random.PRNGKey(77), x, y, model, 0, 10)
         assert np.isfinite(float(loss))
         checkpoint = tmp_path / f"{arm}.msgpack"
         from flax import serialization
@@ -116,3 +171,28 @@ def test_one_actual_training_step_checkpoint_restore_and_finalizer_eval(monkeypa
         result = restore_and_evaluate(row, (x, y))
         assert result["n"] == 2
         assert 0.0 <= result["accuracy"] <= 1.0
+
+
+def test_actual_train_step_sees_scheduled_optimizer_rates(monkeypatch):
+    monkeypatch.setattr(runner, "BATCH_SIZE", 2)
+    monkeypatch.setattr(runner, "SEQ_LEN", 8)
+    state = runner.init_state("native_matched_s5", 301)
+    model = runner.model_for("native_matched_s5", True)
+    x = jnp.ones((2, 8, 1), dtype=jnp.float32)
+    y = jnp.asarray([0, 1])
+    captured = []
+
+    def capture(current, *args):
+        captured.append(float(current.opt_state.inner_states[
+            "regular"].inner_state.hyperparams["learning_rate"]))
+        return current, jnp.asarray(0.0)
+
+    monkeypatch.setattr(runner, "train_step", capture)
+    steps_per_epoch = 10
+    for step in (0, steps_per_epoch - 1, steps_per_epoch,
+                 steps_per_epoch * runner.EPOCHS - 1):
+        runner.train_one_batch(state, jax.random.PRNGKey(step), x, y,
+                               model, step, steps_per_epoch)
+    expected = [runner.learning_rate_at_step(step, steps_per_epoch)[0]
+                for step in (0, 9, 10, 399)]
+    np.testing.assert_allclose(captured, expected, rtol=1e-6, atol=1e-8)

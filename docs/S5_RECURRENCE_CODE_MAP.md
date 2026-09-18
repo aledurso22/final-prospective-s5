@@ -19,16 +19,10 @@ project lineage also contains old generalized CLI/wrapper additions in
 |---|---|---|---|---|---|---|---|
 | Native S5 recurrence under the shared stability constraint | `s_next = Lambda_bar*s + B_bar*x` | One complex diagonal S5 state per mode | Native `Lambda`, `B`, `C`, `D`, `log_step` | `s5/ssm.py:apply_ssm`, `s5/ssm.py:S5SSM.__call__` | Reference: no recurrence modification | Pinned-upstream identity tests | Baseline scan and readout cost |
 | Zucchet prospective S5 recurrence | `(I-T a)s_dot = a s + b x + T b x_dot`; exact ZOH after derivative-free realization | One ordinary S5 history state `u`; observed `s=u+d_x x` | Native parameters plus positive `T` (`prospective_T_raw`) | `s5/prospective_ssm.py:_clocked_coefficients`, `ProspectiveS5SSM.__call__` | Isolated coefficient and scan implementation | `T→0` recovers native coefficients; `M=0,γ=1` is the generalized boundary | One extra parameter vector and tied input feedthrough; same state order |
-| Generalized prospective S5 recurrence `(M,gamma,T)` | `M s_ddot + (gamma-Ta) s_dot - a s = b x + T b x_dot`; exact augmented-matrix ZOH | Two-component state `(s,w)`, `w=M s_dot-T(as+bx)` | Native parameters plus positive `T` and `M` (`generalized_T_raw`, `generalized_M_raw`); `gamma=1` fixed | `s5/generalized_prospective_ssm.py:generalized_zoh_coefficients`, `GeneralizedProspectiveS5SSM.__call__` | Isolated 2x2 coefficient and block-scan implementation | `M→0` recovers Zucchet dynamics in the tested boundary regime | Two state components, dense 2x2 block exponential, and two recurrence parameter vectors |
+| Generalized prospective S5 recurrence `(M,gamma,T)` | `M s_ddot + (gamma-Ta) s_dot - a s = b x + T b x_dot`; exact 4x4 augmented ZOH | Two-component state `(s,w)`, `w=M s_dot-T(as+bx)` | Native parameters plus positive `T` and bounded ratio `rho` (`generalized_T_raw`, `generalized_rho_raw`), `M=rho*T`; `gamma=1` fixed | `s5/generalized_prospective_ssm.py:generalized_zoh_coefficients`, `GeneralizedProspectiveS5SSM.__call__` | Isolated 2x2 coefficient and block-scan implementation | `M→0` recovers Zucchet dynamics in the tested boundary regime | Two state components, exact 4x4 exponential, and two recurrence parameter vectors |
 
 The line references above are intentionally function-level rather than a claim
-that the native file was edited. To inspect the actual patch:
-
-```bash
-git diff origin/stable-generalized-prospective-s5...HEAD -- \
-  s5/three_arm_recurrences.py s5/gp_coefficients.py s5/gp_second_order.py \
-  experiments/s5_three_arm_full/runner.py
-```
+that the native file was edited.
 
 Native project base commit:
 
@@ -41,14 +35,6 @@ Upstream S5 to local-native audit:
 ```bash
 git diff 3c18fdb6b06414da35e77b94b9cd855f6a95ef17...HEAD -- \
   s5/ssm.py run_train.py s5/train.py s5/train_helpers.py
-```
-
-Local-native to recurrence audit:
-
-```bash
-git diff origin/stable-generalized-prospective-s5...HEAD -- \
-  s5/three_arm_recurrences.py s5/gp_coefficients.py s5/gp_second_order.py \
-  s5/gp_ssm.py experiments/s5_three_arm_full
 ```
 
 Authoritative three-arm diffs:
@@ -73,8 +59,8 @@ The array and finalizer are inspectable without invoking the training runner:
 sed -n '1,220p' bin/slurm/s5_three_arm_full_array.sbatch
 sed -n '1,220p' bin/slurm/s5_three_arm_full_finalize.sbatch
 git diff --no-ext-diff 2ee2fa8040611ca8dd552b9cd9c45d077386d3c1..HEAD -- \
-  s5/three_arm_recurrences.py s5/gp_coefficients.py s5/gp_second_order.py \
-  s5/gp_ssm.py experiments/s5_three_arm_full
+  s5/ssm.py s5/prospective_ssm.py s5/generalized_prospective_ssm.py \
+  s5/three_arm_factory.py experiments/s5_three_arm_full/runner.py
 ```
 
 Compact transition summary:

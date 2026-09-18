@@ -8,6 +8,8 @@ from jax.scipy.linalg import expm
 
 from .ssm import S5SSM
 
+RHO_MIN = 1e-4
+
 
 def _block_operator(q_i, q_j):
     A_i, b_i = q_i
@@ -25,34 +27,43 @@ def generalized_zoh_coefficients(Lambda, B_tilde, step, response, mass):
     ], axis=-2)
     B = np.stack([response[:, None] * b / mass[:, None],
                   (1.0 - response / mass)[:, None] * b], axis=-2)
-    augmented = np.zeros((A.shape[0], 2 + B.shape[-1], 2 + B.shape[-1]),
-                         dtype=A.dtype)
-    augmented = augmented.at[:, :2, :2].set(A)
-    augmented = augmented.at[:, :2, 2:].set(B)
-    exponential = jax.vmap(expm)(augmented)
-    return exponential[:, :2, :2], exponential[:, :2, 2:]
+    K = np.zeros((A.shape[0], 4, 4), dtype=A.dtype)
+    K = K.at[:, :2, :2].set(A)
+    K = K.at[:, :2, 2:4].set(np.eye(2, dtype=A.dtype))
+    exponential = jax.vmap(expm)(K)
+    A_bar = exponential[:, :2, :2]
+    G = exponential[:, :2, 2:4]
+    B_bar = np.einsum("pij,pjh->pih", G, B)
+    return A_bar, B_bar
+
+
+def response_and_mass(T_raw, rho_raw):
+    """Return ``T=softplus(T_raw)`` and ``M=rho*T`` with bounded rho."""
+    response = jax.nn.softplus(T_raw)
+    rho = RHO_MIN + (1.0 - RHO_MIN) * jax.nn.sigmoid(rho_raw)
+    return response, rho * response
 
 
 class GeneralizedProspectiveS5SSM(S5SSM):
     """Exact-ZOH ``(M,gamma=1,T)`` recurrence with two carried states."""
 
-    response_init: float = 0.3
-    mass_init: float = 0.15
+    response_init: float = 0.05
+    rho_init: float = 0.5
 
     def setup(self):
         super().setup()
         response_raw = np.log(np.expm1(self.response_init)).astype(np.float32)
-        mass_raw = np.log(np.expm1(self.mass_init)).astype(np.float32)
+        rho_raw = np.log(self.rho_init / (1.0 - self.rho_init)).astype(np.float32)
         self.generalized_T_raw = self.param(
             "generalized_T_raw",
             lambda rng, shape: np.full(shape, response_raw, dtype=np.float32),
             (self.P,))
-        self.generalized_M_raw = self.param(
-            "generalized_M_raw",
-            lambda rng, shape: np.full(shape, mass_raw, dtype=np.float32),
+        self.generalized_rho_raw = self.param(
+            "generalized_rho_raw",
+            lambda rng, shape: np.full(shape, rho_raw, dtype=np.float32),
             (self.P,))
-        response = jax.nn.softplus(self.generalized_T_raw)
-        mass = jax.nn.softplus(self.generalized_M_raw)
+        response, mass = response_and_mass(
+            self.generalized_T_raw, self.generalized_rho_raw)
         B_tilde = self.B[..., 0] + 1j * self.B[..., 1]
         step = self.step_rescale * np.exp(self.log_step[:, 0])
         self.generalized_A_bar, self.generalized_B_bar = generalized_zoh_coefficients(
@@ -76,8 +87,8 @@ class GeneralizedProspectiveS5SSM(S5SSM):
         return ys + jax.vmap(lambda value: self.D * value)(input_sequence)
 
 
-def init_generalized_prospective_S5SSM(response_init=0.3, mass_init=0.15,
+def init_generalized_prospective_S5SSM(response_init=0.05, rho_init=0.5,
                                        **s5_kwargs):
     return partial(GeneralizedProspectiveS5SSM,
-                   response_init=response_init, mass_init=mass_init,
+                   response_init=response_init, rho_init=rho_init,
                    **s5_kwargs)

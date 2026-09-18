@@ -100,8 +100,13 @@ Ta/M & 1/M\\
 \begin{bmatrix}Tb/M\\(1-T/M)b\end{bmatrix}x.
 \]
 
-The production transition is the exact augmented matrix exponential over one
+The production transition uses the exact 4×4 augmented construction over one
 unit interval:
+
+\[
+K=\begin{bmatrix}A&I_2\\0&0\end{bmatrix},\quad E=e^K,\quad
+A_{bar}=E_{1:2,1:2},\quad G=E_{1:2,3:4},\quad B_{bar}=GB.
+\]
 
 \[
 z_{k+1}=e^{A}z_k+A^{-1}(e^A-I)B x_k,
@@ -114,8 +119,10 @@ uses \(M>0\) because the finite-dimensional second-order parameterization is
 singular at exactly zero mass. The equation/identity tests verify the exact
 zero-mass coefficient boundary and convergence of the production transition
 to it as \(M\downarrow0\) within the declared numerical domain. In production,
-\(\gamma=1\) is fixed as the normalized damping gauge; only \(T\) and the
-positive mass ratio \(M/T\) are learned. Allowing \(\gamma\) to learn would
+\(\gamma=1\) is fixed as the normalized damping gauge; both prospective arms
+share `T_INIT`, and the generalized arm learns
+\(\rho=RHO_{MIN}+(1-RHO_{MIN})\sigma(\rho_{raw})\) with \(M=\rho T\).
+Allowing \(\gamma\) to learn would
 add a fourth recurrence degree of freedom and is not part of this comparison.
 
 ## Training contract
@@ -131,9 +138,10 @@ published Speech Commands configuration, which uses `clip_eigs=False`.
 
 Speech Commands v0.02 uses the ten selected keywords, raw waveforms of length
 16,000, and the official `validation_list.txt` and `testing_list.txt`
-assignments. Training-derived per-sample-position raw-audio normalization
-follows upstream S5's `normalize_all_data` convention and is recorded in a
-dedicated cache manifest. Training and validation arrays are opened by array
+assignments. Training-derived raw-audio normalization follows upstream S5's
+`normalize_all_data` convention: one training statistic per input channel over
+examples and time, recorded in a dedicated cache manifest. Training and
+validation arrays are opened by array
 tasks; the test array is opened once, only by the finalizer after all nine
 tasks succeed.
 
@@ -147,7 +155,7 @@ SSM learning rate `0.002`, upstream `noBCdecay` parameter-group exceptions,
 weight decay `0.04`, one warm-up epoch over exactly `steps_per_epoch` steps,
 then cosine annealing over the remaining steps, and paired seeds `301`, `302`,
 `303`. The prospective response leaves (`prospective_T_raw`,
-`generalized_T_raw`, and `generalized_M_raw`) are explicitly in the SSM Adam
+`generalized_T_raw`, and `generalized_rho_raw`) are explicitly in the SSM Adam
 group and receive no AdamW decay.
 The checkpoint is the first epoch attaining the highest validation accuracy;
 validation cross-entropy breaks ties. Test accuracy and test cross-entropy are
@@ -191,3 +199,15 @@ from this workstation: cluster access and the current allocation are not
 available here, and this checkpoint is intentionally not launched. Its
 measurements must be recorded before production submission; no runtime or
 VRAM value is claimed by this protocol.
+
+The preflight-only command is:
+
+```bash
+EXPECTED_COMMIT=<authoritative-commit> \
+  bash bin/run_experiments/cluster_s5_three_arm_preflight.sh
+```
+
+It performs one exact-shape batch-16, sequence-16,000 forward/backward update
+per arm, records compile time, step time, peak VRAM, and finite-gradient
+status, and never opens the test split. Full training remains a separate
+command and must not be submitted until this preflight succeeds.

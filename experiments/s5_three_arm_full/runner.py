@@ -34,6 +34,7 @@ SCIENTIFIC_NAMES = {
 }
 ARM_ORDER = tuple(SCIENTIFIC_NAMES)
 SEEDS = (301, 302, 303)
+T_INIT, RHO_INIT = 0.05, 0.5
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ ARM_CONFIGS = {
                                 "state_dimension": 128},
     "generalized_prospective_s5": {"shared": SHARED_CONFIG,
                                     "recurrence_constructor": "init_generalized_prospective_S5SSM",
-                                    "extra_parameters": ("T", "M"),
+                                    "extra_parameters": ("T", "rho"),
                                     "state_dimension": 256},
 }
 
@@ -120,10 +121,10 @@ def ssm_factory(arm):
     if arm == "native_matched_s5":
         return init_S5SSM(**kw)
     if arm == "zucchet_prospective_s5":
-        return init_prospective_S5SSM(response_init=0.05, **kw)
+        return init_prospective_S5SSM(response_init=T_INIT, **kw)
     if arm == "generalized_prospective_s5":
         return init_generalized_prospective_S5SSM(
-            response_init=0.3, mass_init=0.15, **kw)
+            response_init=T_INIT, rho_init=RHO_INIT, **kw)
     raise ValueError(arm)
 
 
@@ -186,6 +187,26 @@ def learning_rate_at_step(step, steps_per_epoch):
             float(function(local_step, SSM_LR, end_step, LR_FINAL)))
 
 
+def apply_scheduled_learning_rate(state, step, steps_per_epoch):
+    """Set both optimizer rates for the update at ``step``."""
+    warmup_steps = steps_per_epoch * WARMUP_END
+    if step < warmup_steps:
+        decay, schedule_step, end_step = linear_warmup, step, warmup_steps
+    else:
+        decay, schedule_step, end_step = (
+            cosine_annealing, step - warmup_steps,
+            steps_per_epoch * (EPOCHS - WARMUP_END))
+    return update_learning_rate_per_step(
+        (decay, SSM_LR, LR, schedule_step, end_step, "noBCdecay", LR_FINAL),
+        state)[0]
+
+
+def train_one_batch(state, rng, xb, yb, model, step, steps_per_epoch):
+    state = apply_scheduled_learning_rate(state, step, steps_per_epoch)
+    return train_step(state, rng, xb, yb,
+                      jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
+
+
 def evaluate(state, model, x, y):
     losses, correct, count = [], 0, 0
     for start in range(0, len(y), BATCH_SIZE):
@@ -212,19 +233,8 @@ def train_arm(arm, seed, data, checkpoint_dir):
                                         seed, epoch, drop_last=True):
             xb, yb = batch_arrays(*data["train"], indices)
             rng = jax.random.PRNGKey(seed * 1000 + step)
-            state, _ = train_step(
-                state, rng, xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)),
-                train_model, True)
-            if step < steps_per_epoch * WARMUP_END:
-                decay, schedule_step, end_step = (linear_warmup, step,
-                                                  steps_per_epoch * WARMUP_END)
-            else:
-                decay, schedule_step, end_step = (
-                    cosine_annealing, step - steps_per_epoch * WARMUP_END,
-                    steps_per_epoch * (EPOCHS - WARMUP_END))
-            state, _ = update_learning_rate_per_step(
-                (decay, SSM_LR, LR, schedule_step, end_step, "noBCdecay", LR_FINAL),
-                state)
+            state, _ = train_one_batch(
+                state, rng, xb, yb, train_model, step, steps_per_epoch)
             step += 1
         val = evaluate(state, eval_model, *data["val"])
         os.makedirs(checkpoint_dir, exist_ok=True)
