@@ -321,6 +321,7 @@ def test_verdict_rule_uses_the_paired_difference():
 
 
 def _comp(labels):
+    """labels: {"a_vs_b": {metric: label}} in the ladder orientation."""
     out = {}
     for key, lab in labels.items():
         out[key] = {m: dict(label=lab.get(m, "INDETERMINATE"))
@@ -328,29 +329,150 @@ def _comp(labels):
     return out
 
 
-def _rows(prim):
-    return [dict(rule=a, final_validation_summary=dict(primary=v))
-            for a, v in prim.items()]
+def _gen_vs_all(**labs):
+    return {f"{NL.GEN}_vs_{c}": dict(labs) for c in NL.CONTROLS}
 
 
-def test_recommendation_mapping_is_pre_registered():
-    rows = _rows({NL.TSS: 0.8, NL.NAG_ARM: 0.82, NL.QHM_ARM: 0.81})
-    gen_better = _comp({f"{NL.GEN}_vs_{NL.NAG_ARM}": dict(revision="BETTER")})
-    assert NL.recommend(gen_better, rows, [])[0] == \
+def test_recommendation_mapping_uses_each_control_individually():
+    everything_better = _comp(_gen_vs_all(revision="BETTER",
+                                          immediate_revised="BETTER"))
+    assert NL.recommend(everything_better, [])[0] == \
+        "GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE"
+    # beating all but ONE control is not enough (no strongest-comparator
+    # choice from results)
+    one_short = _gen_vs_all(revision="BETTER")
+    one_short[f"{NL.GEN}_vs_{NL.OPERATOR}"] = dict(revision="INDETERMINATE")
+    assert NL.recommend(_comp(one_short), [])[0] != \
+        "GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE"
+    # an unavailable Nesterov is not an applicable control
+    no_nag = _gen_vs_all(revision="BETTER")
+    del no_nag[f"{NL.GEN}_vs_{NL.NAG_ARM}"]
+    assert NL.recommend(_comp(no_nag), [NL.NAG_ARM])[0] == \
         "GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE"
     nag_best = _comp({
         f"{NL.NAG_ARM}_vs_{NL.NATIVE}": dict(revision="BETTER"),
+        f"{NL.NAG_ARM}_vs_{NL.OPERATOR}": dict(revision="BETTER"),
         f"{NL.NAG_ARM}_vs_{NL.TSS}": dict(revision="EQUIVALENT_WITHIN_MARGIN"),
-        f"{NL.NAG_ARM}_vs_{NL.QHM_ARM}": dict(revision="BETTER"),
+        f"{NL.QHM_ARM}_vs_{NL.NAG_ARM}": dict(revision="WORSE"),
         f"{NL.GEN}_vs_{NL.NAG_ARM}": dict(revision="WORSE_BELOW_MARGIN")})
-    assert NL.recommend(nag_best, rows, [])[0] == \
-        "RUN_LITERAL_NESTEROV_AT_SCALE"
-    reduces = _comp({f"{NL.GEN}_vs_{NL.NAG_ARM}": dict(
+    assert NL.recommend(nag_best, [])[0] == "RUN_LITERAL_NESTEROV_AT_SCALE"
+    reduces = _comp({f"{NL.GEN}_vs_{NL.OPERATOR}": dict(
         revision="EQUIVALENT_WITHIN_MARGIN",
         immediate_revised="EQUIVALENT_WITHIN_MARGIN")})
-    assert NL.recommend(reduces, rows, [])[0] == \
+    assert NL.recommend(reduces, [])[0] == \
         "GENERALIZED_GP_REDUCES_TO_KNOWN_OPTIMIZER"
-    assert NL.recommend(_comp({}), rows, [])[0] == "NO_GO"
-    labels = {NL.recommend(c, rows, [])[0]
-              for c in (gen_better, nag_best, reduces, _comp({}))}
+    assert NL.recommend(_comp({}), [])[0] == "NO_GO"
+    labels = {NL.recommend(c, [])[0]
+              for c in (everything_better, nag_best, reduces, _comp({}))}
     assert "REDUNDANT_CONTROL_CONFIRMED" not in labels
+
+
+def test_immediate_claim_needs_every_applicable_control():
+    ok = _comp(_gen_vs_all(immediate_revised="BETTER"))
+    assert NL.immediate_claim(ok, [])["claim_holds"]
+    short = _gen_vs_all(immediate_revised="BETTER")
+    short[f"{NL.GEN}_vs_{NL.NAG_ARM}"] = dict(
+        immediate_revised="BETTER_BELOW_MARGIN")
+    assert not NL.immediate_claim(_comp(short), [])["claim_holds"]
+
+
+def test_all_fifteen_pairs_and_orientation():
+    assert NL.LADDER == (NL.NATIVE, NL.OPERATOR, NL.TSS, NL.NAG_ARM,
+                         NL.QHM_ARM, NL.GEN)
+    pairs = {frozenset(p) for p in NL.COMPARISONS}
+    assert len(NL.COMPARISONS) == 15 and len(pairs) == 15
+    comp = _comp({f"{NL.QHM_ARM}_vs_{NL.NAG_ARM}": dict(revision="WORSE")})
+    assert NL.label(comp, NL.NAG_ARM, NL.QHM_ARM, "revision") == "BETTER"
+
+
+def test_combine_reports_every_seed_sign():
+    per = {s: {m: dict(difference=d, se=0.001) for m in NL.METRICS}
+           for s, d in zip((501, 502, 503), (0.02, -0.01, 0.0))}
+    c = NL.combine(per)["immediate_revised"]
+    assert c["per_seed_sign"] == {"501": "+", "502": "-", "503": "0"}
+
+
+# ----------------------------------------- Nesterov applicability records --
+def test_episode_violations_and_the_common_stable_subset():
+    L = 6
+    event = onp.array([[WRITE, QUERY, WRITE, 2, WRITE, QUERY]] * 8)
+    gates = onp.zeros((8, L, 4))
+    gates[..., 0], gates[..., 1], gates[..., 2], gates[..., 3] = \
+        0.5, 0.5, 0.5, 1.0                           # stable: lhs < 0
+    gates[5, 2] = (0.9, 1.0, 0.9, 1.9)               # a violating WRITE
+    gates[1, 1] = (0.9, 1.0, 0.9, 1.9)               # on a QUERY: ignored
+    n_bad, _ = NL.episode_violations(gates, event)
+    assert n_bad.tolist() == [0, 0, 0, 0, 0, 1, 0, 0]
+    keep = NL.stable_subset(8, n_bad)
+    assert keep.tolist() == [True] * 4 + [False] * 4  # whole block 1 excluded
+    assert NL.stable_subset(8, None).all()
+
+
+def test_grouped_aggregates_on_a_subset_of_whole_blocks():
+    batch = TT.generate_batch(99, 128)
+    n = batch["event"].shape[0]
+    rng = onp.random.RandomState(2)
+    q = (batch["event"] == QUERY).astype(F64)
+    correct = (rng.rand(*q.shape) < 0.6) * q
+    ce = rng.rand(*q.shape) * q
+    viol = onp.zeros(n, dtype=int)
+    viol[[3, 50, 130]] = 1
+    keep = NL.stable_subset(n, viol)
+    assert int((~keep).sum()) == 12
+    full, loo = NL.grouped_aggregates(correct, ce, batch, keep)
+    sub = {k: v[keep] for k, v in batch.items()}
+    ref = TT.aggregate(correct[keep], ce[keep], sub)
+    for f in NL.METRICS.values():
+        assert f(full) == f(ref) and onp.isfinite(f(full))
+    rec = NL.exclusion_record(keep, viol, batch)
+    assert rec["excluded_episodes"] == 12 and rec["excluded_blocks"] == 3
+
+
+# ------------------------------- the completed two-tap arm, unchanged ------
+#: sha256 of experiments/prospective_momentum/ordinary.py as executed by the
+#: completed temporal-response (f3227df) and retention-aware (84389be) runs
+ORDINARY_SHA256 = ("a8f0f31370e1d5bb27bf58cbd8460a268ade34b8eac77960a145d5cc"
+                   "8ebdb51c")
+
+
+def test_two_tap_arm_is_the_completed_implementation():
+    import hashlib
+    import os
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "experiments", "prospective_momentum",
+        "ordinary.py")
+    assert hashlib.sha256(open(path, "rb").read()).hexdigest() == \
+        ORDINARY_SHA256
+    assert NL.LAW[NL.OPERATOR] == OD.ORDINARY
+    p = params()
+    a, b = NL.start_tree(NL.OPERATOR, p), NL.TC.start_tree(NL.OPERATOR, p)
+    assert set(a) == set(b) and all(onp.array_equal(onp.asarray(a[k]),
+                                                    onp.asarray(b[k]))
+                                    for k in a)
+    assert float(onp.asarray(a["kappa"])[0]) == 0.0
+
+
+def test_two_tap_hand_values_are_reproduced_bitwise():
+    """The exact 1x1 two-tap values (kappa = 1/2): W = 3/4, 31/32, 259/256."""
+    z = jnp.zeros((1, 1), F64)
+    k, v, m = jnp.ones((1,), F64), jnp.ones((1,), F64), jnp.asarray(1.0, F64)
+    h, one = jnp.asarray(0.5, F64), jnp.asarray(1.0, F64)
+    c, ws = (z, z, z), []
+    for _ in range(3):
+        c = OD.ordinary_step(c, k, v, m, h, h, h, one, h)
+        ws.append(float(c[0][0, 0]))
+    assert ws == [0.75, 0.96875, 1.01171875]
+
+
+def test_two_tap_ladder_evaluation_equals_the_completed_evaluation():
+    """The ladder evaluates the two-tap arm with EXACTLY the completed
+    study's batch function: identical metrics, bit for bit."""
+    from experiments.prospective_momentum import temporal_response as TRm
+    p = dict(NL.start_tree(NL.OPERATOR, params(seed=13)),
+             kappa=jnp.asarray([0.4], F64))
+    batch = TT.generate_batch(31, 8)
+    m_new, _ = NL.evaluate(NL.OPERATOR, p, batch)
+    m_old, _ = TRm.evaluate_arm(NL.OPERATOR, p, batch)
+    for f in NL.METRICS.values():
+        assert f(m_new) == f(m_old)
+    assert m_new["state_norms"] == m_old["state_norms"]

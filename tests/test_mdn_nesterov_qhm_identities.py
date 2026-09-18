@@ -348,3 +348,37 @@ def test_every_form_is_causal():
         a = OF.run(step, c0, toks, gs, *extra)
         b = OF.run(step, c0, toks2, gs2, *extra)
         assert a[:cut] == b[:cut]
+
+
+# ---------------------------------- 6. the two-tap arm versus the QHM arm --
+def test_hand_computed_two_tap_tokens():
+    """d_v = d_k = 1, k = v = m = 1, alpha = beta = mu = 1/2, eta = 1,
+    kappa = 1/2: W = 3/4, 31/32, 259/256."""
+    tok = ([F(1)], [F(1)], F(1))
+    g = (F(1, 2), F(1, 2), F(1, 2), F(1))
+    c0 = ([[F(0)]], [[F(0)]], [[F(0)]])
+    tt = OF.run(OF.two_tap_step, c0, [tok] * 3, [g] * 3, F(1, 2))
+    assert [(c[0][0][0], c[1][0][0]) for c in tt] == [
+        (F(3, 4), F(-3, 2)), (F(31, 32), F(-19, 16)),
+        (F(259, 256), F(-135, 128))]
+
+
+def test_the_ladder_qhm_arm_equals_the_two_tap_arm_only_at_kappa_zero():
+    """The ladder's QHM arm has step weights nu + (1 - nu) = 1; the two-tap's
+    QHM form has weights summing to 1 + kappa. So even with CONSTANT mu and
+    eta the two ARMS agree token by token only at kappa = 0 (nu = 1, both
+    native); for kappa > 0 the two-tap needs QHM with a step (1 + kappa)
+    beta, which the QHM arm cannot express."""
+    for _ in range(20):
+        n = 5
+        mu, eta = unit(), F(RNG.randint(1, 199), 100)
+        gs = [(unit(), unit(), mu, eta) for _ in range(n)]
+        toks = tokens(n)
+        tt0 = OF.run(OF.two_tap_step, (z(),) * 3, toks, gs, F(0))
+        q1 = OF.run(OF.qhm_step, (z(), z()), toks, gs, F(1))
+        assert [c[0] for c in tt0] == [c[0] for c in q1]
+        kappa = F(RNG.randint(1, 100), 100)
+        nu = 1 - kappa / (mu * (1 + kappa))
+        tt = OF.run(OF.two_tap_step, (z(),) * 3, toks, gs, kappa)
+        qa = OF.run(OF.qhm_step, (z(), z()), toks, gs, nu)
+        assert tt[0][0] != qa[0][0]           # first write already differs

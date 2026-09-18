@@ -22,9 +22,12 @@ gates, after the native decay as MDN Eqs. (4)-(5) apply it).
 The ladder reuses the completed temporal-response protocol UNCHANGED: task,
 episode construction, sources (seed 500 development, 501-503 final, read
 only), stream seeds, learning rates, checkpoints, selection ordering and
-metric definitions. Its native, literal-TSS and generalized arms are executed
-by the completed study's own code paths (`temporal_response.host_step`,
-`tss_containment`), not re-implemented here. Every completed module is left
+metric definitions. The ladder is native, the completed two-tap operator
+(`ordinary_prospective`, frozen implementation), literal TSS, literal
+Nesterov, QHM and generalized prospectivity. Its native, two-tap,
+literal-TSS and generalized arms are executed by the completed study's own
+code paths (`temporal_response.host_step`, `tss_containment`), not
+re-implemented here. Every completed module is left
 byte-identical; the two new rules live in this file. Registry additions are
 `setdefault` only.
 """
@@ -55,6 +58,7 @@ from experiments.nested_memory.task import WRITE                  # noqa: E402
 from experiments.prospective_momentum import dynamics as PD       # noqa: E402
 from experiments.prospective_momentum import filtered as FL       # noqa: E402
 from experiments.prospective_momentum import model as PM          # noqa: E402
+from experiments.prospective_momentum import ordinary as OD       # noqa: E402
 from experiments.prospective_momentum import replication_sources as RS  # noqa
 from experiments.prospective_momentum import study as ST          # noqa: E402
 from experiments.prospective_momentum import temporal_response as TR  # noqa
@@ -83,21 +87,33 @@ PD.CARRY.setdefault(QHM, CARRY_REALS)
 
 # ------------------------------------------------------------------- arms --
 NATIVE, TSS, GEN, ANCHOR = TC.NATIVE, TC.TSS, TC.GEN, TC.ANCHOR
+#: the completed studies' learned two-tap operator (`ordinary_prospective`),
+#: executed by EXACTLY their code paths: same rule, kappa start 0, projection,
+#: validation, checkpoints, selection ordering and evaluation
+OPERATOR = TC.OPERATOR
 NAG_ARM, QHM_ARM = "literal_nesterov", "qhm"
 #: the declared ladder, in order
-LADDER = (NATIVE, TSS, NAG_ARM, QHM_ARM, GEN)
-LAW = {NATIVE: "momentum_delta", TSS: FL.FILTERED, GEN: FL.FILTERED,
-       NAG_ARM: NESTEROV, QHM_ARM: QHM, ANCHOR: "momentum_delta"}
+LADDER = (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM, GEN)
+LAW = {NATIVE: "momentum_delta", OPERATOR: OD.ORDINARY, TSS: FL.FILTERED,
+       GEN: FL.FILTERED, NAG_ARM: NESTEROV, QHM_ARM: QHM,
+       ANCHOR: "momentum_delta"}
 NEW_ARMS = (NAG_ARM, QHM_ARM)
-DISPLAY = {NATIVE: TC.ARM_DISPLAY[NATIVE], TSS: TC.ARM_DISPLAY[TSS],
-           GEN: TC.ARM_DISPLAY[GEN], ANCHOR: TC.ARM_DISPLAY[ANCHOR],
+#: the controls generalized prospectivity must beat INDIVIDUALLY
+CONTROLS = (NATIVE, OPERATOR, TSS, NAG_ARM, QHM_ARM)
+DISPLAY = {NATIVE: TC.ARM_DISPLAY[NATIVE], OPERATOR: TC.ARM_DISPLAY[OPERATOR],
+           TSS: TC.ARM_DISPLAY[TSS], GEN: TC.ARM_DISPLAY[GEN],
+           ANCHOR: TC.ARM_DISPLAY[ANCHOR],
            NAG_ARM: PD.DISPLAY[NESTEROV], QHM_ARM: PD.DISPLAY[QHM]}
-EXTRA_PARAMETERS = {NATIVE: 0, TSS: 1, NAG_ARM: 0, QHM_ARM: 1, GEN: 3}
-CARRY_EXECUTED = {NATIVE: 2 * NM.D_V * NM.D_K, TSS: FL.CARRY_EXECUTED,
-                  NAG_ARM: CARRY_REALS, QHM_ARM: CARRY_REALS,
-                  GEN: FL.CARRY_EXECUTED}
+EXTRA_PARAMETERS = {NATIVE: 0, OPERATOR: 1, TSS: 1, NAG_ARM: 0, QHM_ARM: 1,
+                    GEN: 3}
+CARRY_EXECUTED = {NATIVE: 2 * NM.D_V * NM.D_K, OPERATOR: OD.CARRY_REALS,
+                  TSS: FL.CARRY_EXECUTED, NAG_ARM: CARRY_REALS,
+                  QHM_ARM: CARRY_REALS, GEN: FL.CARRY_EXECUTED}
 #: extra per-token work over native, in multiply-adds on the d_v x d_k state
-EXTRA_WORK = {NATIVE: "none", TSS: "processing filter: 4 matrix axpys",
+EXTRA_WORK = {NATIVE: "none",
+              OPERATOR: "two-tap Rpros: 1 matrix axpy; previous residual "
+                        "carried",
+              TSS: "processing filter: 4 matrix axpys",
               NAG_ARM: "lookahead L = Wbar - (beta mu) U: 1 matrix axpy",
               QHM_ARM: "mixed step nu U' + (1-nu) eta R: 2 matrix axpys",
               GEN: "processing filter: 4 matrix axpys"}
@@ -136,9 +152,16 @@ METRICS = {
     "untouched_intervening_writes": lambda m: m["revision"]["by_condition"][
         "untouched_probe"]["intervening_writes"],
 }
-COMPARISONS = ((GEN, TSS), (GEN, NAG_ARM), (GEN, QHM_ARM), (GEN, NATIVE),
-               (NAG_ARM, TSS), (NAG_ARM, QHM_ARM), (NAG_ARM, NATIVE),
-               (QHM_ARM, TSS), (QHM_ARM, NATIVE), (TSS, NATIVE))
+#: EVERY pair of the ladder, oriented later-versus-earlier in ladder order
+COMPARISONS = tuple((LADDER[j], LADDER[i]) for j in range(len(LADDER))
+                    for i in range(j))
+FLIP = {"BETTER": "WORSE", "WORSE": "BETTER",
+        "BETTER_BELOW_MARGIN": "WORSE_BELOW_MARGIN",
+        "WORSE_BELOW_MARGIN": "BETTER_BELOW_MARGIN",
+        "EQUIVALENT_WITHIN_MARGIN": "EQUIVALENT_WITHIN_MARGIN",
+        "INDETERMINATE": "INDETERMINATE"}
+#: the frozen-token condition of literal Nesterov (audit s2), unit key
+NAG_CONDITION = "(beta eta - 1)(alpha + mu + alpha mu) < 1"
 RECOMMENDATIONS = ("REDUNDANT_CONTROL_CONFIRMED",
                    "RUN_LITERAL_NESTEROV_AT_SCALE",
                    "GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE",
@@ -229,6 +252,10 @@ def _episode_loss(rule, p, ep):
     aux = dict(ce=ce, correct=correct.astype(jnp.float32),
                q=q.astype(jnp.float32), w_norm=out["w_norm"],
                aux_norm=out["aux_norm"])
+    if rule == NESTEROV:
+        # the gates RETURNED by this rollout, for the episode-level
+        # applicability record of the declared frozen-token condition
+        aux["gates"] = jnp.stack(out["gates"], axis=-1)
     return jnp.sum(ce) / jnp.maximum(jnp.sum(q), 1.0), aux
 
 
@@ -363,10 +390,12 @@ def evaluate(arm, p, eps_np, chunk=128, keep_arrays=False):
     else:
         batch_fn = TC.eval_batch_f if law == FL.FILTERED else ST.eval_batch
     n = eps_np["event"].shape[0]
-    cs, ces, wn, an, procs, sink = [], [], [], [], [], []
+    cs, ces, wn, an, procs, sink, gts = [], [], [], [], [], [], []
     for i in range(0, n, chunk):
         sl = {k: jnp.asarray(eps_np[k][i:i + chunk]) for k in TT.MODEL_INPUTS}
         aux = batch_fn(law, p, sl)
+        if law == NESTEROV:
+            gts.append(onp.asarray(aux["gates"], onp.float64))
         cs.append(onp.asarray(aux["correct"]))
         ces.append(onp.asarray(aux["ce"]))
         wn.append(onp.asarray(aux["w_norm"]))
@@ -389,9 +418,35 @@ def evaluate(arm, p, eps_np, chunk=128, keep_arrays=False):
             finite=bool(proc.size and onp.all(onp.isfinite(proc))))
         sets = TC.executed_sets_from(sink)
         m["executed_coefficient_sets"] = sets
+    if law == NESTEROV:
+        m["nesterov_episode_applicability"] = episode_applicability(
+            onp.concatenate(gts), eps_np["event"])
     if keep_arrays:
-        return m, sets, (correct, ce)
+        return m, sets, (correct, ce,
+                         onp.concatenate(gts) if gts else None)
     return m, sets
+
+
+def episode_violations(gates, event):
+    """Per episode: the number of WRITE tokens whose executed gates violate
+    literal Nesterov's frozen-token condition, evaluated in float64 on the
+    gates the rollout returned. `gates` is (episodes, tokens, 4)."""
+    a, b, mu, eta = (gates[..., i] for i in range(4))
+    lhs = (b * eta - 1.0) * (a + mu + a * mu)
+    bad = (lhs >= 1.0) & (onp.asarray(event) == WRITE)
+    return bad.sum(axis=1), lhs
+
+
+def episode_applicability(gates, event):
+    n_bad, lhs = episode_violations(gates, event)
+    writes = onp.asarray(event) == WRITE
+    return dict(condition=NAG_CONDITION,
+                episodes=int(n_bad.size),
+                episodes_with_a_violating_write=int(onp.sum(n_bad > 0)),
+                write_tokens=int(writes.sum()),
+                violating_write_tokens=int(n_bad.sum()),
+                max_lhs_on_writes=(float(lhs[writes].max())
+                                   if writes.any() else None))
 
 
 def checkpoint_failure(arm, p, opt, source_p, metrics, executed_sets):
@@ -695,17 +750,23 @@ def groups_of(n):
     return (onp.arange(n) // 4) % N_GROUPS
 
 
-def grouped_aggregates(correct, ce, batch):
-    """Full-sample aggregate and the N_GROUPS leave-one-group-out
-    aggregates, all by `temporal_task.aggregate` itself."""
+def blocks_of(n):
+    return onp.arange(n) // 4
+
+
+def grouped_aggregates(correct, ce, batch, keep=None):
+    """Aggregate on the kept episodes and the leave-one-group-out aggregates
+    over the groups still present, all by `temporal_task.aggregate` itself.
+    `keep` must consist of whole 4-episode blocks, so cells stay balanced."""
     n = batch["event"].shape[0]
+    keep = onp.ones(n, dtype=bool) if keep is None else onp.asarray(keep)
     g = groups_of(n)
-    full = TT.aggregate(correct, ce, batch)
-    loo = []
-    for j in range(N_GROUPS):
-        keep = g != j
-        sub = {k: v[keep] for k, v in batch.items()}
-        loo.append(TT.aggregate(correct[keep], ce[keep], sub))
+
+    def agg(mask):
+        sub = {k: v[mask] for k, v in batch.items()}
+        return TT.aggregate(correct[mask], ce[mask], sub)
+    full = agg(keep)
+    loo = [agg(keep & (g != j)) for j in sorted(set(g[keep].tolist()))]
     return full, loo
 
 
@@ -749,10 +810,15 @@ def verdict(D, se_w, per_seed, margin=MARGIN):
     return "INDETERMINATE"
 
 
+def sign(x):
+    return "+" if x > 0 else ("-" if x < 0 else "0")
+
+
 def combine(per_seed_stats):
     """Across final seeds: D = mean of seed differences; SE_within =
     sqrt(sum se_s^2)/n (episode sampling, trained models fixed); SE_between =
-    SD of seed differences / sqrt(n) (training-seed variation, reported)."""
+    SD of seed differences / sqrt(n) (training-seed variation, reported);
+    the sign of every seed's difference, reported."""
     out = {}
     seeds = sorted(per_seed_stats)
     for name in METRICS:
@@ -766,87 +832,108 @@ def combine(per_seed_stats):
             D=D, se_within=se_w, ci95=[D - Z95 * se_w, D + Z95 * se_w],
             se_between_seeds=se_b, per_seed=dict(zip(map(str, seeds), d)),
             per_seed_se=dict(zip(map(str, seeds), se)),
+            per_seed_sign=dict(zip(map(str, seeds), [sign(x) for x in d])),
             label=verdict(D, se_w, d))
     return out
 
 
-def strongest(final_rows, arms):
-    """The comparator with the highest mean FINAL-VALIDATION revision accuracy
-    (the eval_validation stream at the selected endpoint, never held-out)."""
-    best, val = None, -onp.inf
-    for arm in arms:
-        v = [r["final_validation_summary"]["primary"] for r in final_rows
-             if r["rule"] == arm]
-        if v and float(onp.mean(v)) > val:
-            best, val = arm, float(onp.mean(v))
-    return best, val
+def label(comp, a, b, metric):
+    """The label of `a` against `b`, from whichever orientation was run."""
+    c = comp.get(f"{a}_vs_{b}")
+    if c is not None:
+        return c[metric]["label"]
+    c = comp.get(f"{b}_vs_{a}")
+    return None if c is None else FLIP[c[metric]["label"]]
 
 
-def recommend(comp, final_rows, unavailable):
-    """PRE-REGISTERED mapping from the paired verdicts to exactly one
-    recommendation. REDUNDANT_CONTROL_CONFIRMED is reserved for an exact
-    algebraic identity, which the audit ruled out, so the experiment cannot
-    return it."""
-    def lab(a, b, metric):
-        c = comp.get(f"{a}_vs_{b}")
-        return None if c is None else c[metric]["label"]
-    known = [a for a in (NAG_ARM, QHM_ARM) if a not in unavailable]
-    comparators = [a for a in (TSS, NAG_ARM, QHM_ARM) if a not in unavailable]
-    s_all, _ = strongest(final_rows, comparators)
-    s_known, _ = strongest(final_rows, known)
-    why = dict(strongest_comparator=s_all, strongest_known_optimizer=s_known)
-    if s_all is not None:
-        rev, ret, rec = (lab(GEN, s_all, "revision"),
-                         lab(GEN, s_all, "retention"),
-                         lab(GEN, s_all, "recall"))
-        why["generalized_vs_strongest"] = dict(revision=rev, retention=ret,
-                                               recall=rec)
-        if rev == "BETTER" and ret != "WORSE" and rec != "WORSE":
-            return "GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE", why
+def recommend(comp, unavailable):
+    """PRE-REGISTERED mapping to exactly one recommendation. No comparator is
+    chosen from results: generalized prospectivity is compared with EACH
+    applicable control individually. REDUNDANT_CONTROL_CONFIRMED is reserved
+    for an exact algebraic identity, which the audit ruled out."""
+    controls = [a for a in CONTROLS if a not in unavailable]
+    known = [a for a in (OPERATOR, NAG_ARM, QHM_ARM) if a not in unavailable]
+    why = dict(applicable_controls=controls,
+               applicable_known_optimizers=known)
+    per = {c: {m: label(comp, GEN, c, m)
+               for m in ("revision", "retention", "recall",
+                         "immediate_revised", "later_revised", "later")}
+           for c in controls}
+    why["generalized_vs_each_control"] = per
+    if controls and all(
+            per[c]["revision"] == "BETTER"
+            and per[c]["retention"] not in ("WORSE",)
+            and per[c]["recall"] not in ("WORSE",) for c in controls):
+        return "GENERALIZED_GP_RETAINS_DISTINCT_ADVANTAGE", why
     if NAG_ARM not in unavailable:
-        n_nat = lab(NAG_ARM, NATIVE, "revision")
+        others = [a for a in (OPERATOR, TSS, QHM_ARM) if a not in unavailable]
         conds = dict(
-            beats_native=n_nat == "BETTER",
-            not_worse_than_tss=lab(NAG_ARM, TSS, "revision") not in (
-                "WORSE", "WORSE_BELOW_MARGIN"),
-            not_worse_than_qhm=(QHM_ARM in unavailable or lab(
-                NAG_ARM, QHM_ARM, "revision") not in ("WORSE",
-                                                      "WORSE_BELOW_MARGIN")),
-            generalized_not_better=lab(GEN, NAG_ARM, "revision") not in (
-                "BETTER", "BETTER_BELOW_MARGIN"),
-            retention_not_worse_than_native=lab(
-                NAG_ARM, NATIVE, "retention") != "WORSE",
-            recall_not_worse_than_native=lab(
-                NAG_ARM, NATIVE, "recall") != "WORSE")
+            beats_native=label(comp, NAG_ARM, NATIVE, "revision") == "BETTER",
+            not_worse_than_each_other_control=all(
+                label(comp, NAG_ARM, o, "revision") not in (
+                    "WORSE", "WORSE_BELOW_MARGIN") for o in others),
+            generalized_not_better=label(comp, GEN, NAG_ARM, "revision")
+            not in ("BETTER", "BETTER_BELOW_MARGIN"),
+            retention_not_worse_than_native=label(
+                comp, NAG_ARM, NATIVE, "retention") != "WORSE",
+            recall_not_worse_than_native=label(
+                comp, NAG_ARM, NATIVE, "recall") != "WORSE")
         why["literal_nesterov_conditions"] = conds
         if all(conds.values()):
             return "RUN_LITERAL_NESTEROV_AT_SCALE", why
-    if s_known is not None:
-        rv = lab(GEN, s_known, "revision")
-        im = lab(GEN, s_known, "immediate_revised")
-        why["generalized_vs_strongest_known"] = dict(revision=rv,
-                                                     immediate_revised=im)
-        ok = ("EQUIVALENT_WITHIN_MARGIN", "WORSE", "WORSE_BELOW_MARGIN")
-        if rv in ok and im in ok:
-            return "GENERALIZED_GP_REDUCES_TO_KNOWN_OPTIMIZER", why
+    ok = ("EQUIVALENT_WITHIN_MARGIN", "WORSE", "WORSE_BELOW_MARGIN")
+    matched = [k for k in known
+               if per[k]["revision"] in ok and per[k]["immediate_revised"] in ok]
+    why["known_optimizers_generalized_does_not_beat"] = matched
+    if matched:
+        return "GENERALIZED_GP_REDUCES_TO_KNOWN_OPTIMIZER", why
     return "NO_GO", why
 
 
-def paired_analysis(arrays, held_np, final_rows, unavailable):
-    """Episode-paired comparisons on the ONE common held-out set, per final
-    seed, combined across seeds. Checks that the grouped full-sample
-    aggregate reproduces the evaluation's aggregate exactly."""
-    t0 = time.time()
-    grouped = {}
-    for (arm, seed), (correct, ce, m) in arrays.items():
-        if arm not in LADDER:
-            continue                   # the frozen anchor is not compared
-        full, loo = grouped_aggregates(correct, ce, held_np)
-        for name, f in METRICS.items():
-            if f(full) != f(m):
-                raise RuntimeError(f"grouped aggregate differs for {arm}/"
-                                   f"{seed}/{name}")
-        grouped[(arm, seed)] = (full, loo)
+def immediate_claim(comp, unavailable):
+    """PRE-REGISTERED: the immediate-revision claim holds only if generalized
+    prospectivity is BETTER than EACH applicable control on immediate revised
+    accuracy (all three seeds positive, paired CI above zero, >= 1 pp)."""
+    controls = [a for a in CONTROLS if a not in unavailable]
+    labels = {c: label(comp, GEN, c, "immediate_revised") for c in controls}
+    later = {c: dict(later_revised=label(comp, GEN, c, "later_revised"),
+                     later=label(comp, GEN, c, "later")) for c in controls}
+    return dict(claim_holds=bool(controls) and all(
+        v == "BETTER" for v in labels.values()),
+        immediate_revised=labels, later_versus_each_control=later,
+        controls=controls)
+
+
+def stable_subset(n, violations):
+    """Whole 4-episode blocks in which NO episode has a write token outside
+    literal Nesterov's frozen-token condition (for that seed's endpoint).
+    `violations` is per-episode counts or None (Nesterov unavailable)."""
+    if violations is None:
+        return onp.ones(n, dtype=bool)
+    blk = blocks_of(n)
+    bad_blocks = set(blk[onp.asarray(violations) > 0].tolist())
+    return ~onp.isin(blk, sorted(bad_blocks))
+
+
+def exclusion_record(keep, violations, batch):
+    n = int(keep.size)
+    fam, cond = batch["family"], batch["condition"]
+    by = {f"family{int(f)}/condition{int(c)}": dict(
+        episodes=int(onp.sum((fam == f) & (cond == c))),
+        excluded=int(onp.sum(~keep & (fam == f) & (cond == c))))
+        for f in onp.unique(fam) for c in onp.unique(cond)}
+    return dict(episodes=n, excluded_episodes=int(n - keep.sum()),
+                excluded_fraction=float((n - keep.sum()) / n),
+                episodes_with_a_violating_write=(
+                    None if violations is None
+                    else int(onp.sum(onp.asarray(violations) > 0))),
+                excluded_blocks=int(len(set(blocks_of(n)[~keep].tolist()))),
+                blocks=int(n // 4), by_family_and_condition=by,
+                rule=("whole balanced 4-episode blocks containing an episode "
+                      "with a write token outside " + NAG_CONDITION))
+
+
+def _comparisons(grouped):
     comp = {}
     for a, b in COMPARISONS:
         seeds = [s for s in SOURCE_FINAL
@@ -857,14 +944,95 @@ def paired_analysis(arrays, held_np, final_rows, unavailable):
                               grouped[(b, s)][0], grouped[(b, s)][1])
                for s in seeds}
         comp[f"{a}_vs_{b}"] = combine(per)
-    rec, why = recommend(comp, final_rows, unavailable)
+    return comp
+
+
+def paired_analysis(arrays, held_np, unavailable):
+    """Episode-paired comparisons on the ONE common held-out set.
+
+    PRIMARY: per final seed, the COMMON STABLE SUBSET - whole balanced blocks
+    in which the literal-Nesterov endpoint's executed write gates all satisfy
+    its frozen-token condition - is used for EVERY pairwise comparison, so
+    all arms are compared on the same episodes. How much was excluded is
+    reported per seed. SECONDARY: the same comparisons on the full set.
+    The grouped full-sample aggregate must reproduce the evaluation's."""
+    t0 = time.time()
+    n = held_np["event"].shape[0]
+    keep, excl = {}, {}
+    for seed in SOURCE_FINAL:
+        viol = None
+        if NAG_ARM not in unavailable and (NAG_ARM, seed) in arrays:
+            viol = episode_violations(arrays[(NAG_ARM, seed)][2],
+                                      held_np["event"])[0]
+        keep[seed] = stable_subset(n, viol)
+        excl[str(seed)] = exclusion_record(keep[seed], viol, held_np)
+    out = {}
+    for tag in ("stable_subset", "full"):
+        grouped, bad = {}, []
+        for (arm, seed), (correct, ce, _g, m) in arrays.items():
+            if arm not in LADDER:
+                continue               # the frozen anchor is not compared
+            k = keep[seed] if tag == "stable_subset" else None
+            if k is not None and not k.any():
+                bad.append(f"{arm}/{seed}: empty stable subset")
+                continue
+            full, loo = grouped_aggregates(correct, ce, held_np, k)
+            if tag == "full":
+                for name, f in METRICS.items():
+                    if f(full) != f(m):
+                        raise RuntimeError(f"grouped aggregate differs for "
+                                           f"{arm}/{seed}/{name}")
+            if not all(onp.isfinite(f(full)) for f in METRICS.values()):
+                bad.append(f"{arm}/{seed}: non-finite aggregate on {tag}")
+                continue
+            grouped[(arm, seed)] = (full, loo)
+        comp = _comparisons(grouped)
+        out[tag] = dict(comparisons=comp, not_computable=bad,
+                        recommendation=recommend(comp, unavailable)[0],
+                        immediate_claim=immediate_claim(comp, unavailable))
+    rec, why = recommend(out["stable_subset"]["comparisons"], unavailable)
     return dict(
-        comparisons=comp, recommendation=rec, recommendation_basis=why,
+        primary="stable_subset", stable_subset=out["stable_subset"],
+        full=out["full"], exclusions=excl,
+        recommendation=rec, recommendation_basis=why,
+        immediate_claim=out["stable_subset"]["immediate_claim"],
         rule=("paired difference on the same held-out episodes; SE from a "
-              f"{N_GROUPS}-group jackknife over balanced 4-episode blocks, "
-              "within each seed, combined across the three final seeds "
-              "(SE_within); SE_between_seeds reported; labels by `verdict`"),
+              "grouped jackknife over balanced 4-episode blocks, within each "
+              "seed, combined across the three final seeds (SE_within); "
+              "SE_between_seeds and every seed's sign reported; labels by "
+              "`verdict`; primary on the common stable subset"),
         margin=MARGIN, n_groups=N_GROUPS, wall_s=time.time() - t0)
+
+
+def nesterov_applicability(status):
+    """EVERY literal-Nesterov checkpoint that was evaluated, with its
+    identity, and every one whose executed frozen-token table contains an
+    unstable transition, with the violated condition. Instability is a
+    result against Nesterov's applicability, not missing data."""
+    rows = [e for e in status.get("checkpoint_log", [])
+            if e.get("arm") == NAG_ARM]
+    unstable = []
+    for e in rows:
+        t = e.get("frozen_token_table") or {}
+        if (t.get("classification") or {}).get("unstable"):
+            unstable.append(dict(
+                stage=e["stage"], config=e["config"], lr=e["lr"],
+                seed=e["seed"], update=e["update"],
+                params_file=e.get("params_file"),
+                classification=t["classification"],
+                n_write_settings=t.get("n_write_settings"),
+                min_jury_expression=t.get("min_jury_expression"),
+                violated_condition=NAG_CONDITION,
+                closed_form=t.get("closed_form_condition")))
+    return dict(condition=NAG_CONDITION,
+                checkpoints_evaluated=len(rows),
+                checkpoints_unstable=len(unstable),
+                unstable_fraction=(len(unstable) / len(rows) if rows
+                                   else None),
+                unstable=unstable,
+                note=("an unstable checkpoint is ineligible for selection "
+                      "(declared); counted here as evidence about Nesterov's "
+                      "applicability at the trained gates"))
 
 
 # -------------------------------------------------------------------- main --
@@ -896,9 +1064,9 @@ def main():
     os.makedirs(out, exist_ok=True)
     status = dict(
         run_id=run_id, out=out, backend=backend,
-        study=("MDN Nesterov/QHM ladder: native, literal TSS, literal "
-               "Nesterov, QHM and generalized prospectivity on the completed "
-               "temporal-response protocol"),
+        study=("MDN Nesterov/QHM ladder: native, the frozen two-tap "
+               "operator, literal TSS, literal Nesterov, QHM and generalized "
+               "prospectivity on the completed temporal-response protocol"),
         audit="docs/MDN_NESTEROV_QHM_AUDIT.md",
         protocol_reused="docs/PROSPECTIVE_TEMPORAL_RESPONSE_PROTOCOL.md",
         completed_run_same_streams=COMPLETED_RUN,
@@ -913,8 +1081,9 @@ def main():
                         "only after every selection and endpoint is frozen; "
                         "never used for selection"),
         declared_departures=[
-            "arms: the learned two-tap operator is replaced by literal "
-            "Nesterov and QHM (the ladder); its completed result is frozen",
+            "arms: literal Nesterov and QHM are added; the two-tap operator "
+            "is kept with its exact completed implementation and is NOT "
+            "substituted by QHM (production gates are token dependent)",
             "the controlled mechanism diagnostic and the matched-operating-"
             "point analysis of the completed study are not repeated",
             "the completed study's float64/float32 law checks are not "
@@ -1110,8 +1279,8 @@ def run_study(args, status, out, deadline, save):
     arrays = {}
     for row in final_rows:
         arm = row["rule"]
-        m, sets, (correct, ce) = evaluate(arm, endpoints[(arm, row["seed"])],
-                                          held_np, keep_arrays=True)
+        m, sets, (correct, ce, gts) = evaluate(
+            arm, endpoints[(arm, row["seed"])], held_np, keep_arrays=True)
         row["heldout"] = m
         if not TR.metrics_finite(m) or (
                 LAW[arm] == FL.FILTERED and (
@@ -1121,11 +1290,19 @@ def run_study(args, status, out, deadline, save):
             status["failed"] = (f"non-finite or unaccepted held-out "
                                 f"evaluation {arm}/{row['seed']}")
             return 4, "FAILED"
-        arrays[(arm, row["seed"])] = (correct, ce, m)
+        arrays[(arm, row["seed"])] = (correct, ce, gts, m)
     status["heldout_evaluation_complete"] = True
     save()
-    analysis = paired_analysis(arrays, held_np, final_rows, unavailable)
+    analysis = paired_analysis(arrays, held_np, unavailable)
     status["paired_analysis"] = analysis
+    applicability = nesterov_applicability(status)
+    applicability["heldout_endpoints"] = {
+        str(r["seed"]): dict(
+            endpoint_table=r.get("frozen_token_table"),
+            episodes=r["heldout"].get("nesterov_episode_applicability"))
+        for r in final_rows if r["rule"] == NAG_ARM}
+    applicability["unavailable"] = NAG_ARM in unavailable
+    status["nesterov_applicability"] = applicability
     status["work_completed"] = dict(
         development_runs=len(dev_rows), final_trajectories=len(traj_rows),
         checkpoints_validated_and_persisted=len(status["checkpoint_log"]),
@@ -1140,15 +1317,27 @@ def run_study(args, status, out, deadline, save):
                    heldout={f"{r['rule']}/{r['seed']}": {
                        name: float(f(r["heldout"]))
                        for name, f in METRICS.items()} for r in final_rows},
-                   paired_analysis=analysis)
+                   paired_analysis=analysis,
+                   nesterov_applicability=applicability)
     ST.write(os.path.join(out, "results.json"), results)
-    print(f"[recommendation] {analysis['recommendation']}")
-    for name, c in analysis["comparisons"].items():
-        print(f"[paired] {name:<40} revision {c['revision']['D']:+.4f} "
+    print(f"[nesterov] checkpoints evaluated "
+          f"{applicability['checkpoints_evaluated']}, unstable "
+          f"{applicability['checkpoints_unstable']}; held-out exclusions "
+          + str({s: e['excluded_fraction']
+                 for s, e in analysis['exclusions'].items()}))
+    print(f"[recommendation] {analysis['recommendation']} (primary: common "
+          f"stable subset; full-set: {analysis['full']['recommendation']})")
+    print(f"[immediate claim] holds="
+          f"{analysis['immediate_claim']['claim_holds']} "
+          f"{analysis['immediate_claim']['immediate_revised']}")
+    for name, c in analysis["stable_subset"]["comparisons"].items():
+        print(f"[paired] {name:<48} revision {c['revision']['D']:+.4f} "
               f"({c['revision']['label']}) immediate "
               f"{c['immediate_revised']['D']:+.4f} "
+              f"{''.join(c['immediate_revised']['per_seed_sign'].values())} "
               f"({c['immediate_revised']['label']}) later_revised "
               f"{c['later_revised']['D']:+.4f} "
+              f"{''.join(c['later_revised']['per_seed_sign'].values())} "
               f"({c['later_revised']['label']})")
     status["complete"] = True
     return 0, "PASS"

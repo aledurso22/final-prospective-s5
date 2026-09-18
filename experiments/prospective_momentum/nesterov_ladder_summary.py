@@ -9,8 +9,8 @@ import json
 import os
 import sys
 
-LADDER_ORDER = ("native_full", "tss_processing", "literal_nesterov", "qhm",
-                "generalized_processing")
+LADDER_ORDER = ("native_full", "operator_full", "tss_processing",
+                "literal_nesterov", "qhm", "generalized_processing")
 SHOW = ("revision", "retention", "recall", "immediate_revised",
         "later_revised", "later", "untouched_keys", "revised_idle_gap",
         "revised_intervening_writes", "untouched_idle_gap",
@@ -70,18 +70,45 @@ def main(run_dir):
         v = res["heldout"][key]
         print("  " + key.ljust(34)
               + "".join(f"{v[m]:11.4f}" for m in SHOW))
+    ap = res.get("nesterov_applicability") or {}
+    print(f"\n=== literal-Nesterov applicability ({ap.get('condition')}) ===")
+    print(f"  checkpoints evaluated {ap.get('checkpoints_evaluated')}, "
+          f"unstable {ap.get('checkpoints_unstable')} "
+          f"(fraction {ap.get('unstable_fraction')}); unavailable "
+          f"{ap.get('unavailable')}")
+    for u in ap.get("unstable", []):
+        print(f"    UNSTABLE {u['stage']}/{u['config']}/seed{u['seed']}/"
+              f"u{u['update']}: {u['classification']} min Jury "
+              f"{u['min_jury_expression']} closed form {u['closed_form']}")
+    for seed, e in (ap.get("heldout_endpoints") or {}).items():
+        print(f"  held-out endpoint seed {seed}: table "
+              f"{(e.get('endpoint_table') or {}).get('classification')}; "
+              f"episodes {e.get('episodes')}")
     pa = res["paired_analysis"]
-    print(f"\n=== paired analysis ({pa['rule']}) margin {pa['margin']} ===")
-    for name, c in pa["comparisons"].items():
-        print(f"\n  {name}")
-        for m in SHOW:
-            x = c[m]
-            print(f"    {m:<30} D {fmt(x['D'])}  CI95 [{fmt(x['ci95'][0])}, "
-                  f"{fmt(x['ci95'][1])}]  SEw {x['se_within']:.4f}  SEb "
-                  f"{fmt(x['se_between_seeds'])}  per-seed "
-                  f"{[round(d, 4) for d in x['per_seed'].values()]}  "
-                  f"-> {x['label']}")
-    print(f"\nRECOMMENDATION: {pa['recommendation']}")
+    print(f"\n=== exclusions (common stable subset) ===")
+    for seed, e in pa["exclusions"].items():
+        print(f"  seed {seed}: excluded {e['excluded_episodes']} of "
+              f"{e['episodes']} episodes ({e['excluded_fraction']:.4f}), "
+              f"{e['excluded_blocks']} of {e['blocks']} blocks; by cell "
+              f"{e['by_family_and_condition']}")
+    for tag in ("stable_subset", "full"):
+        part = pa[tag]
+        print(f"\n=== paired analysis on {tag.upper()} "
+              f"({'PRIMARY' if tag == pa['primary'] else 'secondary'}) ===")
+        print(f"  not computable: {part['not_computable']}")
+        for name, c in part["comparisons"].items():
+            print(f"\n  {name}")
+            for m in SHOW:
+                x = c[m]
+                print(f"    {m:<30} D {fmt(x['D'])}  CI95 [{fmt(x['ci95'][0])}"
+                      f", {fmt(x['ci95'][1])}]  SEw {x['se_within']:.4f}  "
+                      f"SEb {fmt(x['se_between_seeds'])}  per-seed "
+                      f"{[round(d, 4) for d in x['per_seed'].values()]} "
+                      f"signs {''.join(x['per_seed_sign'].values())} "
+                      f"-> {x['label']}")
+        print(f"\n  recommendation on {tag}: {part['recommendation']}")
+        print(f"  immediate claim on {tag}: {part['immediate_claim']}")
+    print(f"\nRECOMMENDATION (primary): {pa['recommendation']}")
     print(f"basis: {pa['recommendation_basis']}")
 
 

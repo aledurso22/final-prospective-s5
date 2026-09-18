@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# MDN NESTEROV/QHM LADDER: native, literal TSS, literal Nesterov, QHM and
-# generalized prospectivity on the completed temporal-response protocol
+# MDN NESTEROV/QHM LADDER: native, the frozen two-tap operator
+# (ordinary_prospective), literal TSS, literal Nesterov, QHM and generalized
+# prospectivity on the completed temporal-response protocol
 # (same task, sources, streams, learning rates, checkpoints, selection and
 # metrics). NOT AUTHORIZED TO RUN until docs/MDN_NESTEROV_QHM_AUDIT.md s8 is
 # cleared.
 #
-# ONE hard 600-second budget covers GPU startup, this study's focused checks
-# (exact identities, float64 production checks, the completed study's own
-# checks), start points, measured preflight, all training (<= 5,000 updates),
+# ONE hard 600-second budget covers GPU startup, the FAIL-CLOSED gate (exact
+# identities and float64 production checks: any failure stops the dispatch
+# before the experiment), the completed study's own checks, start points,
+# measured preflight, all training (<= 6,000 updates),
 # held-out evaluation, the paired analysis, kill grace, source verification,
 # the digest and the terminal verdict. Sources of run 20260917-011842 are
 # REUSED READ-ONLY. No retries, no trimming.
@@ -77,18 +79,27 @@ cat "$LOG_DIR/backend.txt"
 echo "backend: outcome=$PM_OUTCOME rc=$PM_RC"
 stage_end backend
 
-# ---- 2. focused checks: exact identities, float64 production, and the
-#         completed temporal-response study's own checks (unchanged)
+# ---- 2. FAIL-CLOSED gate: exact identities and the float64 production
+#         checks (new rules, the unchanged two-tap arm, the analysis). A
+#         non-zero exit ends the dispatch here: no experiment runs.
 pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
   "$PY" -u -m pytest tests/test_mdn_nesterov_qhm_identities.py \
   tests/test_mdn_nesterov_qhm_production.py \
-  tests/test_prospective_temporal_response.py \
-  -q -rP --durations=10 > "$LOG_DIR/checks.log" 2>&1
-echo "--- checks ---"; tail -30 "$LOG_DIR/checks.log"
+  -q -rP --durations=10 > "$LOG_DIR/production_checks.log" 2>&1
+echo "--- exact and float64 production checks ---"
+tail -30 "$LOG_DIR/production_checks.log"
+echo "production checks: outcome=$PM_OUTCOME rc=$PM_RC (elapsed $(( $(date +%s) - START ))s)"
+stage_end production_checks
+
+# ---- 3. the completed temporal-response study's own checks (unchanged)
+pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
+  "$PY" -u -m pytest tests/test_prospective_temporal_response.py \
+  -q -rP --durations=5 > "$LOG_DIR/checks.log" 2>&1
+echo "--- completed-study checks ---"; tail -12 "$LOG_DIR/checks.log"
 echo "checks: outcome=$PM_OUTCOME rc=$PM_RC (elapsed $(( $(date +%s) - START ))s)"
 stage_end checks
 
-# ---- 3. the study
+# ---- 4. the study
 echo "remaining until the study's TERM: $(( STAGE_TERM_AT - $(date +%s) ))s"
 pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
   "$PY" -u -m experiments.prospective_momentum.nesterov_ladder \
@@ -96,7 +107,7 @@ pm_bounded "$STAGE_TERM_AT" "$PM_GRACE_S" \
     --deadline "$DEADLINE" --reserve_s "$RESERVE_S" \
     > "$LOG_DIR/study.log" 2>&1
 echo "--- study tail ---"; tail -30 "$LOG_DIR/study.log"
-grep -E "PROSPECTIVE_MOMENTUM_STATUS|SOURCE_UNCHANGED|PREFLIGHT_|\[source\]|\[preflight\]|\[selection\]|\[paired\]|\[recommendation\]|\[!\]" \
+grep -E "PROSPECTIVE_MOMENTUM_STATUS|SOURCE_UNCHANGED|PREFLIGHT_|\[source\]|\[preflight\]|\[selection\]|\[nesterov\]|\[paired\]|\[immediate claim\]|\[recommendation\]|\[!\]" \
   "$LOG_DIR/study.log" || true
 echo "study: outcome=$PM_OUTCOME rc=$PM_RC"
 pm_finish "$RUN_DIR" study "$PM_OUTCOME" "$PM_RC"
