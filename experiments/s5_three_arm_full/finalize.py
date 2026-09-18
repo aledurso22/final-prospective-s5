@@ -12,7 +12,7 @@ from experiments.s5_three_arm_full import data as EXPERIMENT_DATA
 from experiments.s5_three_arm_full.runner import (ARM_ORDER, BATCH_SIZE,
                                                    EPOCHS, SEQ_LEN, SEEDS,
                                                    arm_summary, evaluate,
-                                                   model_for, paired_summary)
+                                                   init_state, paired_summary)
 
 
 def main(args):
@@ -38,24 +38,12 @@ def main(args):
     test = EXPERIMENT_DATA.load_official_raw(
         args.data_cache, ("test",))[0]["test"]
     for row in rows:
-        model = model_for(row["code_identifier"], False)
-        template = model.init(
-            {"params": jax.random.PRNGKey(row["seed"])},
-            jnp.zeros((BATCH_SIZE, SEQ_LEN, 1)),
-            jnp.ones((BATCH_SIZE, SEQ_LEN)))
-        with open(row["selected_checkpoint"], "rb") as handle:
-            restored = serialization.from_bytes(template, handle.read())
-
-        class EvaluationState:
-            params = restored["params"]
-            batch_stats = restored["batch_stats"]
-
-        row["test"] = evaluate(EvaluationState(), model, *test)
+        row["test"] = restore_and_evaluate(row, test)
 
     result = {
         "schema": "s5-three-arm-full-training/v2",
         "scientific_arms": [
-            "Native matched S5",
+            "Native S5 recurrence under the shared stability constraint",
             "Zucchet prospective S5 recurrence",
             "Generalized prospective S5 recurrence (M,γ,T)"],
         "code_identifiers": list(ARM_ORDER), "seeds": list(SEEDS),
@@ -77,6 +65,15 @@ def main(args):
                    "results": "results.json", "test_opened_once": True,
                    "task_root": os.path.abspath(args.task_root)},
                   handle, indent=2)
+
+
+def restore_and_evaluate(row, test):
+    from experiments.s5_three_arm_full.runner import model_for
+    model = model_for(row["code_identifier"], False)
+    template = init_state(row["code_identifier"], row["seed"])
+    with open(row["selected_checkpoint"], "rb") as handle:
+        restored = serialization.from_bytes(template, handle.read())
+    return evaluate(restored, model, *test)
 
 
 if __name__ == "__main__":

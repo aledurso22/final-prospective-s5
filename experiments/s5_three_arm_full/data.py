@@ -20,6 +20,13 @@ def _read_list(root, name):
         return {line.strip() for line in handle if line.strip()}
 
 
+def normalize_raw_audio(train, values):
+    """Apply upstream S5 channel statistics over examples and time."""
+    mean = train.mean(axis=(0, 1), keepdims=True)
+    std = train.std(axis=(0, 1), ddof=1, keepdims=True)
+    return ((values - mean) / (std + 1e-5)).astype(np.float32), mean, std
+
+
 def prepare_official_raw(root, cache_dir):
     """Prepare upstream-style raw audio with official validation/test lists."""
     validation = _read_list(root, "validation_list.txt")
@@ -62,12 +69,11 @@ def prepare_official_raw(root, cache_dir):
         raw[split] = values, labels
 
     train = raw["train"][0]
-    mean = train.mean(axis=0, keepdims=True)
-    std = train.std(axis=0, ddof=1, keepdims=True)
+    _, mean, std = normalize_raw_audio(train, train)
     manifest["normalization_mean_sha256"] = _digest_bytes(mean.tobytes())
     manifest["normalization_std_sha256"] = _digest_bytes(std.tobytes())
     for split, (values, labels) in raw.items():
-        values = ((values - mean) / (std + 1e-5)).astype(np.float32)
+        values, _, _ = normalize_raw_audio(train, values)
         np.save(os.path.join(cache_dir, f"{split}_x.npy"), values)
         np.save(os.path.join(cache_dir, f"{split}_y.npy"), labels)
         manifest["feature_sha256"][split] = {

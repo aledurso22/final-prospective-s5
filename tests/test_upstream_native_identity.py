@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from s5.ssm import apply_ssm, discretize_zoh
+from s5.ssm_init import make_DPLR_HiPPO
 
 
 UPSTREAM_COMMIT = "3c18fdb6b06414da35e77b94b9cd855f6a95ef17"
@@ -62,3 +63,25 @@ def test_native_scan_matches_pinned_upstream_numerically():
     local = apply_ssm(lam, b, c, x, False, False)
     reference = upstream.apply_ssm(lam, b, c, x, False, False)
     np.testing.assert_allclose(np.asarray(local), np.asarray(reference))
+
+
+def test_native_module_output_matches_pinned_upstream():
+    upstream = _upstream_ssm()
+    Lambda, _, _, V, _ = make_DPLR_HiPPO(4)
+    V = V[:, :2]
+    kwargs = dict(H=3, P=2, Lambda_re_init=Lambda[:2].real,
+                  Lambda_im_init=Lambda[:2].imag, V=V, Vinv=V.conj().T,
+                  C_init="lecun_normal", discretization="zoh",
+                  dt_min=0.001, dt_max=0.1, conj_sym=True,
+                  clip_eigs=True, bidirectional=False)
+    from s5.ssm import S5SSM
+    local = S5SSM(**kwargs)
+    reference = upstream.S5SSM(**kwargs)
+    x = jnp.asarray([[0.2, -0.1, 0.4], [-0.3, 0.5, 0.1]], dtype=jnp.float64)
+    key = __import__("jax").random.PRNGKey(19)
+    local_variables = local.init({"params": key}, x)
+    reference_variables = reference.init({"params": key}, x)
+    np.testing.assert_allclose(
+        np.asarray(local.apply(local_variables, x)),
+        np.asarray(reference.apply(reference_variables, x)),
+        rtol=1e-6, atol=1e-6)

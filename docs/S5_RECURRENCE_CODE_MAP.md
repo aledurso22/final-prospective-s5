@@ -1,9 +1,11 @@
 # S5 recurrence code map
 
 Native S5 is the reference implementation. The native transition, scan and
-output path remain in `s5/ssm.py`; the two prospective mathematical changes are
-centralized in `s5/three_arm_recurrences.py` and are reused by the prospective
-modules.
+output path remain in `s5/ssm.py`; the two production prospective mathematical
+changes are isolated in `s5/prospective_ssm.py` and
+`s5/generalized_prospective_ssm.py`. `s5/three_arm_factory.py` is the only
+production constructor map. Historical `gp_*` modules remain available for
+legacy tests and reports but are not imported by the production runner.
 
 The pinned upstream native reference is `lindermanlab/S5` commit
 `3c18fdb6b06414da35e77b94b9cd855f6a95ef17` (`upstream/main` in this clone).
@@ -15,9 +17,9 @@ project lineage also contains old generalized CLI/wrapper additions in
 
 | Scientific method | Mathematical recurrence | State carried between tokens | Trainable parameters | Exact source file and function | Exact lines changed relative to native S5 | Reduction/boundary identities | Expected overhead |
 |---|---|---|---|---|---|---|---|
-| Native matched S5 | `s_next = Lambda_bar*s + B_bar*x` | One complex diagonal S5 state per mode | Native `Lambda`, `B`, `C`, `D`, `log_step` | `s5/ssm.py:apply_ssm`, `s5/ssm.py:S5SSM.__call__` | Reference: no recurrence modification; native source lines 50-81 and 232-250 | `s5/three_arm_recurrences.py:13-15` is the one-step equivalent | Baseline scan and readout cost |
-| Zucchet prospective S5 recurrence | `(I-T a)s_dot = a s + b x + T b x_dot`; exact ZOH after derivative-free realization | One ordinary S5 history state `u`; observed `s=u+d_x x` | Native parameters plus positive prospective `T` (`gp_response_raw`) | `s5/three_arm_recurrences.py:18-36`; adapter change `s5/gp_coefficients.py:58,171-173` | New recurrence lines `18-36`; adapter replacement relative to native generalized coefficient code at `s5/gp_coefficients.py:171-175` | Exact generalized boundary `M=0, gamma=1`; `T=0` reduces to native coefficients | One extra coefficient vector and one extra tied input feedthrough; same state order |
-| Generalized prospective S5 recurrence `(M,gamma,T)` | `M s_ddot + (gamma-Ta) s_dot - a s = b x + T b x_dot`; exact augmented-matrix ZOH | Two-component state `(s,w)`, `w=M s_dot-T(a s+b x)` | Native parameters plus positive `T` and positive `M`/mass ratio (`so_response_raw`, `so_mu_ratio_raw`); `gamma=1` is fixed by protocol | `s5/three_arm_recurrences.py:39-76`; adapter change `s5/gp_second_order.py:50,85-96` | New recurrence lines `39-76`; adapter replacement relative to native second-order code at `s5/gp_second_order.py:85-102` | Mathematical `M=0` boundary is the Zucchet recurrence; production tests verify convergence as `M` tends to zero | Two state components, dense 2x2 block exponential per mode, and two learned recurrence leaves per mode |
+| Native S5 recurrence under the shared stability constraint | `s_next = Lambda_bar*s + B_bar*x` | One complex diagonal S5 state per mode | Native `Lambda`, `B`, `C`, `D`, `log_step` | `s5/ssm.py:apply_ssm`, `s5/ssm.py:S5SSM.__call__` | Reference: no recurrence modification | Pinned-upstream identity tests | Baseline scan and readout cost |
+| Zucchet prospective S5 recurrence | `(I-T a)s_dot = a s + b x + T b x_dot`; exact ZOH after derivative-free realization | One ordinary S5 history state `u`; observed `s=u+d_x x` | Native parameters plus positive `T` (`prospective_T_raw`) | `s5/prospective_ssm.py:_clocked_coefficients`, `ProspectiveS5SSM.__call__` | Isolated coefficient and scan implementation | `T→0` recovers native coefficients; `M=0,γ=1` is the generalized boundary | One extra parameter vector and tied input feedthrough; same state order |
+| Generalized prospective S5 recurrence `(M,gamma,T)` | `M s_ddot + (gamma-Ta) s_dot - a s = b x + T b x_dot`; exact augmented-matrix ZOH | Two-component state `(s,w)`, `w=M s_dot-T(as+bx)` | Native parameters plus positive `T` and `M` (`generalized_T_raw`, `generalized_M_raw`); `gamma=1` fixed | `s5/generalized_prospective_ssm.py:generalized_zoh_coefficients`, `GeneralizedProspectiveS5SSM.__call__` | Isolated 2x2 coefficient and block-scan implementation | `M→0` recovers Zucchet dynamics in the tested boundary regime | Two state components, dense 2x2 block exponential, and two recurrence parameter vectors |
 
 The line references above are intentionally function-level rather than a claim
 that the native file was edited. To inspect the actual patch:
@@ -47,6 +49,17 @@ Local-native to recurrence audit:
 git diff origin/stable-generalized-prospective-s5...HEAD -- \
   s5/three_arm_recurrences.py s5/gp_coefficients.py s5/gp_second_order.py \
   s5/gp_ssm.py experiments/s5_three_arm_full
+```
+
+Authoritative three-arm diffs:
+
+```bash
+git diff 3c18fdb6b06414da35e77b94b9cd855f6a95ef17...HEAD -- \
+  s5/ssm.py s5/prospective_ssm.py s5/generalized_prospective_ssm.py \
+  s5/three_arm_factory.py experiments/s5_three_arm_full/runner.py
+git diff 2ee2fa8040611ca8dd552b9cd9c45d077386d3c1..HEAD -- \
+  s5/ssm.py s5/prospective_ssm.py s5/generalized_prospective_ssm.py \
+  s5/three_arm_factory.py
 ```
 
 For this experiment, intentional runtime differences from the pinned upstream

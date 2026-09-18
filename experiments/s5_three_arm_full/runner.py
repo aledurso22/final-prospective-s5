@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import dataclass
 from functools import partial
 
 import jax
@@ -16,28 +17,73 @@ from jax.scipy.linalg import block_diag
 
 from dataloaders import speech_commands10 as SC
 from experiments.s5_three_arm_full import data as EXPERIMENT_DATA
-from s5.gp_ssm import init_gp_ssm
-from s5.gp_second_order import init_second_order_ssm
 from s5.seq_model import BatchClassificationModel
-from s5.ssm import init_S5SSM
 from s5.ssm_init import make_DPLR_HiPPO
-from s5.train_helpers import (constant_lr, cosine_annealing, create_train_state,
+from s5.three_arm_factory import (init_S5SSM,
+                                  init_generalized_prospective_S5SSM,
+                                  init_prospective_S5SSM)
+from s5.train_helpers import (cosine_annealing, create_train_state,
                               linear_warmup, train_step,
                               update_learning_rate_per_step, eval_step)
 
 
 SCIENTIFIC_NAMES = {
-    "native_matched_s5": "Native matched S5",
+    "native_matched_s5": "Native S5 recurrence under the shared stability constraint",
     "zucchet_prospective_s5": "Zucchet prospective S5 recurrence",
     "generalized_prospective_s5": "Generalized prospective S5 recurrence (M,γ,T)",
 }
 ARM_ORDER = tuple(SCIENTIFIC_NAMES)
 SEEDS = (301, 302, 303)
-D_MODEL, SSM_SIZE_BASE, BLOCKS, N_LAYERS = 96, 128, 16, 6
-SEQ_LEN, INPUT_DIM = 16000, 1
-BATCH_SIZE, EPOCHS = 16, 40
-LR, SSM_LR, LR_FINAL, WEIGHT_DECAY = 0.008, 0.002, 1e-6, 0.04
-GRAD_CLIP, WARMUP_END = 1.0, 1
+
+
+@dataclass(frozen=True)
+class SharedS5Config:
+    d_model: int = 96
+    ssm_size: int = 128
+    blocks: int = 16
+    n_layers: int = 6
+    input_dim: int = 1
+    seq_len: int = 16000
+    batch_size: int = 16
+    epochs: int = 40
+    lr: float = 0.008
+    ssm_lr: float = 0.002
+    lr_final: float = 1e-6
+    weight_decay: float = 0.04
+    warmup_end: int = 1
+    dropout: float = 0.1
+    c_init: str = "lecun_normal"
+    discretization: str = "zoh"
+    conj_sym: bool = True
+    clip_eigs: bool = True
+    bidirectional: bool = True
+
+
+SHARED_CONFIG = SharedS5Config()
+D_MODEL, SSM_SIZE_BASE, BLOCKS, N_LAYERS = (SHARED_CONFIG.d_model,
+                                               SHARED_CONFIG.ssm_size,
+                                               SHARED_CONFIG.blocks,
+                                               SHARED_CONFIG.n_layers)
+SEQ_LEN, INPUT_DIM = SHARED_CONFIG.seq_len, SHARED_CONFIG.input_dim
+BATCH_SIZE, EPOCHS = SHARED_CONFIG.batch_size, SHARED_CONFIG.epochs
+LR, SSM_LR, LR_FINAL, WEIGHT_DECAY = (SHARED_CONFIG.lr, SHARED_CONFIG.ssm_lr,
+                                       SHARED_CONFIG.lr_final,
+                                       SHARED_CONFIG.weight_decay)
+WARMUP_END = SHARED_CONFIG.warmup_end
+
+ARM_CONFIGS = {
+    "native_matched_s5": {"shared": SHARED_CONFIG,
+                           "recurrence_constructor": "init_S5SSM",
+                           "extra_parameters": (), "state_dimension": 128},
+    "zucchet_prospective_s5": {"shared": SHARED_CONFIG,
+                                "recurrence_constructor": "init_prospective_S5SSM",
+                                "extra_parameters": ("T",),
+                                "state_dimension": 128},
+    "generalized_prospective_s5": {"shared": SHARED_CONFIG,
+                                    "recurrence_constructor": "init_generalized_prospective_S5SSM",
+                                    "extra_parameters": ("T", "M"),
+                                    "state_dimension": 256},
+}
 
 
 def sha256_file(path):
@@ -61,9 +107,11 @@ def ssm_kwargs(arm):
     return dict(
         H=D_MODEL, P=P, Lambda_re_init=Lambda.real,
         Lambda_im_init=Lambda.imag, V=V, Vinv=Vc,
-        C_init="trunc_standard_normal", discretization="zoh",
+        C_init=SHARED_CONFIG.c_init,
+        discretization=SHARED_CONFIG.discretization,
         dt_min=0.001, dt_max=0.1, conj_sym=True,
-        clip_eigs=True, bidirectional=True,
+        clip_eigs=SHARED_CONFIG.clip_eigs,
+        bidirectional=SHARED_CONFIG.bidirectional,
     )
 
 
@@ -72,10 +120,10 @@ def ssm_factory(arm):
     if arm == "native_matched_s5":
         return init_S5SSM(**kw)
     if arm == "zucchet_prospective_s5":
-        return init_gp_ssm(mechanism="gp_diagonal", gp_init_scale=0.05, **kw)
+        return init_prospective_S5SSM(response_init=0.05, **kw)
     if arm == "generalized_prospective_s5":
-        return init_second_order_ssm(gp_init_scale=0.3,
-                                     mu_ratio_init=0.5, **kw)
+        return init_generalized_prospective_S5SSM(
+            response_init=0.3, mass_init=0.15, **kw)
     raise ValueError(arm)
 
 
@@ -83,7 +131,7 @@ def model_for(arm, training):
     return BatchClassificationModel(
         ssm=ssm_factory(arm), d_output=len(SC.WORDS), d_model=D_MODEL,
         n_layers=N_LAYERS, padded=False, activation="half_glu1",
-        dropout=0.1, training=training, mode="pool", prenorm=True,
+        dropout=SHARED_CONFIG.dropout, training=training, mode="pool", prenorm=True,
         batchnorm=True, bn_momentum=0.95,
     )
 
@@ -92,7 +140,8 @@ def model_cls_for(arm):
     return partial(
         BatchClassificationModel, ssm=ssm_factory(arm),
         d_output=len(SC.WORDS), d_model=D_MODEL, n_layers=N_LAYERS,
-        padded=False, activation="half_glu1", dropout=0.1, mode="pool",
+        padded=False, activation="half_glu1", dropout=SHARED_CONFIG.dropout,
+        mode="pool",
         prenorm=True, batchnorm=True, bn_momentum=0.95)
 
 
@@ -125,6 +174,18 @@ def batch_arrays(x, y, indices):
     return jnp.asarray(x[indices]), jnp.asarray(y[indices])
 
 
+def learning_rate_at_step(step, steps_per_epoch):
+    warmup_steps = steps_per_epoch * WARMUP_END
+    cosine_steps = steps_per_epoch * (EPOCHS - WARMUP_END)
+    if step < warmup_steps:
+        schedule = (linear_warmup, step, warmup_steps)
+    else:
+        schedule = (cosine_annealing, step - warmup_steps, cosine_steps)
+    function, local_step, end_step = schedule
+    return (float(function(local_step, LR, end_step, LR_FINAL)),
+            float(function(local_step, SSM_LR, end_step, LR_FINAL)))
+
+
 def evaluate(state, model, x, y):
     losses, correct, count = [], 0, 0
     for start in range(0, len(y), BATCH_SIZE):
@@ -145,9 +206,8 @@ def train_arm(arm, seed, data, checkpoint_dir):
     step = 0
     best = None
     start_time = time.perf_counter()
+    steps_per_epoch = len(data["train"][1]) // BATCH_SIZE
     for epoch in range(EPOCHS):
-        decay = linear_warmup if epoch < WARMUP_END else cosine_annealing
-        end_step = (len(data["train"][1]) // BATCH_SIZE) * EPOCHS
         for indices in SC.epoch_batches(len(data["train"][1]), BATCH_SIZE,
                                         seed, epoch, drop_last=True):
             xb, yb = batch_arrays(*data["train"], indices)
@@ -155,16 +215,23 @@ def train_arm(arm, seed, data, checkpoint_dir):
             state, _ = train_step(
                 state, rng, xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)),
                 train_model, True)
-            state, step = update_learning_rate_per_step(
-                (decay, SSM_LR, LR, step, end_step, "noBCdecay", LR_FINAL),
+            if step < steps_per_epoch * WARMUP_END:
+                decay, schedule_step, end_step = (linear_warmup, step,
+                                                  steps_per_epoch * WARMUP_END)
+            else:
+                decay, schedule_step, end_step = (
+                    cosine_annealing, step - steps_per_epoch * WARMUP_END,
+                    steps_per_epoch * (EPOCHS - WARMUP_END))
+            state, _ = update_learning_rate_per_step(
+                (decay, SSM_LR, LR, schedule_step, end_step, "noBCdecay", LR_FINAL),
                 state)
+            step += 1
         val = evaluate(state, eval_model, *data["val"])
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(
             checkpoint_dir, f"checkpoint_epoch_{epoch + 1:02d}.msgpack")
         with open(checkpoint_path, "wb") as handle:
-            handle.write(serialization.to_bytes({
-                "params": state.params, "batch_stats": state.batch_stats}))
+            handle.write(serialization.to_bytes(state))
         with open(os.path.join(checkpoint_dir, "metrics.jsonl"), "a") as handle:
             handle.write(json.dumps({"epoch": epoch + 1,
                                      "validation": val}) + "\n")

@@ -5,7 +5,7 @@
   "required": ["schema", "scientific_arms", "code_identifiers", "seeds", "schedule", "rows", "paired_differences", "test_opened_after_selection"],
   "properties": {
     "schema": {"const": "s5-three-arm-full-training/v2"},
-    "scientific_arms": {"const": ["Native matched S5", "Zucchet prospective S5 recurrence", "Generalized prospective S5 recurrence (M,γ,T)"]},
+    "scientific_arms": {"const": ["Native S5 recurrence under the shared stability constraint", "Zucchet prospective S5 recurrence", "Generalized prospective S5 recurrence (M,γ,T)"]},
     "code_identifiers": {"const": ["native_matched_s5", "zucchet_prospective_s5", "generalized_prospective_s5"]},
     "seeds": {"type": "array", "items": {"type": "integer"}, "minItems": 3},
     "schedule": {"type": "object", "required": ["epochs", "batch_size", "lr", "ssm_lr", "weight_decay", "lr_schedule", "checkpoint_selection"]},

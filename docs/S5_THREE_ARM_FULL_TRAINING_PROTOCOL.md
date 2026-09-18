@@ -11,7 +11,7 @@ S5, Nesterov, QHM, or any historical checkpoint.
 
 | Scientific name | Code identifier | Executed recurrence |
 |---|---|---|
-| Native matched S5 | `native_matched_s5` | Native S5 ZOH recurrence |
+| Native S5 recurrence under the shared stability constraint | `native_matched_s5` | Native S5 ZOH recurrence |
 | Zucchet prospective S5 recurrence | `zucchet_prospective_s5` | The (M=0,\gamma=1) member below, with positive response time (T) |
 | Generalized prospective S5 recurrence \((M,\gamma,T)\) | `generalized_prospective_s5` | The finite-inertia second-order member below, with \(M>0\), \(\gamma=1\), and positive \(T\) |
 
@@ -124,7 +124,10 @@ All arms use the upstream S5 Speech Commands architecture: bidirectional S5,
 depth 6, feature width `H=96`, nominal latent size `P=128`, 16 HiPPO blocks,
 `half_glu1`, batch normalization, dropout `0.1`, and mean pooling. The decoder
 is the upstream decoder with only its output width changed from 35 to 10.
-Only the recurrence and its necessary recurrence parameters differ.
+Only the recurrence and its necessary recurrence parameters differ. `clip_eigs=True`
+is shared across all three arms as a stability requirement for the prospective
+recurrences; this is the sole shared recurrence-setting deviation from the
+published Speech Commands configuration, which uses `clip_eigs=False`.
 
 Speech Commands v0.02 uses the ten selected keywords, raw waveforms of length
 16,000, and the official `validation_list.txt` and `testing_list.txt`
@@ -141,8 +144,11 @@ reused.
 
 The fixed schedule is 40 epochs, batch size 16, global learning rate `0.008`,
 SSM learning rate `0.002`, upstream `noBCdecay` parameter-group exceptions,
-weight decay `0.04`, one warm-up epoch, cosine annealing, and paired seeds `301`,
-`302`, `303`.
+weight decay `0.04`, one warm-up epoch over exactly `steps_per_epoch` steps,
+then cosine annealing over the remaining steps, and paired seeds `301`, `302`,
+`303`. The prospective response leaves (`prospective_T_raw`,
+`generalized_T_raw`, and `generalized_M_raw`) are explicitly in the SSM Adam
+group and receive no AdamW decay.
 The checkpoint is the first epoch attaining the highest validation accuracy;
 validation cross-entropy breaks ties. Test accuracy and test cross-entropy are
 computed only from that selected checkpoint.
@@ -150,7 +156,8 @@ computed only from that selected checkpoint.
 ## Decision rule and outputs
 
 The primary contrast is Generalized prospective S5 recurrence \((M,\gamma,T)\)
-minus Zucchet prospective S5 recurrence. Native matched S5 is the baseline.
+minus Zucchet prospective S5 recurrence. Native S5 recurrence under the shared
+stability constraint is the baseline.
 For each seed and the across-seed mean, the result schema records test
 accuracy, selected epoch, test cross-entropy, parameter count, recurrent-state
 size, training seconds, examples/second, paired differences, paired standard

@@ -66,6 +66,17 @@ def update_learning_rate_per_step(lr_params, state):
     return state, step
 
 
+NO_BC_DECAY_SSM_KEYS = frozenset({
+    "B", "C", "C1", "C2", "D", "Lambda_re", "Lambda_im", "log_step",
+    "norm", "gp_response_raw", "so_response_raw", "so_mu_ratio_raw",
+    "prospective_T_raw", "generalized_T_raw", "generalized_M_raw",
+})
+
+
+def no_bc_decay_group(key):
+    return "ssm" if key in NO_BC_DECAY_SSM_KEYS else "regular"
+
+
 # Generalized prospective response parameters are assigned to the "ssm" group:
 # optax.adam at ssm_lr with NO weight decay. Deliberate, and the reason matters.
 #
@@ -250,17 +261,11 @@ def create_train_state(model_cls,
         print("configuring optimization with C not in AdamW setup")
         if dt_global:
             ssm_fn = map_nested_fn(
-                lambda k, _: "ssm"
-                if k in ["B", "C", "C1", "C2", "D",
-                         "Lambda_re", "Lambda_im", "norm"]
-                else ("none" if k in [] else "regular")
+                lambda k, _: no_bc_decay_group(k)
             )
         else:
             ssm_fn = map_nested_fn(
-                lambda k, _: "ssm"
-                if k in ["B", "C", "C1", "C2", "D",
-                         "Lambda_re", "Lambda_im", "log_step", "norm"]
-                else ("none" if k in [] else "regular")
+                lambda k, _: no_bc_decay_group(k)
             )
         tx = optax.multi_transform(
             {
