@@ -43,9 +43,9 @@ def main(args):
     result = {
         "schema": "s5-three-arm-full-training/v2",
         "scientific_arms": [
-            "Native S5 recurrence under the shared stability constraint",
-            "Zucchet prospective S5 recurrence",
-            "Generalized prospective S5 recurrence (M,γ,T)"],
+            "Native S5",
+            "Zucchet prospective dynamics — finite-difference realization",
+            "generalized prospective dynamics (M,γ,T) — finite-difference realization"],
         "code_identifiers": list(ARM_ORDER), "seeds": list(SEEDS),
         "schedule": {"epochs": EPOCHS, "batch_size": BATCH_SIZE,
                       "lr": 0.008, "ssm_lr": 0.002, "weight_decay": 0.04,

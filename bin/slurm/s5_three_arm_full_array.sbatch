@@ -21,8 +21,8 @@ cd "$PROSPECTIVE_REPO"
 test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
 test -z "$(git status --porcelain)"
 
-# Dispatch longest-running arms first; reporting order remains runner.ARM_ORDER.
-DISPATCH_ARMS=(generalized_prospective_s5 zucchet_prospective_s5 native_matched_s5)
+# Dispatch in fixed scientific order; no prior timing result is reused.
+DISPATCH_ARMS=(native_matched_s5 zucchet_prospective_s5 generalized_prospective_s5)
 SEEDS=(301 302 303)
 ARM="${DISPATCH_ARMS[$((SLURM_ARRAY_TASK_ID / 3))]}"
 SEED="${SEEDS[$((SLURM_ARRAY_TASK_ID % 3))]}"

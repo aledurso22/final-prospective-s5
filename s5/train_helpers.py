@@ -70,6 +70,7 @@ NO_BC_DECAY_SSM_KEYS = frozenset({
     "B", "C", "C1", "C2", "D", "Lambda_re", "Lambda_im", "log_step",
     "norm", "gp_response_raw", "so_response_raw", "so_mu_ratio_raw",
     "prospective_T_raw", "generalized_T_raw", "generalized_rho_raw",
+    "generalized_gamma_raw",
 })
 
 
@@ -436,6 +437,31 @@ def _train_step_impl(state, rng, batch_inputs, batch_labels,
     return state, loss, finite
 
 
+def _train_step_observable_impl(state, rng, batch_inputs, batch_labels,
+                                batch_integration_timesteps, model, batchnorm):
+    def loss_fn(params):
+        variables = {"params": params}
+        if batchnorm:
+            variables["batch_stats"] = state.batch_stats
+        logits, mod_vars = model.apply(
+            variables, batch_inputs, batch_integration_timesteps,
+            rngs={"dropout": rng}, mutable=["intermediates", "batch_stats"])
+        return np.mean(cross_entropy_loss(logits, batch_labels)), (mod_vars, logits)
+
+    (loss, (mod_vars, logits)), grads = jax.value_and_grad(
+        loss_fn, has_aux=True)(state.params)
+    leaves = jax.tree_util.tree_leaves(grads)
+    grad_norm = np.sqrt(sum(np.sum(np.abs(value) ** 2) for value in leaves))
+    finite = reduce(np.logical_and,
+                    [np.all(np.isfinite(value)) for value in leaves])
+    accuracy = np.mean(compute_accuracy(logits, batch_labels))
+    if batchnorm:
+        state = state.apply_gradients(grads=grads, batch_stats=mod_vars["batch_stats"])
+    else:
+        state = state.apply_gradients(grads=grads)
+    return state, loss, accuracy, grad_norm, finite
+
+
 @partial(jax.jit, static_argnums=(5, 6))
 def train_step(state,
                rng,
@@ -463,6 +489,14 @@ def train_step_telemetry(state,
                          ):
     """Production-equivalent update returning only scalar gradient telemetry."""
     return _train_step_impl(
+        state, rng, batch_inputs, batch_labels, batch_integration_timesteps,
+        model, batchnorm)
+
+
+@partial(jax.jit, static_argnums=(5, 6))
+def train_step_observable(state, rng, batch_inputs, batch_labels,
+                          batch_integration_timesteps, model, batchnorm):
+    return _train_step_observable_impl(
         state, rng, batch_inputs, batch_labels, batch_integration_timesteps,
         model, batchnorm)
 

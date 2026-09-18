@@ -22,19 +22,28 @@ from s5.ssm_init import make_DPLR_HiPPO
 from s5.three_arm_factory import (init_S5SSM,
                                   init_generalized_prospective_S5SSM,
                                   init_prospective_S5SSM)
+from s5.discrete_recurrence import companion_radius, generalized_coefficients, zucchet_coefficients
+from s5.ssm import discretize_zoh
 from s5.train_helpers import (cosine_annealing, create_train_state,
-                              linear_warmup, train_step, train_step_telemetry,
+                              linear_warmup, train_step, train_step_observable,
+                              train_step_telemetry,
                               update_learning_rate_per_step, eval_step)
 
 
 SCIENTIFIC_NAMES = {
-    "native_matched_s5": "Native S5 recurrence under the shared stability constraint",
-    "zucchet_prospective_s5": "Zucchet prospective S5 recurrence",
-    "generalized_prospective_s5": "Generalized prospective S5 recurrence (M,γ,T)",
+    "native_matched_s5": "Native S5",
+    "zucchet_prospective_s5": "Zucchet prospective dynamics — finite-difference realization",
+    "generalized_prospective_s5": "generalized prospective dynamics (M,γ,T) — finite-difference realization",
 }
 ARM_ORDER = tuple(SCIENTIFIC_NAMES)
 SEEDS = (301, 302, 303)
 T_INIT, RHO_INIT = 0.05, 0.5
+
+
+class NumericalTrainingFailure(RuntimeError):
+    def __init__(self, record):
+        self.record = record
+        super().__init__(json.dumps(record))
 
 
 @dataclass(frozen=True)
@@ -82,7 +91,7 @@ ARM_CONFIGS = {
                                 "state_dimension": 128},
     "generalized_prospective_s5": {"shared": SHARED_CONFIG,
                                     "recurrence_constructor": "init_generalized_prospective_S5SSM",
-                                    "extra_parameters": ("T", "rho"),
+                                    "extra_parameters": ("T", "rho", "gamma"),
                                     "state_dimension": 256},
 }
 
@@ -124,7 +133,7 @@ def ssm_factory(arm):
         return init_prospective_S5SSM(response_init=T_INIT, **kw)
     if arm == "generalized_prospective_s5":
         return init_generalized_prospective_S5SSM(
-            response_init=T_INIT, rho_init=RHO_INIT, **kw)
+            response_init=T_INIT, rho_init=RHO_INIT, gamma_init=1.0, **kw)
     raise ValueError(arm)
 
 
@@ -214,6 +223,46 @@ def train_one_batch_telemetry(state, rng, xb, yb, model, step,
         state, rng, xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
 
 
+def train_one_batch_observable(state, rng, xb, yb, model, step, steps_per_epoch):
+    state = apply_scheduled_learning_rate(state, step, steps_per_epoch)
+    return train_step_observable(
+        state, rng, xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
+
+
+def _all_finite(tree):
+    return bool(all(bool(jnp.all(jnp.isfinite(value)))
+                    for value in jax.tree_util.tree_leaves(tree)
+                    if hasattr(value, "dtype")))
+
+
+def companion_spectral_radius(state, arm):
+    flat = flatten_dict(state.params)
+    radii = []
+    for key in flat:
+        if key[-1] != "Lambda_re":
+            continue
+        prefix = key[:-1]
+        lam_re, lam_im = flat[key], flat[prefix + ("Lambda_im",)]
+        step = jnp.exp(flat[prefix + ("log_step",)][..., 0])
+        lam = jnp.clip(lam_re, None, -1e-4) + 1j * lam_im
+        b = jnp.zeros((lam.shape[0], 1), dtype=lam.dtype)
+        abar, bbar = discretize_zoh(lam, b, step)
+        if arm == "native_matched_s5":
+            radii.append(jnp.max(jnp.abs(abar)))
+            continue
+        if arm == "zucchet_prospective_s5":
+            raw = flat[prefix + ("prospective_T_raw",)]
+            coeff = zucchet_coefficients(abar, bbar, jax.nn.softplus(raw))
+        else:
+            t = jax.nn.softplus(flat[prefix + ("generalized_T_raw",)])
+            rho = 1e-4 + (1.0 - 1e-4) * jax.nn.sigmoid(
+                flat[prefix + ("generalized_rho_raw",)])
+            gamma = jax.nn.softplus(flat[prefix + ("generalized_gamma_raw",)])
+            coeff = generalized_coefficients(abar, bbar, t, rho * gamma * t, gamma)
+        radii.append(jnp.max(companion_radius(coeff[0], coeff[1])))
+    return float(jnp.max(jnp.asarray(radii)))
+
+
 def evaluate(state, model, x, y):
     losses, correct, count = [], 0, 0
     for start in range(0, len(y), BATCH_SIZE):
@@ -240,8 +289,26 @@ def train_arm(arm, seed, data, checkpoint_dir):
                                         seed, epoch, drop_last=True):
             xb, yb = batch_arrays(*data["train"], indices)
             rng = jax.random.PRNGKey(seed * 1000 + step)
-            state, _ = train_one_batch(
+            state, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
                 state, rng, xb, yb, train_model, step, steps_per_epoch)
+            state_finite = _all_finite(state)
+            nonfinite = not (bool(gradients_finite) and state_finite and
+                             bool(jnp.isfinite(loss)) and bool(jnp.isfinite(accuracy)) and
+                             bool(jnp.isfinite(grad_norm)))
+            telemetry = {"arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm,
+                         "seed": seed, "epoch": epoch + 1, "step": step,
+                         "loss": float(loss), "accuracy": float(accuracy),
+                         "state_norm": float(jnp.sqrt(sum(
+                             jnp.sum(jnp.abs(v) ** 2) for v in jax.tree_util.tree_leaves(state)
+                             if hasattr(v, "dtype")))),
+                         "gradient_norm": float(grad_norm),
+                         "gradients_finite": bool(gradients_finite),
+                         "state_finite": state_finite, "nonfinite": nonfinite,
+                         "companion_spectral_radius": companion_spectral_radius(state, arm)}
+            with open(os.path.join(checkpoint_dir, "step_metrics.jsonl"), "a") as handle:
+                handle.write(json.dumps(telemetry) + "\n")
+            if nonfinite:
+                raise NumericalTrainingFailure(telemetry)
             step += 1
         val = evaluate(state, eval_model, *data["val"])
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -319,6 +386,8 @@ def arm_summary(rows):
 def run_task(args):
     if args.arm not in ARM_ORDER or args.seed not in SEEDS:
         raise ValueError(f"invalid task identity: {args.arm}, {args.seed}")
+    os.makedirs(args.out, exist_ok=True)
+    production_check(args.arm, args.seed, args.out)
     cache = EXPERIMENT_DATA.load_official_raw(args.data_cache, ("train", "val"))[0]
     data = {"train": cache["train"], "val": cache["val"]}
     row = train_arm(args.arm, args.seed, data, args.out)
@@ -327,13 +396,46 @@ def run_task(args):
     print(json.dumps(row, indent=2))
 
 
+def production_check(arm, seed, out):
+    """Fail closed on one exact-shape finite update, then allow training."""
+    state = init_state(arm, seed)
+    model = model_for(arm, True)
+    xb = jnp.zeros((BATCH_SIZE, SEQ_LEN, INPUT_DIM), dtype=jnp.float32)
+    yb = jnp.zeros((BATCH_SIZE,), dtype=jnp.int32)
+    started = time.perf_counter()
+    checked, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
+        state, jax.random.PRNGKey(seed * 1000), xb, yb, model, 0, 1)
+    result = {"arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm, "seed": seed,
+              "loss": float(loss), "accuracy": float(accuracy),
+              "gradient_norm": float(grad_norm),
+              "gradients_finite": bool(gradients_finite),
+              "state_finite": _all_finite(checked),
+              "seconds": time.perf_counter() - started}
+    with open(os.path.join(out, "production_check.json"), "w") as handle:
+        json.dump(result, handle, indent=2)
+    if not result["gradients_finite"] or not result["state_finite"]:
+        raise RuntimeError("production check failed: " + json.dumps(result))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-cache", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--arm", choices=ARM_ORDER, required=True)
     parser.add_argument("--seed", type=int, choices=SEEDS, required=True)
-    run_task(parser.parse_args())
+    args = parser.parse_args()
+    try:
+        run_task(args)
+    except Exception as error:
+        os.makedirs(args.out, exist_ok=True)
+        failure = {"scientific_name": SCIENTIFIC_NAMES.get(args.arm, args.arm),
+                   "code_identifier": args.arm, "seed": args.seed,
+                   "failure": str(error)}
+        if isinstance(error, NumericalTrainingFailure):
+            failure["record"] = error.record
+        with open(os.path.join(args.out, "failure.json"), "w") as handle:
+            json.dump(failure, handle, indent=2)
+        raise
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ STAMP="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT="$OUT_ROOT/$STAMP"
 mkdir -p "$OUT"
 
-echo "scientific arms: Native matched S5 | Zucchet prospective S5 recurrence | Generalized prospective S5 recurrence (M,gamma,T)"
+echo "scientific arms: Native S5 | Zucchet prospective dynamics — finite-difference realization | generalized prospective dynamics (M,gamma,T) — finite-difference realization"
 echo "branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "commit: $(git rev-parse HEAD)"
 echo "data cache: ${DATA_CACHE} (official validation/testing lists)"

@@ -115,7 +115,7 @@ def test_three_arm_names_are_exactly_three():
     from experiments.s5_three_arm_full.runner import ARM_ORDER, SCIENTIFIC_NAMES
     assert len(ARM_ORDER) == 3
     assert list(SCIENTIFIC_NAMES.values()) == [
-        "Native S5 recurrence under the shared stability constraint",
-        "Zucchet prospective S5 recurrence",
-        "Generalized prospective S5 recurrence (M,γ,T)",
+        "Native S5",
+        "Zucchet prospective dynamics — finite-difference realization",
+        "generalized prospective dynamics (M,γ,T) — finite-difference realization",
     ]
