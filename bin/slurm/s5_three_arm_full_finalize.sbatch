@@ -10,9 +10,12 @@
 
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$HERE/../run_experiments/cluster_env.sh"
-cd "$PROSPECTIVE_REPO"
+REPO_ROOT="${PROSPECTIVE_REPO:-${SLURM_SUBMIT_DIR:?SLURM_SUBMIT_DIR is unset}}"
+test -d "$REPO_ROOT"
+test -f "$REPO_ROOT/bin/run_experiments/cluster_env.sh"
+export PROSPECTIVE_REPO="$REPO_ROOT"
+source "$REPO_ROOT/bin/run_experiments/cluster_env.sh"
+cd "$REPO_ROOT"
 
 : "${S5_THREE_ARM_DATA:?set S5_THREE_ARM_DATA to the prepared official raw cache}"
 : "${S5_THREE_ARM_RUN_ROOT:?set S5_THREE_ARM_RUN_ROOT to the run directory}"

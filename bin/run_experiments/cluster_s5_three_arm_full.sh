@@ -4,6 +4,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/cluster_env.sh"
 cd "$PROSPECTIVE_REPO"
+REPO_ROOT="$(pwd -P)"
+export PROSPECTIVE_REPO="$REPO_ROOT"
 : "${EXPECTED_COMMIT:?set EXPECTED_COMMIT to the final authoritative commit}"
 test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
 test -z "$(git status --porcelain)"
@@ -24,12 +26,14 @@ printf 'authoritative_commit=%s\nbranch=%s\ndata_cache=%s\n' \
   > "$OUT/run_metadata.txt"
 
 ARRAY_JOB="$(sbatch --parsable \
+  --chdir="$REPO_ROOT" \
   --array=0-8%4 \
-  --export=ALL,EXPECTED_COMMIT="$EXPECTED_COMMIT",S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
-  "$PROSPECTIVE_REPO/bin/slurm/s5_three_arm_full_array.sbatch")"
+  --export=ALL,PROSPECTIVE_REPO="$REPO_ROOT",EXPECTED_COMMIT="$EXPECTED_COMMIT",S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
+  "$REPO_ROOT/bin/slurm/s5_three_arm_full_array.sbatch")"
 FINALIZER_JOB="$(sbatch --parsable \
-  --dependency="afterok:${ARRAY_JOB}" \
-  --export=ALL,EXPECTED_COMMIT="$EXPECTED_COMMIT",S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
-  "$PROSPECTIVE_REPO/bin/slurm/s5_three_arm_full_finalize.sbatch")"
+  --dependency="afterany:${ARRAY_JOB}" \
+  --chdir="$REPO_ROOT" \
+  --export=ALL,PROSPECTIVE_REPO="$REPO_ROOT",EXPECTED_COMMIT="$EXPECTED_COMMIT",S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
+  "$REPO_ROOT/bin/slurm/s5_three_arm_full_finalize.sbatch")"
 
 printf 'array job: %s\nfinalizer job: %s\n' "$ARRAY_JOB" "$FINALIZER_JOB"

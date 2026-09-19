@@ -18,6 +18,7 @@ from experiments.s5_three_arm_full.runner import (ARM_ORDER, BATCH_SIZE,
 def main(args):
     rows = []
     failures = []
+    missing = []
     for arm in ARM_ORDER:
         for seed in SEEDS:
             path = os.path.join(args.task_root, arm, str(seed),
@@ -26,7 +27,10 @@ def main(args):
                 failure_path = os.path.join(args.task_root, arm, str(seed),
                                             "failure.json")
                 if not os.path.exists(failure_path):
-                    raise SystemExit(f"missing completed task: {path}")
+                    missing.append({"code_identifier": arm, "seed": seed,
+                                    "task_result": path,
+                                    "failure": "missing task artifact"})
+                    continue
                 with open(failure_path) as handle:
                     failure = json.load(handle)
                 failures.append(failure)
@@ -42,6 +46,25 @@ def main(args):
             else:
                 row["status"] = "OK"
             rows.append(row)
+
+    if missing:
+        result = {
+            "schema": "s5-three-arm-full-training/v2",
+            "status": "INFRASTRUCTURE_FAILURE",
+            "scientific_arms": [
+                "Native S5",
+                "Zucchet prospective dynamics — finite-difference realization",
+                "generalized prospective dynamics (M,γ,T) — finite-difference realization"],
+            "code_identifiers": list(ARM_ORDER), "seeds": list(SEEDS),
+            "completed_rows": rows, "failed_tasks": failures,
+            "missing_tasks": missing,
+            "test_opened_after_selection": False,
+            "test_opened_once_by_finalizer": False,
+        }
+        os.makedirs(args.out, exist_ok=True)
+        with open(os.path.join(args.out, "results.json"), "w") as handle:
+            json.dump(result, handle, indent=2)
+        raise SystemExit("infrastructure-failed tasks: " + json.dumps(missing))
 
     if failures:
         result = {
