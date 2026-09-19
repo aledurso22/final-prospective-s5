@@ -49,19 +49,48 @@ if [[ "$SBATCH_DEFAULT_ARRAY" != "$ARRAY_SPEC" ]]; then
   exit 1
 fi
 
+# The repository is node-local (/Local/durso/final-prospective-s5), so this
+# launcher is run from an INTERACTIVE allocation on pgi15-gpu3. That
+# allocation is itself a concurrent job on the node: if an array element
+# starts while it is alive and it then ends, that is precisely the
+# concurrent-completion condition under which job 66684 was SIGKILLed. The
+# array therefore waits for the submitting allocation to terminate. Only the
+# array carries this dependency; the finalizer still waits on the array.
+PARENT_DEPENDENCY=()
+SUBMIT_ALLOCATION="${SLURM_JOB_ID:-}"
+if [[ -n "$SUBMIT_ALLOCATION" ]]; then
+  if [[ ! "$SUBMIT_ALLOCATION" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: SLURM_JOB_ID='$SUBMIT_ALLOCATION' is not a numeric job id;" >&2
+    echo "      refusing to build an sbatch dependency from it." >&2
+    exit 1
+  fi
+  PARENT_DEPENDENCY=(--dependency="afterany:$SUBMIT_ALLOCATION")
+fi
+
 echo "scientific arms: Native S5 | Zucchet prospective dynamics — finite-difference realization | generalized prospective dynamics (M,gamma,T) — finite-difference realization"
 echo "branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "commit: $(git rev-parse HEAD)"
 echo "data cache: ${DATA_CACHE} (official validation/testing lists)"
 echo "output: $OUT"
 echo "topology: ONE task at a time (--array=$ARRAY_SPEC)"
+if [[ -n "$SUBMIT_ALLOCATION" ]]; then
+  echo "submission allocation: $SUBMIT_ALLOCATION"
+  echo "array waits for it: --dependency=afterany:$SUBMIT_ALLOCATION"
+else
+  echo "submission allocation: none (no SLURM_JOB_ID); no parent dependency"
+fi
 if [[ "$DRY_RUN" != "1" ]]; then
   printf 'authoritative_commit=%s\nbranch=%s\ndata_cache=%s\narray=%s\n' \
     "$EXPECTED_COMMIT" "$(git rev-parse --abbrev-ref HEAD)" "$DATA_CACHE" \
     "$ARRAY_SPEC" > "$OUT/run_metadata.txt"
+  printf 'submit_allocation=%s\narray_dependency=%s\n' \
+    "${SUBMIT_ALLOCATION:-none}" \
+    "${SUBMIT_ALLOCATION:+afterany:$SUBMIT_ALLOCATION}" \
+    >> "$OUT/run_metadata.txt"
 fi
 
 array_submit=(sbatch --parsable
+  ${PARENT_DEPENDENCY[@]+"${PARENT_DEPENDENCY[@]}"}
   --chdir="$REPO_ROOT"
   --array="$ARRAY_SPEC"
   --output="$OUTPUT_DIR/slurm/array-%A_%a.out"

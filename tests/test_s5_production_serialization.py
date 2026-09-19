@@ -15,8 +15,10 @@ condition.
 """
 
 import io
+import itertools
 import os
 import re
+import shutil
 import subprocess
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +27,7 @@ ARRAY_SBATCH = os.path.join(REPO, "bin/slurm/s5_three_arm_full_array.sbatch")
 FINALIZE_SBATCH = os.path.join(REPO, "bin/slurm/s5_three_arm_full_finalize.sbatch")
 RUNNER = os.path.join(REPO, "experiments/s5_three_arm_full/runner.py")
 #: the last commit whose scientific behaviour is authoritative
-SCIENTIFIC_BASE = "c575dddbb8d9006577e6685eceaca47bff8f9229"
+SCIENTIFIC_BASE = "1de258bbcefc1904d2b921afcf7ee0c9595487ce"
 #: the nine tasks, in fixed scientific reporting order
 EXPECTED_MAPPING = [("native_matched_s5", seed) for seed in (301, 302, 303)] \
     + [("zucchet_prospective_s5", seed) for seed in (301, 302, 303)] \
@@ -130,14 +132,16 @@ def test_arm_and_seed_mapping_is_unchanged_for_all_nine_elements():
 
 def test_finalizer_waits_for_every_array_element():
     launcher = _text(LAUNCHER)
-    assert '--dependency="afterany:${ARRAY_JOB}"' in launcher
     # the dependency is on the ARRAY JOB ID, which is satisfied only when all
     # nine elements are terminal, and it is never a per-element id
     assert "afterany:${ARRAY_JOB}_" not in launcher
-    assert launcher.index("array_submit=(") < launcher.index("ARRAY_JOB=\"$(")
-    assert launcher.index("ARRAY_JOB=\"$(") < launcher.index("finalizer_submit=(")
-    assert "s5_three_arm_full_finalize.sbatch" in launcher
-    assert launcher.count("afterany:") == 1
+    begin = launcher.index("finalizer_submit=(")
+    block = launcher[begin:launcher.index("s5_three_arm_full_finalize.sbatch",
+                                          begin)]
+    assert re.findall(r"--dependency=\S+", block) == \
+        ['--dependency="afterany:${ARRAY_JOB}"']
+    assert launcher.index("array_submit=(") < launcher.index('ARRAY_JOB="$(')
+    assert launcher.index('ARRAY_JOB="$(') < begin
 
 
 def test_private_task_paths_and_guards_are_preserved():
@@ -181,27 +185,100 @@ def test_no_scientific_behaviour_changed():
         assert _blob_hash(path) == _worktree_hash(path) != "", relative
 
 
-def test_the_only_change_to_the_array_script_is_the_topology():
-    """The array script may differ from the authoritative commit only in the
-    throttle and the serialization guard, never in what is executed."""
-    diff = subprocess.run(
-        ["git", "-C", REPO, "diff", SCIENTIFIC_BASE, "--unified=0", "--",
-         "bin/slurm/s5_three_arm_full_array.sbatch"],
-        capture_output=True, text=True).stdout
-    changed = [line for line in diff.splitlines()
-               if re.match(r"^[+-][^+-]", line)]
-    assert changed, "expected the throttle change"
-    for line in changed:
-        body = line[1:].strip()
-        allowed = (body.startswith("#")            # comment or SBATCH directive
-                   or "RUNNING_SIBLINGS" in body
-                   or "squeue" in body
-                   or body.startswith("echo \"Refusing to run")
-                   or body.startswith("echo \"this production run")
-                   or body in ("exit 1", "fi", ""))
-        assert allowed, line
-    # the runner invocation and its arguments are untouched
-    assert "--- experiments" not in diff
-    for anchor in ("experiments.s5_three_arm_full.runner", "--data-cache",
+def test_the_array_script_itself_is_untouched_by_the_dependency_change():
+    """The submitting-allocation dependency belongs to the launcher alone: the
+    array script, which carries the throttle and the serialization guard, is
+    byte-identical to the authoritative commit."""
+    assert _blob_hash(ARRAY_SBATCH) == _worktree_hash(ARRAY_SBATCH) != ""
+    for anchor in ("#SBATCH --array=0-8%1", "RUNNING_SIBLINGS", "squeue",
+                   "experiments.s5_three_arm_full.runner", "--data-cache",
                    "--arm", "--seed"):
         assert anchor in _text(ARRAY_SBATCH), anchor
+
+
+# ------------------------------------- the submitting allocation dependency
+def _dry_run(tmp_path, slurm_job_id=None):
+    """Execute the REAL launcher with DRY_RUN=1 against a throwaway clone.
+
+    A private git repository is used so the launcher's own commit and
+    clean-worktree guards are satisfied deterministically, whatever the state
+    of the developer's worktree, and so no submission can occur.
+    """
+    repo = tmp_path / "repo"
+    shutil.copytree(os.path.join(REPO, "bin"), repo / "bin")
+    git = ["git", "-C", str(repo)]
+    subprocess.run(git + ["init", "-q"], check=True)
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["-c", "user.email=t@t", "-c", "user.name=t",
+                          "commit", "-qm", "dry-run fixture"], check=True)
+    head = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SLURM_")}
+    env.update(DRY_RUN="1", PROSPECTIVE_REPO=str(repo), EXPECTED_COMMIT=head,
+               PROSPECTIVE_RUNS=str(tmp_path / "runs"), RUN_ID="fixture")
+    if slurm_job_id is not None:
+        env["SLURM_JOB_ID"] = slurm_job_id
+    return subprocess.run(
+        ["bash", str(repo / "bin/run_experiments/cluster_s5_three_arm_full.sh")],
+        capture_output=True, text=True, env=env)
+
+
+def _submission(stdout, header):
+    """The contiguous argument lines printed under one DRY_RUN header."""
+    block = stdout.split(header, 1)[1].splitlines()[1:]
+    return [line.strip() for line in
+            itertools.takewhile(lambda line: line.startswith("    "), block)]
+
+
+def test_inside_an_allocation_the_array_waits_for_it(tmp_path):
+    """The gap this closes: the interactive allocation that must exist to run
+    this launcher (the repository is node-local) is itself a concurrent job,
+    and its termination while an element runs is the condition under which
+    job 66684 was killed."""
+    done = _dry_run(tmp_path, slurm_job_id="12345")
+    assert done.returncode == 0, done.stderr
+    array = _submission(done.stdout, "DRY_RUN array submission")
+    assert array.count("--dependency=afterany:12345") == 1
+    assert "--array=0-8%1" in array
+    # printed and recorded
+    assert "submission allocation: 12345" in done.stdout
+    assert "array waits for it: --dependency=afterany:12345" in done.stdout
+
+
+def test_the_finalizer_depends_only_on_the_array_job(tmp_path):
+    done = _dry_run(tmp_path, slurm_job_id="12345")
+    finalizer = _submission(done.stdout, "DRY_RUN finalizer submission")
+    dependencies = [line for line in finalizer if line.startswith("--dependency")]
+    assert dependencies == ["--dependency=afterany:<ARRAY_JOB_ID>"]
+    assert "12345" not in " ".join(finalizer)
+    assert any(line.endswith("s5_three_arm_full_finalize.sbatch")
+               for line in finalizer)
+
+
+def test_a_nonnumeric_allocation_id_fails_closed_before_submission(tmp_path):
+    for bogus in ("12345_0", "abc", "12345; rm -rf /", "$(id)", " 12345"):
+        done = _dry_run(tmp_path / bogus.replace("/", "_"),
+                        slurm_job_id=bogus)
+        assert done.returncode == 1, bogus
+        assert "is not a numeric job id" in done.stderr
+        assert "DRY_RUN array submission" not in done.stdout
+
+
+def test_outside_slurm_no_parent_dependency_is_added(tmp_path):
+    done = _dry_run(tmp_path)                    # no SLURM_JOB_ID at all
+    assert done.returncode == 0, done.stderr
+    array = _submission(done.stdout, "DRY_RUN array submission")
+    assert not any(line.startswith("--dependency") for line in array)
+    assert "--array=0-8%1" in array
+    assert "submission allocation: none" in done.stdout
+
+
+def test_the_dry_run_never_submits_and_keeps_the_throttle(tmp_path):
+    for job_id in (None, "12345"):
+        done = _dry_run(tmp_path / f"case-{job_id}", slurm_job_id=job_id)
+        assert "DRY_RUN: nothing submitted" in done.stdout
+        assert "topology: ONE task at a time (--array=0-8%1)" in done.stdout
+        array = _submission(done.stdout, "DRY_RUN array submission")
+        assert array[0] == "sbatch" and "--parsable" in array
+        assert [line for line in array if line.startswith("--array")] == \
+            ["--array=0-8%1"]

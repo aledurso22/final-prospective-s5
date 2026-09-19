@@ -216,6 +216,21 @@ three places rather than documented in one:
    that check cannot be made. A widened throttle, a manual resubmission or a
    scheduler setting therefore cannot produce concurrency silently.
 
+4. the launcher itself runs inside an **interactive allocation** — the
+   repository is node-local at `/Local/durso/final-prospective-s5`, so there
+   is no other way to submit it — and that allocation is a concurrent job on
+   the same node. If an array element starts while it is alive and the
+   allocation then ends, that is exactly the concurrent-completion condition
+   of §5.1. The launcher therefore reads `SLURM_JOB_ID`, validates it as
+   purely numeric (failing closed otherwise, before any `sbatch` argument is
+   built from it), and submits the array with
+   `--dependency=afterany:$SLURM_JOB_ID`. The array cannot start until the
+   submitting allocation has fully terminated. The dependency is printed and
+   recorded in `run_metadata.txt` as `submit_allocation` and
+   `array_dependency`. Outside Slurm, with no `SLURM_JOB_ID`, no parent
+   dependency is added. Only the array carries it: the finalizer still
+   depends `afterany` on the array job id alone.
+
 Unchanged: the nine tasks and their fixed scientific mapping (elements 0–8 →
 Native S5, Zucchet FD, generalized FD × seeds 301, 302, 303), each task's
 private `$TASK_ROOT` output, `TMPDIR` and `JAX_COMPILATION_CACHE_DIR`, the
