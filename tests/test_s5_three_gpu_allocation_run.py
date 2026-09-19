@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 
+from experiments.s5_three_arm_full import failure_gate as FG
 from experiments.s5_three_arm_full import topology_report as TR
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +23,7 @@ LAUNCHER = os.path.join(
 RUNNER = os.path.join(REPO, "experiments/s5_three_arm_full/runner.py")
 FINALIZE = os.path.join(REPO, "experiments/s5_three_arm_full/finalize.py")
 #: the commit whose scientific content must not move
-SCIENTIFIC_BASE = "831bd49e45849f17a41da66091c01f589f4f4b05"
+SCIENTIFIC_BASE = "7841390ad74b3ae5cc73c51f0ab342887c51c425"
 ARMS = ("native_matched_s5", "zucchet_prospective_s5",
         "generalized_prospective_s5")
 
@@ -59,6 +60,15 @@ if "experiments.s5_three_arm_full.gpu_telemetry" in argv:
 if "experiments.s5_three_arm_full.topology_report" in argv:
     sys.exit(int(os.environ.get("STUB_GATE_RC", "0")))
 
+if "experiments.s5_three_arm_full.failure_gate" in argv:
+    # delegate to the REAL gate, so the launcher is tested against it
+    sys.path.insert(0, os.environ["STUB_REAL_REPO"])
+    from experiments.s5_three_arm_full import failure_gate
+    sys.argv = ["failure_gate"] + argv[argv.index(
+        "experiments.s5_three_arm_full.failure_gate") + 1:]
+    failure_gate.main()
+    sys.exit(0)
+
 if "experiments.s5_three_arm_full.finalize" in argv:
     root = value("--task-root")
     write(os.path.join(value("--out"), "results.json"),
@@ -83,8 +93,24 @@ if "experiments.s5_three_arm_full.runner" in argv:
     if not record["smoke"]:
         failing += os.environ.get("STUB_FAIL_TRAIN_ARMS", "").split(",")
     if arm in failing:
-        write(os.path.join(out, "failure.json"),
-              dict(record, failure="stubbed numerical failure"))
+        # the shape runner.py actually writes for the declared failure,
+        # unless the case under test asks for a different one
+        failure = dict(record, failure="stubbed numerical failure",
+                       error_type=os.environ.get("STUB_ERROR_TYPE",
+                                                 "NumericalTrainingFailure"),
+                       record=dict(record, epoch=1, step=0,
+                                   failure="nonfinite"))
+        for key in os.environ.get("STUB_FAILURE_DROP", "").split(","):
+            failure.pop(key, None)
+        if os.environ.get("STUB_FAILURE_ARM"):
+            failure["code_identifier"] = os.environ["STUB_FAILURE_ARM"]
+        if os.environ.get("STUB_FAILURE_SEED"):
+            failure["seed"] = int(os.environ["STUB_FAILURE_SEED"])
+        if os.environ.get("STUB_FAILURE_CORRUPT"):
+            os.makedirs(out, exist_ok=True)
+            open(os.path.join(out, "failure.json"), "w").write("{not json")
+            sys.exit(1)
+        write(os.path.join(out, "failure.json"), failure)
         sys.exit(1)
     if record["smoke"]:
         write(os.path.join(out, "smoke_result.json"),
@@ -126,7 +152,8 @@ def _run(tmp_path, dry_run=False, devices="0,1,2,3", job_id="66760", **stub):
                PROSPECTIVE_VENV=str(python.parent.parent),
                PROSPECTIVE_RUNS=str(tmp_path / "runs"),
                S5_THREE_ARM_DATA=str(tmp_path / "data"),
-               RUN_ID="fixture", STUB_ORDER=str(order), **stub)
+               RUN_ID="fixture", STUB_ORDER=str(order),
+               STUB_REAL_REPO=REPO, **stub)
     if job_id is not None:
         env["SLURM_JOB_ID"] = job_id
     if devices is not None:
@@ -421,3 +448,118 @@ def test_the_topology_gate_requires_passes_and_distinct_resolved_gpus(tmp_path):
               _smoke_dir(tmp_path / "f", "b", "GPU-b")]
     problems = TR.gate(TR.report(failed))
     assert any("SMOKE_PASS" in problem for problem in problems)
+
+
+# ------------------------------------ the Zucchet negative-control gate ----
+def _failure(tmp_path, **overrides):
+    """A `failure.json` of the shape runner.py writes, with edits."""
+    record = {"arm": "Zucchet prospective dynamics — finite-difference "
+                     "realization",
+              "code_identifier": "zucchet_prospective_s5", "seed": 301,
+              "epoch": 1, "step": 0, "failure": "nonfinite"}
+    failure = {"scientific_name": record["arm"],
+               "code_identifier": "zucchet_prospective_s5", "seed": 301,
+               "epochs_requested": 15,
+               "error_type": "NumericalTrainingFailure",
+               "failure": json.dumps(record), "record": record}
+    failure.update(overrides)
+    for key in [k for k, v in failure.items() if v is _ABSENT]:
+        del failure[key]
+    path = tmp_path / "failure.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(failure))
+    return str(path)
+
+
+class _Absent:
+    pass
+
+
+_ABSENT = _Absent()
+
+
+def test_the_declared_numerical_failure_is_accepted_for_every_seed(tmp_path):
+    for seed in (301, 302, 303):
+        record = {"code_identifier": "zucchet_prospective_s5", "seed": seed,
+                  "epoch": 1, "step": 0, "failure": "nonfinite"}
+        path = _failure(tmp_path / str(seed), seed=seed, record=record)
+        verdict = FG.classify(path, "zucchet_prospective_s5", seed)
+        assert verdict["accepted"] is True, verdict["reasons"]
+        assert verdict["reasons"] == []
+
+
+def test_every_other_kind_of_failure_is_rejected(tmp_path):
+    """Presence of failure.json is not a scientific classification."""
+    cases = {
+        "runtime error": {"error_type": "RuntimeError"},
+        "cuda error": {"error_type": "XlaRuntimeError",
+                       "failure": "CUDA_ERROR_OUT_OF_MEMORY"},
+        "configuration error": {"error_type": "ValueError",
+                                "failure": "invalid task identity"},
+        "generic failure": {"error_type": _ABSENT},
+        "wrong arm": {"code_identifier": "generalized_prospective_s5"},
+        "wrong seed": {"seed": 999},
+        "no telemetry record": {"record": _ABSENT},
+        "record of another task": {
+            "record": {"code_identifier": "native_matched_s5", "seed": 301}},
+    }
+    for name, overrides in cases.items():
+        path = _failure(tmp_path / name.replace(" ", "_"), **overrides)
+        verdict = FG.classify(path, "zucchet_prospective_s5", 301)
+        assert verdict["accepted"] is False, name
+        assert verdict["reasons"], name
+    # missing and corrupt artifacts
+    missing = FG.classify(str(tmp_path / "absent/failure.json"),
+                          "zucchet_prospective_s5", 301)
+    assert missing["accepted"] is False and "missing" in missing["reasons"][0]
+    corrupt = tmp_path / "corrupt"
+    corrupt.mkdir()
+    (corrupt / "failure.json").write_text("{not json")
+    broken = FG.classify(str(corrupt / "failure.json"),
+                         "zucchet_prospective_s5", 301)
+    assert broken["accepted"] is False and "unreadable" in broken["reasons"][0]
+
+
+def test_the_runner_records_the_exception_class(tmp_path):
+    source = io.open(RUNNER).read()
+    assert '"error_type": type(error).__name__,' in source
+    # and only the declared failure is written as failure.json at all
+    assert source.index('"error_type": type(error).__name__,') < \
+        source.index('with open(os.path.join(args.out, "failure.json"), "w")')
+
+
+def test_a_rejected_zucchet_failure_stops_before_the_generalized_wave(
+        tmp_path):
+    for name, stub in (("runtime error", {"STUB_ERROR_TYPE": "RuntimeError"}),
+                       ("cuda error", {"STUB_ERROR_TYPE": "XlaRuntimeError"}),
+                       ("no error_type",
+                        {"STUB_FAILURE_DROP": "error_type"}),
+                       ("no record", {"STUB_FAILURE_DROP": "record"}),
+                       ("wrong arm",
+                        {"STUB_FAILURE_ARM": "native_matched_s5"}),
+                       ("wrong seed", {"STUB_FAILURE_SEED": "999"}),
+                       ("corrupt artifact", {"STUB_FAILURE_CORRUPT": "1"})):
+        done, launched, root = _run(tmp_path / name.replace(" ", "_"),
+                                    STUB_FAIL_TRAIN_ARMS=
+                                    "zucchet_prospective_s5", **stub)
+        assert done.returncode == 1, name
+        assert "not the declared numerical failure" in done.stderr, name
+        assert "artifacts are preserved" in done.stderr, name
+        # the generalized wave never started and nothing was finalized
+        assert [row for row in launched
+                if row[0] == "generalized_prospective_s5"
+                and row[3] == "train"] == [], name
+        assert not os.path.exists(root / "final/results.json"), name
+        # every artifact survives
+        assert os.path.exists(root / "zucchet_prospective_s5/301/failure.json")
+        assert os.path.exists(root / "native_matched_s5/301/task_result.json")
+
+
+def test_native_and_generalized_failures_are_still_never_excused(tmp_path):
+    """No failure.json of any shape makes a Native or generalized failure
+    acceptable: the gate applies to the declared control arm only."""
+    for arm in ("native_matched_s5", "generalized_prospective_s5"):
+        done, _, root = _run(tmp_path / arm, STUB_FAIL_TRAIN_ARMS=arm)
+        assert done.returncode == 1
+        assert "unexpected failure in wave" in done.stderr
+        assert not os.path.exists(root / "final/results.json")

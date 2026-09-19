@@ -70,8 +70,18 @@ awaited before the next wave begins.
 | wave | arm | failure policy |
 |---|---|---|
 | 1 | Native S5 | any missing `task_result.json` is **unexpected**: abort |
-| 2 | Zucchet FD | `failure.json` is the **declared negative control**: recorded, run continues |
+| 2 | Zucchet FD | only a **verified** declared numerical failure is the negative control: recorded, run continues |
 | 3 | generalized FD | any missing `task_result.json` is **unexpected**: abort |
+
+A Zucchet `failure.json` is not accepted because it exists.
+`experiments/s5_three_arm_full/failure_gate.py` checks the artifact the
+runner actually writes: `error_type` must be `NumericalTrainingFailure`, the
+`code_identifier` and `seed` must be that very task's, and the numerical
+telemetry `record` must be present and identify the same task. A CUDA or
+runtime error, a configuration error, a missing or corrupt artifact, or an
+artifact belonging to another arm or seed is an infrastructure failure: the
+run aborts before the generalized wave and before finalization. Each verdict
+is appended to `expected_failures.log`.
 
 An abort preserves every artifact and skips the finalizer.
 

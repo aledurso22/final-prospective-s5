@@ -607,6 +607,9 @@ def main():
                    "process_gpu": GPU_TELEMETRY.summary(
                        _PROCESS_GPU.get(args.out) or GPU_TELEMETRY.load(
                            os.path.join(args.out, PROCESS_GPU_BINDING))),
+                   # the exception class, so a reader can tell the declared
+                   # numerical failure from any other kind of failure
+                   "error_type": type(error).__name__,
                    "failure": str(error)}
         if isinstance(error, NumericalTrainingFailure):
             failure["record"] = error.record

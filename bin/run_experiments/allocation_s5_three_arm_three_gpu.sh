@@ -119,6 +119,7 @@ echo "          tail -n 2 $RUN_ROOT/*/*/metrics.jsonl; nvidia-smi --query-comput
 CHILD_PIDS=()
 CHILD_LABELS=()
 CHILD_DIRS=()
+CHILD_SEEDS=()
 
 start_child() {   # arm seed gpu_token root [--smoke]
   local arm="$1" seed="$2" token="$3" root="$4" smoke="${5:-}"
@@ -157,6 +158,7 @@ start_child() {   # arm seed gpu_token root [--smoke]
   CHILD_PIDS+=("$!")
   CHILD_LABELS+=("$label")
   CHILD_DIRS+=("$task_root")
+  CHILD_SEEDS+=("$seed")
   echo "started $label as pid $! (log $task_root/logs/train.log)"
 }
 
@@ -179,6 +181,7 @@ reset_wave() {
   CHILD_PIDS=()
   CHILD_LABELS=()
   CHILD_DIRS=()
+  CHILD_SEEDS=()
 }
 
 # ------------------------------------------------- 1. concurrent smoke -----
@@ -240,10 +243,19 @@ for arm in "${WAVE_ARMS[@]}"; do
     if [[ -f "$task_root/task_result.json" ]]; then
       :
     elif [[ "$arm" == "$EXPECTED_FAILURE_ARM" && -f "$task_root/failure.json" ]]; then
-      # the declared negative control failed numerically, as it may: this is a
-      # scientific result, it is preserved, and it does not stop the run
-      EXPECTED_FAILURES+=("$label")
-      echo "expected numerical failure recorded: $label"
+      # The presence of failure.json is NOT enough: a CUDA error, a bad
+      # configuration, a missing or corrupt artifact or an unrelated Python
+      # exception would look the same. Only the declared numerical failure of
+      # exactly this arm and seed is a scientific result.
+      if "$PY" -u -m experiments.s5_three_arm_full.failure_gate \
+           --failure "$task_root/failure.json" \
+           --arm "$arm" --seed "${CHILD_SEEDS[$index]}" \
+           >> "$RUN_ROOT/expected_failures.log" 2>&1; then
+        EXPECTED_FAILURES+=("$label")
+        echo "expected numerical failure recorded: $label"
+      else
+        UNEXPECTED_FAILURES+=("$label (failure.json is not the declared numerical failure)")
+      fi
     else
       UNEXPECTED_FAILURES+=("$label (exit $status)")
     fi
