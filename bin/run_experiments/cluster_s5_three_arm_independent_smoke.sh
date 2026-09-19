@@ -72,9 +72,10 @@ for task in "${SMOKE_TASKS[@]}"; do
     --export="ALL,PROSPECTIVE_REPO=$REPO_ROOT,EXPECTED_COMMIT=$EXPECTED_COMMIT,S5_THREE_ARM_DATA=$DATA_CACHE,S5_THREE_ARM_RUN_ROOT=$OUT,S5_THREE_ARM_ARM=$ARM,S5_THREE_ARM_SEED=$SEED,S5_THREE_ARM_SMOKE=1"
     "$REPO_ROOT/bin/slurm/s5_three_arm_one_task.sbatch")
   if [[ "$DRY_RUN" == "1" ]]; then
-    printf 'DRY_RUN submission:'
-    printf ' %q' "${submit[@]}"
-    printf '\n'
+    # one argument per line: the array is passed to sbatch verbatim, so no
+    # shell quoting is applied to it in the real path either
+    echo "DRY_RUN submission:"
+    printf '    %s\n' "${submit[@]}"
     continue
   fi
   job_id="$("${submit[@]}")"
