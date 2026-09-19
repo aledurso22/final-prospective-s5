@@ -145,27 +145,88 @@ updates, validation, checkpoint save, checkpoint reload and lifecycle
 telemetry. `DRY_RUN=1` prints the exact submissions without contacting
 Slurm.
 
-## 5. How the result is read
+## 5. How the result was read, and what the run showed
 
-A pass requires, for **both** jobs, from the JSON artifacts:
+A pass required, for **both** jobs, from the JSON artifacts — Slurm
+`COMPLETED` alone was never sufficient:
 
 - `smoke_result.json` with `status: SMOKE_PASS`, `training_steps: 2`,
   `checkpoint_restored: true`;
 - no `failure.json`;
-- `lifecycle.jsonl` reaching `after_smoke_training_steps`.
+- `lifecycle.jsonl` reaching the final smoke/checkpoint stage.
 
-Slurm `COMPLETED` alone is **not** a pass. The launcher prints the exact
-inspection command, `topology_report.py`, which reports the pass from the
-smoke artifacts and the shared-GPU question from the resolved process
-bindings only, or `inconclusive`.
+### 5.1 The concurrent independent submissions (19 September 2026)
 
-- **Both pass concurrently** → the array topology is implicated as the
-  setting in which the kill occurs. It is not thereby proven to be the unique
-  cause: passing independent jobs are consistent with an array-specific
-  mechanism and also with an intermittent or load-dependent one. The
-  production launcher then submits nine independent one-GPU jobs and makes
-  the finalizer depend `afterany` on all nine job ids.
-- **Interference persists** → the node is implicated. The production
-  launcher then serializes (`%1`).
+Commit `c575ddd`, node `pgi15-gpu3`, two **separate non-array jobs** with
+distinct base job ids, hence separate job cgroups and separate epilogs:
 
-Neither production change is made yet: the decision waits for the artifacts.
+| | Native S5, seed 301 | generalized prospective dynamics (M,γ,T) — FD, seed 301 |
+|---|---|---|
+| job | 66683 | 66684 |
+| `sacct` | `COMPLETED 0:0` | **`FAILED 0:9`** |
+| elapsed | 00:01:13 | **00:01:13** |
+| artifacts | full `SMOKE_PASS` | no `smoke_result.json`, **no `failure.json`**, empty stderr |
+| bound physical GPU | `GPU-f82833a4-48bc-9656-bedf-4830093cedf0` | `GPU-cdcdfe9b-8728-c785-815b-44637b33eef8` |
+
+Both process bindings were `resolved`, and the two uuids **differ**: the two
+runners ran on **different physical GPUs**. The generalized task had already
+completed a finite production update before the kill — loss
+`2.4943838119506836`, gradient norm `1.5445631742477417`,
+`gradients_finite: true`, `state_finite: true` — with peak GPU memory about
+8.96 GB, far below its limit. Empty stderr with `0:9` and no `failure.json`
+is an external kill: no Python exception and no JAX abort reached the
+artifacts.
+
+This excludes two hypotheses as **unique** causes:
+
+- **job-array membership**: the two tasks were not array members;
+- **shared physical GPU contention**: the resolved bindings show two distinct
+  devices.
+
+What remains implicated is **concurrent execution of two experimental tasks
+on this physical node**. The mechanism is still not identified — a node-level
+resource or driver interaction, a site epilog, or something triggered by the
+second workload — and nothing here proves which.
+
+### 5.2 The isolated control
+
+Job **66688**, the generalized arm alone: no array, no concurrent
+experimental sibling. `COMPLETED 0:0` in 00:01:45, `SMOKE_PASS`,
+`training_steps: 2`, validation completed, checkpoint saved and
+`checkpoint_restored: true`, process GPU binding `resolved`. The generalized
+recurrence and the complete training path are therefore sound in isolation;
+the failure in §5.1 is a property of the execution setting, not of the
+recurrence.
+
+## 6. The production consequence: serialization
+
+The production run is now **serialized**, and serialization is enforced in
+three places rather than documented in one:
+
+1. `bin/run_experiments/cluster_s5_three_arm_full.sh` submits with the
+   literal `ARRAY_SPEC="0-8%1"` — the effective submission is
+   `--array=0-8%1`;
+2. the same launcher **refuses to submit** unless the `#SBATCH --array=`
+   default in `bin/slurm/s5_three_arm_full_array.sbatch` is byte-equal to
+   that spec, so the two places cannot drift and the default cannot fall
+   back to concurrency;
+3. `bin/slurm/s5_three_arm_full_array.sbatch` **refuses to start** a task
+   while any sibling element of the same array job is `RUNNING`
+   (`squeue -h -j "$SLURM_ARRAY_JOB_ID" -t RUNNING`), and fails closed if
+   that check cannot be made. A widened throttle, a manual resubmission or a
+   scheduler setting therefore cannot produce concurrency silently.
+
+Unchanged: the nine tasks and their fixed scientific mapping (elements 0–8 →
+Native S5, Zucchet FD, generalized FD × seeds 301, 302, 303), each task's
+private `$TASK_ROOT` output, `TMPDIR` and `JAX_COMPILATION_CACHE_DIR`, the
+commit and clean-worktree guards, and the finalizer, which still depends
+`afterany` on the **array job id** and so starts only once all nine elements
+are terminal. Nine independent concurrent jobs are **not** submitted: that is
+exactly the topology §5.1 rules out.
+
+The scientific code is byte-identical to `c575ddd`: `s5/ssm.py`,
+`s5/discrete_recurrence.py`, `s5/prospective_ssm.py`,
+`s5/generalized_prospective_ssm.py`, `s5/three_arm_factory.py`, the data
+module, the runner and the finalizer. Serialization changes when tasks run,
+not what they compute — but it does change wall-clock: nine tasks of 40
+epochs now run end to end rather than four at a time.
