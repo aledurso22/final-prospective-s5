@@ -11,7 +11,8 @@
 #
 # Each job exercises the full path: production check, two real training
 # updates, validation, checkpoint save, checkpoint reload, lifecycle
-# telemetry, and the PRE-JAX record of the physical GPU (UUID and PCI bus id).
+# telemetry, the PRE-JAX job identity, and the process-specific binding of the
+# runner pid to a physical GPU UUID.
 #
 # Neither recurrence, the data, the protocol nor the artifacts change. This
 # launches NO full training.
@@ -78,7 +79,14 @@ for task in "${SMOKE_TASKS[@]}"; do
     printf '    %s\n' "${submit[@]}"
     continue
   fi
+  # --parsable prints "<jobid>" or "<jobid>;<cluster>"; normalize both
   job_id="$("${submit[@]}")"
+  job_id="${job_id%%;*}"
+  job_id="${job_id//[[:space:]]/}"
+  if [[ ! "$job_id" =~ ^[0-9]+(_[0-9]+)?$ ]]; then
+    echo "FAIL: unparsable sbatch --parsable output: '$job_id'" >&2
+    exit 1
+  fi
   JOB_IDS+=("$job_id")
   printf 'submitted %-32s seed %s as INDEPENDENT job %s\n' "$ARM" "$SEED" "$job_id"
 done
@@ -89,8 +97,21 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 printf 'independent job ids: %s\n' "${JOB_IDS[*]}"
-printf 'base job ids must differ: %s\n' \
-  "$(printf '%s\n' "${JOB_IDS[@]}" | cut -d_ -f1 | sort -u | tr '\n' ' ')"
+
+# HARD REQUIREMENT, not a printout: the whole point of this smoke is that the
+# two tasks are not members of one job. Different base job ids mean different
+# job cgroups and different epilogs.
+BASE_IDS=()
+for id in "${JOB_IDS[@]}"; do BASE_IDS+=("${id%%_*}"); done
+DISTINCT="$(printf '%s\n' "${BASE_IDS[@]}" | sort -u | wc -l | tr -d '[:space:]')"
+printf 'base job ids: %s (distinct: %s)\n' "${BASE_IDS[*]}" "$DISTINCT"
+if [[ "${#JOB_IDS[@]}" -ne 2 || "$DISTINCT" -ne 2 ]]; then
+  echo "FAIL: the two submissions must have two distinct base job ids;" >&2
+  echo "      got ${#JOB_IDS[@]} job(s), $DISTINCT distinct base id(s):" \
+       "${JOB_IDS[*]}" >&2
+  echo "      the execution topology under test was NOT created." >&2
+  exit 1
+fi
 printf 'run_root=%s\njobs=%s\ncommit=%s\n' \
   "$OUT" "${JOB_IDS[*]}" "$EXPECTED_COMMIT" > "$OUT/smoke_metadata.txt"
 
@@ -98,18 +119,20 @@ cat <<EOF
 
 Inspect the ARTIFACTS, not the Slurm state, when both jobs end:
 
-  for arm in native_matched_s5 generalized_prospective_s5; do
-    echo "== \$arm"
-    cat $OUT/\$arm/301/smoke_result.json 2>/dev/null || echo "NO smoke_result.json"
-    cat $OUT/\$arm/301/failure.json 2>/dev/null
-    tail -3 $OUT/\$arm/301/lifecycle.jsonl 2>/dev/null
-    python3 -c "import json;r=json.load(open('$OUT/'+'\$arm'+'/301/gpu_telemetry.json'));print('physical gpus:',[(g.get('uuid'),g.get('pci.bus_id')) for g in r['gpus']] if isinstance(r['gpus'],list) else r['gpus'])"
-  done
+  $PY -m experiments.s5_three_arm_full.topology_report \\
+    $OUT/native_matched_s5/301 $OUT/generalized_prospective_s5/301
+  tail -3 $OUT/native_matched_s5/301/lifecycle.jsonl
+  tail -3 $OUT/generalized_prospective_s5/301/lifecycle.jsonl
   sacct -j ${JOB_IDS[0]},${JOB_IDS[1]} --format=JobID,JobName%28,State,ExitCode,Elapsed,MaxRSS,NodeList
 
 A pass requires, for BOTH jobs: smoke_result.json with status SMOKE_PASS,
 training_steps 2 and checkpoint_restored true. Slurm COMPLETED alone is not a
-pass. If the two gpu_telemetry.json records show the same physical GPU UUID,
-the concurrency was on one device and the comparison is still informative,
-but say so explicitly in the report.
+pass.
+
+The shared-GPU question is answered ONLY from gpu_process_binding.json, which
+maps the runner's own pid to a physical GPU UUID via
+nvidia-smi --query-compute-apps. If either binding is not "resolved", the
+report prints classification "inconclusive" and the report must say so: the
+node inventory in gpu_telemetry.json lists every device on the node and can
+neither establish nor exclude sharing.
 EOF

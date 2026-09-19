@@ -290,9 +290,15 @@ def evaluate(state, model, x, y):
             "accuracy": float(correct / count), "n": count}
 
 
-#: file written BEFORE any JAX import by `gpu_telemetry`
+#: file written BEFORE any JAX import by `gpu_telemetry`; it carries the job
+#: identity and a NODE/NVML GPU INVENTORY, which is not device assignment
 PRE_JAX_TELEMETRY = "gpu_telemetry.json"
+#: file written AFTER CUDA initialization and the production update: the only
+#: record that binds THIS process id to a physical GPU
+PROCESS_GPU_BINDING = "gpu_process_binding.json"
 _PRE_JAX_EMITTED = set()
+#: out -> process-binding record, cached so artifacts share one resolution
+_PROCESS_GPU = {}
 
 
 def _execution_identity():
@@ -305,17 +311,35 @@ def record_lifecycle(out, event, **fields):
               "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
               "slurm": _execution_identity(),
               "gpu_memory": _gpu_memory_stats(), **fields}
-    # the PRE-JAX record (physical GPU UUID and PCI bus id) is attached once
-    # per process, so every artifact directory identifies its device even if
-    # the task is killed later
+    # the PRE-JAX record is attached once per process. It identifies the job,
+    # not the device: its GPU list is a node inventory, kept under its own key
+    # so it is never read as this task's assignment.
     if out not in _PRE_JAX_EMITTED:
         pre_jax = GPU_TELEMETRY.load(os.path.join(out, PRE_JAX_TELEMETRY))
         if pre_jax is not None:
             record["pre_jax_telemetry"] = pre_jax
-            record["physical_gpus"] = GPU_TELEMETRY.physical_gpu_ids(pre_jax)
         _PRE_JAX_EMITTED.add(out)
+    # the process-specific binding, once it exists: this, and only this, says
+    # which physical GPU this runner ran on
+    if out in _PROCESS_GPU:
+        record["process_gpu"] = GPU_TELEMETRY.summary(_PROCESS_GPU[out])
     with open(os.path.join(out, "lifecycle.jsonl"), "a") as handle:
         handle.write(json.dumps(record) + "\n")
+
+
+def bind_process_gpu(out):
+    """Bind THIS runner's pid to a physical GPU and persist it.
+
+    Called after CUDA has initialized and the production update has run, so
+    the process is an active compute application, and BEFORE the smoke
+    training steps, so the artifact survives a kill during them. The result
+    is `resolved`, `multiple` or `unresolved`; nothing is inferred from the
+    node inventory when it does not resolve.
+    """
+    binding = GPU_TELEMETRY.write_process_binding(
+        os.path.join(out, PROCESS_GPU_BINDING))
+    _PROCESS_GPU[out] = binding
+    return binding
 
 
 def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None):
@@ -446,7 +470,9 @@ def run_task(args):
     first_batch = batch_arrays(*data["train"], first_indices)
     production_check(args.arm, args.seed, args.out, first_batch,
                      initial_state, train_model)
-    record_lifecycle(args.out, "after_production_check_before_full_path")
+    binding = bind_process_gpu(args.out)
+    record_lifecycle(args.out, "after_production_check_before_full_path",
+                     process_gpu=GPU_TELEMETRY.summary(binding))
     if args.smoke:
         result = full_path_smoke(args.arm, args.seed, data, args.out,
                                  initial_state, train_model)
@@ -516,10 +542,15 @@ def full_path_smoke(arm, seed, data, out, state, train_model):
     with open(checkpoint, "rb") as handle:
         restored = serialization.from_bytes(state, handle.read())
     pre_jax = GPU_TELEMETRY.load(os.path.join(out, PRE_JAX_TELEMETRY))
+    binding = _PROCESS_GPU.get(out) or GPU_TELEMETRY.load(
+        os.path.join(out, PROCESS_GPU_BINDING))
     result = {"status": "SMOKE_PASS", "scientific_name": SCIENTIFIC_NAMES[arm],
               "code_identifier": arm, "seed": seed, "training_steps": step,
               "slurm": _execution_identity(),
-              "physical_gpus": GPU_TELEMETRY.physical_gpu_ids(pre_jax),
+              # the runner-pid -> physical GPU binding; the inventory is kept
+              # beside it, labelled, and is never used to claim identity
+              "process_gpu": GPU_TELEMETRY.summary(binding),
+              "gpu_inventory_uuids": GPU_TELEMETRY.inventory_uuids(pre_jax),
               "validation_accuracy": float(jnp.mean(accuracies)),
               "validation_cross_entropy": float(jnp.mean(losses)),
               "checkpoint": checkpoint, "checkpoint_restored": _all_finite(restored),
@@ -546,6 +577,9 @@ def main():
         failure = {"scientific_name": SCIENTIFIC_NAMES.get(args.arm, args.arm),
                    "code_identifier": args.arm, "seed": args.seed,
                    "slurm": _execution_identity(),
+                   "process_gpu": GPU_TELEMETRY.summary(
+                       _PROCESS_GPU.get(args.out) or GPU_TELEMETRY.load(
+                           os.path.join(args.out, PROCESS_GPU_BINDING))),
                    "failure": str(error)}
         if isinstance(error, NumericalTrainingFailure):
             failure["record"] = error.record
