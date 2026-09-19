@@ -60,4 +60,5 @@ def test_observability_and_fail_closed_path_are_in_runner():
     assert "train_step_observable" in source
     assert "step_metrics.jsonl" in source
     assert "failure.json" in source
-    assert "production_check(args.arm, args.seed, args.out, first_batch)" in source
+    assert "production_check(args.arm, args.seed, args.out, first_batch," in source
+    assert "full_path_smoke" in source

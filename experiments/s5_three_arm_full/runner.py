@@ -289,9 +289,20 @@ def evaluate(state, model, x, y):
             "accuracy": float(correct / count), "n": count}
 
 
-def train_arm(arm, seed, data, checkpoint_dir):
-    state = init_state(arm, seed)
-    train_model, eval_model = model_for(arm, True), model_for(arm, False)
+def record_lifecycle(out, event, **fields):
+    record = {"event": event, "pid": os.getpid(),
+              "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+              "gpu_memory": _gpu_memory_stats(), **fields}
+    with open(os.path.join(out, "lifecycle.jsonl"), "a") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None):
+    if state is None:
+        state = init_state(arm, seed)
+    if train_model is None:
+        train_model = model_for(arm, True)
+    eval_model = model_for(arm, False)
     step = 0
     best = None
     start_time = time.perf_counter()
@@ -301,8 +312,12 @@ def train_arm(arm, seed, data, checkpoint_dir):
                                         seed, epoch, drop_last=True):
             xb, yb = batch_arrays(*data["train"], indices)
             rng = jax.random.PRNGKey(seed * 1000 + step)
+            if epoch == 0 and step == 0:
+                record_lifecycle(checkpoint_dir, "before_first_actual_training_step")
             state, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
                 state, rng, xb, yb, train_model, step, steps_per_epoch)
+            if epoch == 0 and step == 0:
+                record_lifecycle(checkpoint_dir, "after_first_actual_training_step")
             state_finite = _all_finite(state)
             nonfinite = not (bool(gradients_finite) and state_finite and
                              bool(jnp.isfinite(loss)) and bool(jnp.isfinite(accuracy)) and
@@ -401,28 +416,30 @@ def run_task(args):
     os.makedirs(args.out, exist_ok=True)
     cache = EXPERIMENT_DATA.load_official_raw(args.data_cache, ("train", "val"))[0]
     data = {"train": cache["train"], "val": cache["val"]}
+    record_lifecycle(args.out, "before_training_initialization")
+    initial_state = init_state(args.arm, args.seed)
+    train_model = model_for(args.arm, True)
+    record_lifecycle(args.out, "after_training_initialization")
     first_indices = next(SC.epoch_batches(len(data["train"][1]), BATCH_SIZE,
                                            args.seed, 0, drop_last=True))
     first_batch = batch_arrays(*data["train"], first_indices)
-    production_check(args.arm, args.seed, args.out, first_batch)
+    production_check(args.arm, args.seed, args.out, first_batch,
+                     initial_state, train_model)
+    record_lifecycle(args.out, "after_production_check_before_full_path")
     if args.smoke:
-        result = {"status": "SMOKE_PASS", "scientific_name": SCIENTIFIC_NAMES[args.arm],
-                  "code_identifier": args.arm, "seed": args.seed,
-                  "production_check": os.path.join(args.out, "production_check.json")}
-        with open(os.path.join(args.out, "smoke_result.json"), "w") as handle:
-            json.dump(result, handle, indent=2)
+        result = full_path_smoke(args.arm, args.seed, data, args.out,
+                                 initial_state, train_model)
         print(json.dumps(result, indent=2))
         return
-    row = train_arm(args.arm, args.seed, data, args.out)
+    row = train_arm(args.arm, args.seed, data, args.out,
+                    state=initial_state, train_model=train_model)
     with open(os.path.join(args.out, "task_result.json"), "w") as handle:
         json.dump(row, handle, indent=2)
     print(json.dumps(row, indent=2))
 
 
-def production_check(arm, seed, out, batch):
+def production_check(arm, seed, out, batch, state, model):
     """Fail closed on one exact-shape finite update, then allow training."""
-    state = init_state(arm, seed)
-    model = model_for(arm, True)
     xb, yb = batch
     started = time.perf_counter()
     memory_before = _gpu_memory_stats()
@@ -437,11 +454,56 @@ def production_check(arm, seed, out, batch):
               "seconds": time.perf_counter() - started}
     with open(os.path.join(out, "production_check.json"), "w") as handle:
         json.dump(result, handle, indent=2)
+    record_lifecycle(out, "after_production_check_update",
+                     gradients_finite=bool(gradients_finite),
+                     state_finite=result["state_finite"])
     if not result["gradients_finite"] or not result["state_finite"]:
         raise NumericalTrainingFailure({
             "arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm,
             "seed": seed, "epoch": 0, "step": 0,
             "failure": "production check nonfinite", **result})
+
+
+def full_path_smoke(arm, seed, data, out, state, train_model):
+    """Exercise production lifecycle through train, validation, save, reload."""
+    steps_per_epoch = len(data["train"][1]) // BATCH_SIZE
+    step = 0
+    for indices in SC.epoch_batches(len(data["train"][1]), BATCH_SIZE,
+                                    seed, 0, drop_last=True):
+        xb, yb = batch_arrays(*data["train"], indices)
+        state, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
+            state, jax.random.PRNGKey(seed * 1000 + step), xb, yb,
+            train_model, step, steps_per_epoch)
+        if not gradients_finite or not _all_finite(state):
+            raise NumericalTrainingFailure({
+                "arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm,
+                "seed": seed, "epoch": 1, "step": step,
+                "failure": "smoke training step nonfinite"})
+        step += 1
+        if step == 2:
+            break
+    record_lifecycle(out, "after_smoke_training_steps", steps=step)
+    eval_model = model_for(arm, False)
+    xb = jnp.asarray(data["val"][0][:BATCH_SIZE])
+    yb = jnp.asarray(data["val"][1][:BATCH_SIZE])
+    losses, accuracies, _ = eval_step(
+        xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)), state, eval_model, True)
+    checkpoint = os.path.join(out, "smoke_checkpoint.msgpack")
+    with open(checkpoint, "wb") as handle:
+        handle.write(serialization.to_bytes(state))
+    with open(checkpoint, "rb") as handle:
+        restored = serialization.from_bytes(state, handle.read())
+    result = {"status": "SMOKE_PASS", "scientific_name": SCIENTIFIC_NAMES[arm],
+              "code_identifier": arm, "seed": seed, "training_steps": step,
+              "validation_accuracy": float(jnp.mean(accuracies)),
+              "validation_cross_entropy": float(jnp.mean(losses)),
+              "checkpoint": checkpoint, "checkpoint_restored": _all_finite(restored),
+              "production_check": os.path.join(out, "production_check.json")}
+    if not result["checkpoint_restored"]:
+        raise RuntimeError("smoke checkpoint restoration produced nonfinite state")
+    with open(os.path.join(out, "smoke_result.json"), "w") as handle:
+        json.dump(result, handle, indent=2)
+    return result
 
 
 def main():
