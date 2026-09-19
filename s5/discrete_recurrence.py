@@ -58,3 +58,23 @@ def scan_companion(a1, a2, c1, c2, inputs, reverse=False):
     _, states = jax.lax.associative_scan(_block_operator, (A, b))
     states = states[:, :, 0]
     return states[::-1] if reverse else states
+
+
+def scan_companion_sequential(a1, a2, c1, c2, inputs, reverse=False):
+    """Memory-safe exact recurrence scan with rematerialized reverse mode."""
+    sequence = inputs[::-1] if reverse else inputs
+
+    def rollout(values):
+        def body(carry, value):
+            state, previous_state, previous_input = carry
+            next_state = (a1 * state + a2 * previous_state
+                          + c1 @ value + c2 @ previous_input)
+            return (next_state, state, value), next_state
+
+        initial = (np.zeros_like(a1), np.zeros_like(a1),
+                   np.zeros_like(values[:1])[0])
+        _, states = jax.lax.scan(body, initial, values)
+        return states
+
+    states = jax.checkpoint(rollout)(sequence)
+    return states[::-1] if reverse else states

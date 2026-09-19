@@ -3,7 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from s5.discrete_recurrence import (companion_radius, generalized_coefficients,
-                                    scan_companion, zucchet_coefficients)
+                                    scan_companion, scan_companion_sequential,
+                                    zucchet_coefficients)
 from s5.train_helpers import no_bc_decay_group
 
 
@@ -44,6 +45,27 @@ def test_associative_scan_matches_sequential_rollout():
         expected.append(next_state)
         previous_state, previous_input, s = s, value, next_state
     np.testing.assert_allclose(scanned[:, 0], jnp.asarray(expected), rtol=2e-6, atol=2e-6)
+
+
+def test_rematerialized_scan_matches_associative_scan_and_gradients():
+    a1 = jnp.asarray([0.7 + 0.1j])
+    a2 = jnp.asarray([-0.1 + 0.02j])
+    c1 = jnp.asarray([[0.2 + 0.1j]])
+    c2 = jnp.asarray([[-0.05 + 0.02j]])
+    inputs = jnp.asarray([[1.0], [0.2], [-0.4], [0.7]], dtype=jnp.float32)
+    expected = scan_companion(a1, a2, c1, c2, inputs)
+    actual = scan_companion_sequential(a1, a2, c1, c2, inputs)
+    np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
+
+    def objective(first):
+        return jnp.real(scan_companion_sequential(
+            first, a2, c1, c2, inputs)).sum()
+
+    def reference(first):
+        return jnp.real(scan_companion(first, a2, c1, c2, inputs)).sum()
+
+    np.testing.assert_allclose(jax.grad(objective)(a1), jax.grad(reference)(a1),
+                               rtol=2e-6, atol=2e-6)
 
 
 def test_companion_radius_and_parameter_group_contract():

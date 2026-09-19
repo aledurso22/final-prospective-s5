@@ -5,7 +5,8 @@ import jax
 import jax.numpy as np
 
 from .discrete_recurrence import (_block_operator, companion_radius,
-                                  generalized_coefficients, scan_companion)
+                                  generalized_coefficients,
+                                  scan_companion_sequential)
 from .ssm import S5SSM, discretize_zoh
 
 RHO_MIN = 1e-4
@@ -44,13 +45,14 @@ class GeneralizedProspectiveS5SSM(S5SSM):
             generalized_coefficients(lambda_bar, b_bar, T, mass, gamma))
 
     def __call__(self, input_sequence):
-        states = scan_companion(self.generalized_a1, self.generalized_a2,
-                                self.generalized_c1, self.generalized_c2,
-                                input_sequence)
+        states = scan_companion_sequential(
+            self.generalized_a1, self.generalized_a2,
+            self.generalized_c1, self.generalized_c2, input_sequence)
         if self.bidirectional:
-            reverse = scan_companion(self.generalized_a1, self.generalized_a2,
-                                     self.generalized_c1, self.generalized_c2,
-                                     input_sequence, reverse=True)
+            reverse = scan_companion_sequential(
+                self.generalized_a1, self.generalized_a2,
+                self.generalized_c1, self.generalized_c2,
+                input_sequence, reverse=True)
             states = np.concatenate((states, reverse), axis=-1)
         ys = jax.vmap(lambda state: 2 * (self.C_tilde @ state).real)(states)
         return ys + jax.vmap(lambda value: self.D * value)(input_sequence)

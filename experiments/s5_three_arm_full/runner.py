@@ -235,6 +235,18 @@ def _all_finite(tree):
                     if hasattr(value, "dtype")))
 
 
+def _gpu_memory_stats():
+    try:
+        stats = jax.devices()[0].memory_stats()
+    except Exception:
+        return None
+    if not stats:
+        return None
+    return {key: int(value) for key, value in stats.items()
+            if key in ("bytes_in_use", "peak_bytes_in_use", "bytes_limit",
+                       "peak_bytes_used")}
+
+
 def companion_spectral_radius(state, arm):
     flat = flatten_dict(state.params)
     radii = []
@@ -413,6 +425,7 @@ def production_check(arm, seed, out, batch):
     model = model_for(arm, True)
     xb, yb = batch
     started = time.perf_counter()
+    memory_before = _gpu_memory_stats()
     checked, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
         state, jax.random.PRNGKey(seed * 1000), xb, yb, model, 0, 1)
     result = {"arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm, "seed": seed,
@@ -420,6 +433,7 @@ def production_check(arm, seed, out, batch):
               "gradient_norm": float(grad_norm),
               "gradients_finite": bool(gradients_finite),
               "state_finite": _all_finite(checked),
+              "gpu_memory_before_update": memory_before,
               "seconds": time.perf_counter() - started}
     with open(os.path.join(out, "production_check.json"), "w") as handle:
         json.dump(result, handle, indent=2)
