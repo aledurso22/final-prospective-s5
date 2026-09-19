@@ -17,6 +17,7 @@ from jax.scipy.linalg import block_diag
 
 from dataloaders import speech_commands10 as SC
 from experiments.s5_three_arm_full import data as EXPERIMENT_DATA
+from experiments.s5_three_arm_full import gpu_telemetry as GPU_TELEMETRY
 from s5.seq_model import BatchClassificationModel
 from s5.ssm_init import make_DPLR_HiPPO
 from s5.three_arm_factory import (init_S5SSM,
@@ -289,10 +290,30 @@ def evaluate(state, model, x, y):
             "accuracy": float(correct / count), "n": count}
 
 
+#: file written BEFORE any JAX import by `gpu_telemetry`
+PRE_JAX_TELEMETRY = "gpu_telemetry.json"
+_PRE_JAX_EMITTED = set()
+
+
+def _execution_identity():
+    """Job, array member and GPU allocation, from the environment."""
+    return {key: os.environ.get(key) for key in GPU_TELEMETRY.SLURM_KEYS}
+
+
 def record_lifecycle(out, event, **fields):
     record = {"event": event, "pid": os.getpid(),
               "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+              "slurm": _execution_identity(),
               "gpu_memory": _gpu_memory_stats(), **fields}
+    # the PRE-JAX record (physical GPU UUID and PCI bus id) is attached once
+    # per process, so every artifact directory identifies its device even if
+    # the task is killed later
+    if out not in _PRE_JAX_EMITTED:
+        pre_jax = GPU_TELEMETRY.load(os.path.join(out, PRE_JAX_TELEMETRY))
+        if pre_jax is not None:
+            record["pre_jax_telemetry"] = pre_jax
+            record["physical_gpus"] = GPU_TELEMETRY.physical_gpu_ids(pre_jax)
+        _PRE_JAX_EMITTED.add(out)
     with open(os.path.join(out, "lifecycle.jsonl"), "a") as handle:
         handle.write(json.dumps(record) + "\n")
 
@@ -446,6 +467,7 @@ def production_check(arm, seed, out, batch, state, model):
     checked, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
         state, jax.random.PRNGKey(seed * 1000), xb, yb, model, 0, 1)
     result = {"arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm, "seed": seed,
+              "slurm": _execution_identity(),
               "loss": float(loss), "accuracy": float(accuracy),
               "gradient_norm": float(grad_norm),
               "gradients_finite": bool(gradients_finite),
@@ -493,8 +515,11 @@ def full_path_smoke(arm, seed, data, out, state, train_model):
         handle.write(serialization.to_bytes(state))
     with open(checkpoint, "rb") as handle:
         restored = serialization.from_bytes(state, handle.read())
+    pre_jax = GPU_TELEMETRY.load(os.path.join(out, PRE_JAX_TELEMETRY))
     result = {"status": "SMOKE_PASS", "scientific_name": SCIENTIFIC_NAMES[arm],
               "code_identifier": arm, "seed": seed, "training_steps": step,
+              "slurm": _execution_identity(),
+              "physical_gpus": GPU_TELEMETRY.physical_gpu_ids(pre_jax),
               "validation_accuracy": float(jnp.mean(accuracies)),
               "validation_cross_entropy": float(jnp.mean(losses)),
               "checkpoint": checkpoint, "checkpoint_restored": _all_finite(restored),
@@ -520,6 +545,7 @@ def main():
         os.makedirs(args.out, exist_ok=True)
         failure = {"scientific_name": SCIENTIFIC_NAMES.get(args.arm, args.arm),
                    "code_identifier": args.arm, "seed": args.seed,
+                   "slurm": _execution_identity(),
                    "failure": str(error)}
         if isinstance(error, NumericalTrainingFailure):
             failure["record"] = error.record
