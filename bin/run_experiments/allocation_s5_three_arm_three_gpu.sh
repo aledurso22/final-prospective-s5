@@ -166,7 +166,7 @@ WAVE_STATUS=()
 wait_for_wave() {
   WAVE_STATUS=()
   local index=0 status
-  for pid in "${CHILD_PIDS[@]}"; do
+  for pid in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
     status=0
     wait "$pid" || status=$?
     WAVE_STATUS+=("$status")
@@ -191,10 +191,10 @@ if [[ "${SMOKE_THIRD:-1}" == "1" ]]; then
   start_child native_matched_s5 302 "${USE_TOKENS[2]}" "$SMOKE_ROOT" --smoke
 fi
 
-SMOKE_DIRS=("${CHILD_DIRS[@]}")
+SMOKE_DIRS=(${CHILD_DIRS[@]+"${CHILD_DIRS[@]}"})
 if [[ "$DRY_RUN" != "1" ]]; then
   wait_for_wave
-  for status in "${WAVE_STATUS[@]}"; do
+  for status in ${WAVE_STATUS[@]+"${WAVE_STATUS[@]}"}; do
     if [[ "$status" -ne 0 ]]; then
       echo "ABORT: a smoke child exited nonzero; artifacts preserved under" >&2
       echo "       $SMOKE_ROOT. Full training was NOT started." >&2
@@ -234,7 +234,7 @@ for arm in "${WAVE_ARMS[@]}"; do
   # every child of this wave is awaited before the next wave starts
   wait_for_wave
   index=0
-  for status in "${WAVE_STATUS[@]}"; do
+  for status in ${WAVE_STATUS[@]+"${WAVE_STATUS[@]}"}; do
     task_root="${CHILD_DIRS[$index]}"
     label="${CHILD_LABELS[$index]}"
     if [[ -f "$task_root/task_result.json" ]]; then
