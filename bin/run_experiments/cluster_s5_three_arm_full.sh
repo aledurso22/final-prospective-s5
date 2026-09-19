@@ -14,7 +14,13 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-DATA_CACHE="${S5_THREE_ARM_DATA:-$PROSPECTIVE_RUNS/sc10_official_cache}"
+DATA_CACHE="${S5_THREE_ARM_DATA:-/Users/durso/s5-runs/sc10_official_cache}"
+"$PY" - "$DATA_CACHE" <<'PYEOF'
+import sys
+from experiments.s5_three_arm_full.data import validate_official_raw_cache
+validate_official_raw_cache(sys.argv[1], ("train", "val"))
+print(f"validated official raw cache: {sys.argv[1]}")
+PYEOF
 OUT_ROOT="${OUT_ROOT:-$PROSPECTIVE_RUNS/s5-three-arm-full-training}"
 STAMP="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT="$OUT_ROOT/$STAMP"

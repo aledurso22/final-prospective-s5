@@ -85,12 +85,39 @@ def prepare_official_raw(root, cache_dir):
     return manifest
 
 
-def load_official_raw(cache_dir, splits):
-    with open(os.path.join(cache_dir, "manifest.json")) as handle:
+def validate_official_raw_cache(cache_dir, splits=("train", "val")):
+    manifest_path = os.path.join(cache_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(manifest_path)
+    with open(manifest_path) as handle:
         manifest = json.load(handle)
+    if os.path.basename(os.path.abspath(cache_dir)) == "sc10_cache":
+        raise RuntimeError("refusing MFCC/random-split sc10_cache")
     if (manifest.get("split_definition") != "official"
-            or manifest.get("representation") != "raw_waveform"):
+            or manifest.get("representation") != "raw_waveform"
+            or manifest.get("shape") != [RAW_LENGTH, 1]):
         raise RuntimeError("refusing non-official raw-audio cache")
+    if not manifest.get("official_validation_list_sha256") or not manifest.get(
+            "official_testing_list_sha256"):
+        raise RuntimeError("official-list split provenance is missing")
+    for split in splits:
+        x_path = os.path.join(cache_dir, f"{split}_x.npy")
+        y_path = os.path.join(cache_dir, f"{split}_y.npy")
+        if not os.path.exists(x_path) or not os.path.exists(y_path):
+            raise FileNotFoundError(f"missing official cache arrays for {split}")
+        values = np.load(x_path, mmap_mode="r")
+        labels = np.load(y_path, mmap_mode="r")
+        if values.ndim != 3 or values.shape[1:] != (RAW_LENGTH, 1):
+            raise RuntimeError(f"invalid raw waveform shape for {split}: {values.shape}")
+        if labels.ndim != 1 or labels.shape[0] != values.shape[0]:
+            raise RuntimeError(f"invalid label array for {split}")
+        if manifest.get("counts", {}).get(split) != int(values.shape[0]):
+            raise RuntimeError(f"manifest count mismatch for {split}")
+    return manifest
+
+
+def load_official_raw(cache_dir, splits):
+    manifest = validate_official_raw_cache(cache_dir, splits)
     loaded = {}
     for split in splits:
         x_path = os.path.join(cache_dir, f"{split}_x.npy")

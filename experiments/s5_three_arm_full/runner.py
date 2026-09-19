@@ -387,7 +387,12 @@ def run_task(args):
     if args.arm not in ARM_ORDER or args.seed not in SEEDS:
         raise ValueError(f"invalid task identity: {args.arm}, {args.seed}")
     os.makedirs(args.out, exist_ok=True)
-    production_check(args.arm, args.seed, args.out)
+    cache = EXPERIMENT_DATA.load_official_raw(args.data_cache, ("train", "val"))[0]
+    data = {"train": cache["train"], "val": cache["val"]}
+    first_indices = next(SC.epoch_batches(len(data["train"][1]), BATCH_SIZE,
+                                           args.seed, 0, drop_last=True))
+    first_batch = batch_arrays(*data["train"], first_indices)
+    production_check(args.arm, args.seed, args.out, first_batch)
     if args.smoke:
         result = {"status": "SMOKE_PASS", "scientific_name": SCIENTIFIC_NAMES[args.arm],
                   "code_identifier": args.arm, "seed": args.seed,
@@ -396,20 +401,17 @@ def run_task(args):
             json.dump(result, handle, indent=2)
         print(json.dumps(result, indent=2))
         return
-    cache = EXPERIMENT_DATA.load_official_raw(args.data_cache, ("train", "val"))[0]
-    data = {"train": cache["train"], "val": cache["val"]}
     row = train_arm(args.arm, args.seed, data, args.out)
     with open(os.path.join(args.out, "task_result.json"), "w") as handle:
         json.dump(row, handle, indent=2)
     print(json.dumps(row, indent=2))
 
 
-def production_check(arm, seed, out):
+def production_check(arm, seed, out, batch):
     """Fail closed on one exact-shape finite update, then allow training."""
     state = init_state(arm, seed)
     model = model_for(arm, True)
-    xb = jnp.zeros((BATCH_SIZE, SEQ_LEN, INPUT_DIM), dtype=jnp.float32)
-    yb = jnp.zeros((BATCH_SIZE,), dtype=jnp.int32)
+    xb, yb = batch
     started = time.perf_counter()
     checked, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
         state, jax.random.PRNGKey(seed * 1000), xb, yb, model, 0, 1)
@@ -445,9 +447,9 @@ def main():
                    "failure": str(error)}
         if isinstance(error, NumericalTrainingFailure):
             failure["record"] = error.record
-        with open(os.path.join(args.out, "failure.json"), "w") as handle:
-            json.dump(failure, handle, indent=2)
         if isinstance(error, NumericalTrainingFailure):
+            with open(os.path.join(args.out, "failure.json"), "w") as handle:
+                json.dump(failure, handle, indent=2)
             return
         raise
 
