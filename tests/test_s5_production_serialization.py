@@ -171,15 +171,18 @@ def _worktree_hash(path):
 
 def test_no_scientific_behaviour_changed():
     """Byte identity against the authoritative commit for every file that can
-    express a recurrence, the data, the optimizer, the schedule, the
-    checkpoint format or the evaluation."""
+    express a recurrence, the data or the evaluation protocol.
+
+    The runner and the finalizer are excluded here because they gained the
+    explicit --epochs horizon; that their scientific blocks (SharedS5Config,
+    ARM_CONFIGS, SCIENTIFIC_NAMES, the seeds) did not move is asserted in
+    tests/test_s5_three_gpu_allocation_run.py.
+    """
     for relative in ("s5/ssm.py", "s5/discrete_recurrence.py",
                      "s5/prospective_ssm.py",
                      "s5/generalized_prospective_ssm.py",
                      "s5/three_arm_factory.py",
                      "experiments/s5_three_arm_full/data.py",
-                     "experiments/s5_three_arm_full/runner.py",
-                     "experiments/s5_three_arm_full/finalize.py",
                      "bin/slurm/s5_three_arm_full_finalize.sbatch"):
         path = os.path.join(REPO, relative)
         assert _blob_hash(path) == _worktree_hash(path) != "", relative

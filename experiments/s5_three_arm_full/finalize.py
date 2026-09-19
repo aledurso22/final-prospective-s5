@@ -39,7 +39,10 @@ def main(args):
                 row = json.load(handle)
             if row["code_identifier"] != arm or row["seed"] != seed:
                 raise SystemExit(f"task identity mismatch: {path}")
-            if row["selected_epoch"] >= EPOCHS - 2:
+            # the horizon is whatever the task actually trained for; an
+            # artifact without the field predates --epochs and used EPOCHS
+            row_epochs = row.get("epochs_requested", EPOCHS)
+            if row["selected_epoch"] >= row_epochs - 2:
                 row["status"] = "POSSIBLY_UNDERTRAINED"
                 row["status_reason"] = (
                     "best validation checkpoint is in the final three epochs")
@@ -100,7 +103,9 @@ def main(args):
             "Zucchet prospective dynamics — finite-difference realization",
             "generalized prospective dynamics (M,γ,T) — finite-difference realization"],
         "code_identifiers": list(ARM_ORDER), "seeds": list(SEEDS),
-        "schedule": {"epochs": EPOCHS, "batch_size": BATCH_SIZE,
+        "schedule": {"epochs": sorted({row.get("epochs_requested", EPOCHS)
+                                       for row in rows}),
+                      "epochs_default": EPOCHS, "batch_size": BATCH_SIZE,
                       "lr": 0.008, "ssm_lr": 0.002, "weight_decay": 0.04,
                       "lr_schedule": "one_epoch_linear_warmup_then_cosine",
                       "checkpoint_selection": "validation_accuracy_then_cross_entropy"},

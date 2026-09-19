@@ -45,11 +45,57 @@ def report(task_dirs):
     return out
 
 
+def gate(out, require_pass=True, require_distinct_gpus=True):
+    """Reasons this report does NOT clear a concurrent-topology smoke.
+
+    An empty list means it does. `require_distinct_gpus` demands that every
+    task's binding be `resolved` and that no two of them name the same
+    physical GPU: an unresolved binding is never treated as distinct.
+    """
+    problems = []
+    if require_pass:
+        for task in out["tasks"]:
+            if not task["full_path_pass"]:
+                problems.append(f"{task['task_dir']}: no artifact-level "
+                                "SMOKE_PASS with two steps and a restored "
+                                "checkpoint")
+            if task["failure"] is not None:
+                problems.append(f"{task['task_dir']}: failure.json present")
+    if require_distinct_gpus:
+        uuids = {}
+        for task in out["tasks"]:
+            process_gpu = task["process_gpu"]
+            if process_gpu.get("status") != "resolved":
+                problems.append(f"{task['task_dir']}: process GPU binding is "
+                                f"{process_gpu.get('status')}, not resolved")
+                continue
+            uuids.setdefault(process_gpu["gpu_uuid"], []).append(
+                task["task_dir"])
+        for uuid, dirs in uuids.items():
+            if len(dirs) > 1:
+                problems.append(f"shared physical GPU {uuid}: "
+                                + ", ".join(dirs))
+    return problems
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("task_dirs", nargs="+")
+    parser.add_argument("--require-pass", action="store_true",
+                        help="exit 1 unless every task passed the full path")
+    parser.add_argument("--require-distinct-gpus", action="store_true",
+                        help="exit 1 unless every binding resolved to its own "
+                             "physical GPU")
     args = parser.parse_args()
-    print(json.dumps(report(args.task_dirs), indent=2))
+    out = report(args.task_dirs)
+    print(json.dumps(out, indent=2))
+    if args.require_pass or args.require_distinct_gpus:
+        problems = gate(out, args.require_pass, args.require_distinct_gpus)
+        for problem in problems:
+            print("GATE FAILED: " + problem)
+        if problems:
+            raise SystemExit(1)
+        print("GATE PASSED")
 
 
 if __name__ == "__main__":

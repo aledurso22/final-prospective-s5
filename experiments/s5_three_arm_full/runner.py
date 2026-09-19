@@ -197,35 +197,46 @@ def learning_rate_at_step(step, steps_per_epoch):
             float(function(local_step, SSM_LR, end_step, LR_FINAL)))
 
 
-def apply_scheduled_learning_rate(state, step, steps_per_epoch):
-    """Set both optimizer rates for the update at ``step``."""
+def apply_scheduled_learning_rate(state, step, steps_per_epoch, epochs=EPOCHS):
+    """Set both optimizer rates for the update at ``step``.
+
+    ``epochs`` is the number of epochs this run will actually train for. The
+    schedule is one warm-up epoch and cosine decay over the remaining
+    ``epochs - WARMUP_END``, so a shorter run decays over its own horizon
+    instead of the 40-epoch one. The default keeps the original protocol.
+    """
     warmup_steps = steps_per_epoch * WARMUP_END
     if step < warmup_steps:
         decay, schedule_step, end_step = linear_warmup, step, warmup_steps
     else:
         decay, schedule_step, end_step = (
             cosine_annealing, step - warmup_steps,
-            steps_per_epoch * (EPOCHS - WARMUP_END))
+            steps_per_epoch * (epochs - WARMUP_END))
     return update_learning_rate_per_step(
         (decay, SSM_LR, LR, schedule_step, end_step, "noBCdecay", LR_FINAL),
         state)[0]
 
 
-def train_one_batch(state, rng, xb, yb, model, step, steps_per_epoch):
-    state = apply_scheduled_learning_rate(state, step, steps_per_epoch)
+def train_one_batch(state, rng, xb, yb, model, step, steps_per_epoch,
+                    epochs=EPOCHS):
+    state = apply_scheduled_learning_rate(state, step, steps_per_epoch,
+                                          epochs)
     return train_step(state, rng, xb, yb,
                       jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
 
 
-def train_one_batch_telemetry(state, rng, xb, yb, model, step,
-                              steps_per_epoch):
-    state = apply_scheduled_learning_rate(state, step, steps_per_epoch)
+def train_one_batch_telemetry(state, rng, xb, yb, model, step, steps_per_epoch,
+                              epochs=EPOCHS):
+    state = apply_scheduled_learning_rate(state, step, steps_per_epoch,
+                                          epochs)
     return train_step_telemetry(
         state, rng, xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
 
 
-def train_one_batch_observable(state, rng, xb, yb, model, step, steps_per_epoch):
-    state = apply_scheduled_learning_rate(state, step, steps_per_epoch)
+def train_one_batch_observable(state, rng, xb, yb, model, step, steps_per_epoch,
+                               epochs=EPOCHS):
+    state = apply_scheduled_learning_rate(state, step, steps_per_epoch,
+                                          epochs)
     return train_step_observable(
         state, rng, xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)), model, True)
 
@@ -342,7 +353,8 @@ def bind_process_gpu(out):
     return binding
 
 
-def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None):
+def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None,
+              epochs=EPOCHS):
     if state is None:
         state = init_state(arm, seed)
     if train_model is None:
@@ -352,7 +364,7 @@ def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None):
     best = None
     start_time = time.perf_counter()
     steps_per_epoch = len(data["train"][1]) // BATCH_SIZE
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         for indices in SC.epoch_batches(len(data["train"][1]), BATCH_SIZE,
                                         seed, epoch, drop_last=True):
             xb, yb = batch_arrays(*data["train"], indices)
@@ -360,7 +372,7 @@ def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None):
             if epoch == 0 and step == 0:
                 record_lifecycle(checkpoint_dir, "before_first_actual_training_step")
             state, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
-                state, rng, xb, yb, train_model, step, steps_per_epoch)
+                state, rng, xb, yb, train_model, step, steps_per_epoch, epochs)
             if epoch == 0 and step == 0:
                 record_lifecycle(checkpoint_dir, "after_first_actual_training_step")
             state_finite = _all_finite(state)
@@ -399,12 +411,13 @@ def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None):
     elapsed = time.perf_counter() - start_time
     return {"scientific_name": SCIENTIFIC_NAMES[arm],
             "code_identifier": arm, "seed": seed,
+            "epochs_requested": epochs,
             "selected_epoch": best["epoch"], "validation": best["val"],
             "selected_checkpoint": best["checkpoint"],
             "parameter_count": parameter_count(state.params),
             "recurrent_state": recurrent_state_size(arm),
             "training_seconds": elapsed,
-            "examples_per_second": EPOCHS * len(data["train"][1]) / elapsed}
+            "examples_per_second": epochs * len(data["train"][1]) / elapsed}
 
 
 def paired_summary(rows):
@@ -458,6 +471,8 @@ def arm_summary(rows):
 def run_task(args):
     if args.arm not in ARM_ORDER or args.seed not in SEEDS:
         raise ValueError(f"invalid task identity: {args.arm}, {args.seed}")
+    # a caller that never heard of --epochs gets the original protocol
+    epochs = getattr(args, "epochs", EPOCHS)
     os.makedirs(args.out, exist_ok=True)
     cache = EXPERIMENT_DATA.load_official_raw(args.data_cache, ("train", "val"))[0]
     data = {"train": cache["train"], "val": cache["val"]}
@@ -469,30 +484,33 @@ def run_task(args):
                                            args.seed, 0, drop_last=True))
     first_batch = batch_arrays(*data["train"], first_indices)
     production_check(args.arm, args.seed, args.out, first_batch,
-                     initial_state, train_model)
+                     initial_state, train_model, epochs=epochs)
     binding = bind_process_gpu(args.out)
     record_lifecycle(args.out, "after_production_check_before_full_path",
                      process_gpu=GPU_TELEMETRY.summary(binding))
     if args.smoke:
         result = full_path_smoke(args.arm, args.seed, data, args.out,
-                                 initial_state, train_model)
+                                 initial_state, train_model,
+                                 epochs=epochs)
         print(json.dumps(result, indent=2))
         return
     row = train_arm(args.arm, args.seed, data, args.out,
-                    state=initial_state, train_model=train_model)
+                    state=initial_state, train_model=train_model,
+                    epochs=epochs)
     with open(os.path.join(args.out, "task_result.json"), "w") as handle:
         json.dump(row, handle, indent=2)
     print(json.dumps(row, indent=2))
 
 
-def production_check(arm, seed, out, batch, state, model):
+def production_check(arm, seed, out, batch, state, model, epochs=EPOCHS):
     """Fail closed on one exact-shape finite update, then allow training."""
     xb, yb = batch
     started = time.perf_counter()
     memory_before = _gpu_memory_stats()
     checked, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
-        state, jax.random.PRNGKey(seed * 1000), xb, yb, model, 0, 1)
+        state, jax.random.PRNGKey(seed * 1000), xb, yb, model, 0, 1, epochs)
     result = {"arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm, "seed": seed,
+              "epochs_requested": epochs,
               "slurm": _execution_identity(),
               "loss": float(loss), "accuracy": float(accuracy),
               "gradient_norm": float(grad_norm),
@@ -512,7 +530,8 @@ def production_check(arm, seed, out, batch, state, model):
             "failure": "production check nonfinite", **result})
 
 
-def full_path_smoke(arm, seed, data, out, state, train_model):
+def full_path_smoke(arm, seed, data, out, state, train_model,
+                    epochs=EPOCHS):
     """Exercise production lifecycle through train, validation, save, reload."""
     steps_per_epoch = len(data["train"][1]) // BATCH_SIZE
     step = 0
@@ -521,7 +540,7 @@ def full_path_smoke(arm, seed, data, out, state, train_model):
         xb, yb = batch_arrays(*data["train"], indices)
         state, loss, accuracy, grad_norm, gradients_finite = train_one_batch_observable(
             state, jax.random.PRNGKey(seed * 1000 + step), xb, yb,
-            train_model, step, steps_per_epoch)
+            train_model, step, steps_per_epoch, epochs)
         if not gradients_finite or not _all_finite(state):
             raise NumericalTrainingFailure({
                 "arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm,
@@ -546,6 +565,7 @@ def full_path_smoke(arm, seed, data, out, state, train_model):
         os.path.join(out, PROCESS_GPU_BINDING))
     result = {"status": "SMOKE_PASS", "scientific_name": SCIENTIFIC_NAMES[arm],
               "code_identifier": arm, "seed": seed, "training_steps": step,
+              "epochs_requested": epochs,
               "slurm": _execution_identity(),
               # the runner-pid -> physical GPU binding; the inventory is kept
               # beside it, labelled, and is never used to claim identity
@@ -569,13 +589,20 @@ def main():
     parser.add_argument("--arm", choices=ARM_ORDER, required=True)
     parser.add_argument("--seed", type=int, choices=SEEDS, required=True)
     parser.add_argument("--smoke", action="store_true")
+    # the number of epochs this run trains for. The default is the original
+    # protocol, so an existing command is unchanged; the schedule (one warm-up
+    # epoch then cosine decay) is recomputed over whatever is requested.
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
     args = parser.parse_args()
+    if args.epochs <= WARMUP_END:
+        parser.error(f"--epochs must exceed the {WARMUP_END}-epoch warm-up")
     try:
         run_task(args)
     except Exception as error:
         os.makedirs(args.out, exist_ok=True)
         failure = {"scientific_name": SCIENTIFIC_NAMES.get(args.arm, args.arm),
                    "code_identifier": args.arm, "seed": args.seed,
+                   "epochs_requested": getattr(args, "epochs", EPOCHS),
                    "slurm": _execution_identity(),
                    "process_gpu": GPU_TELEMETRY.summary(
                        _PROCESS_GPU.get(args.out) or GPU_TELEMETRY.load(
