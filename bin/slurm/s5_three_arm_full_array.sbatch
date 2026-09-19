@@ -6,8 +6,6 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=50G
 #SBATCH --array=0-8%4
-#SBATCH --output=%x-%A_%a.out
-#SBATCH --error=%x-%A_%a.err
 
 set -euo pipefail
 
@@ -22,7 +20,11 @@ cd "$REPO_ROOT"
 : "${S5_THREE_ARM_RUN_ROOT:?set S5_THREE_ARM_RUN_ROOT to the run directory}"
 : "${EXPECTED_COMMIT:?set EXPECTED_COMMIT to the final authoritative commit}"
 test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
-test -z "$(git status --porcelain)"
+if [[ -n "$(git status --porcelain)" ]]; then
+  git status --short >&2
+  echo "Refusing dirty worktree: $PROSPECTIVE_REPO" >&2
+  exit 1
+fi
 
 # Dispatch in fixed scientific order; no prior timing result is reused.
 DISPATCH_ARMS=(native_matched_s5 zucchet_prospective_s5 generalized_prospective_s5)
@@ -41,4 +43,5 @@ exec "$PY" -u -m experiments.s5_three_arm_full.runner \
   --out "$TASK_ROOT" \
   --arm "$ARM" \
   --seed "$SEED" \
+  ${S5_THREE_ARM_SMOKE:+--smoke} \
   2>&1 | tee "$TASK_ROOT/logs/train.log"

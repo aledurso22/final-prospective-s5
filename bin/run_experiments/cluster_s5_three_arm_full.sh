@@ -8,13 +8,19 @@ REPO_ROOT="$(pwd -P)"
 export PROSPECTIVE_REPO="$REPO_ROOT"
 : "${EXPECTED_COMMIT:?set EXPECTED_COMMIT to the final authoritative commit}"
 test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
-test -z "$(git status --porcelain)"
+if [[ -n "$(git status --porcelain)" ]]; then
+  git status --short >&2
+  echo "Refusing dirty worktree: $PROSPECTIVE_REPO" >&2
+  exit 1
+fi
 
 DATA_CACHE="${S5_THREE_ARM_DATA:-$PROSPECTIVE_RUNS/sc10_official_cache}"
 OUT_ROOT="${OUT_ROOT:-$PROSPECTIVE_RUNS/s5-three-arm-full-training}"
 STAMP="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT="$OUT_ROOT/$STAMP"
 mkdir -p "$OUT"
+OUTPUT_DIR="$OUT"
+mkdir -p "$OUTPUT_DIR/slurm"
 
 echo "scientific arms: Native S5 | Zucchet prospective dynamics — finite-difference realization | generalized prospective dynamics (M,gamma,T) — finite-difference realization"
 echo "branch: $(git rev-parse --abbrev-ref HEAD)"
@@ -28,11 +34,15 @@ printf 'authoritative_commit=%s\nbranch=%s\ndata_cache=%s\n' \
 ARRAY_JOB="$(sbatch --parsable \
   --chdir="$REPO_ROOT" \
   --array=0-8%4 \
+  --output="$OUTPUT_DIR/slurm/array-%A_%a.out" \
+  --error="$OUTPUT_DIR/slurm/array-%A_%a.err" \
   --export=ALL,PROSPECTIVE_REPO="$REPO_ROOT",EXPECTED_COMMIT="$EXPECTED_COMMIT",S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
   "$REPO_ROOT/bin/slurm/s5_three_arm_full_array.sbatch")"
 FINALIZER_JOB="$(sbatch --parsable \
   --dependency="afterany:${ARRAY_JOB}" \
   --chdir="$REPO_ROOT" \
+  --output="$OUTPUT_DIR/slurm/finalizer-%j.out" \
+  --error="$OUTPUT_DIR/slurm/finalizer-%j.err" \
   --export=ALL,PROSPECTIVE_REPO="$REPO_ROOT",EXPECTED_COMMIT="$EXPECTED_COMMIT",S5_THREE_ARM_DATA="$DATA_CACHE",S5_THREE_ARM_RUN_ROOT="$OUT" \
   "$REPO_ROOT/bin/slurm/s5_three_arm_full_finalize.sbatch")"
 

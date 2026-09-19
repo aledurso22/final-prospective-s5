@@ -5,8 +5,6 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=50G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
 
 set -euo pipefail
 
@@ -21,7 +19,11 @@ cd "$REPO_ROOT"
 : "${S5_THREE_ARM_RUN_ROOT:?set S5_THREE_ARM_RUN_ROOT to the run directory}"
 : "${EXPECTED_COMMIT:?set EXPECTED_COMMIT to the final authoritative commit}"
 test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
-test -z "$(git status --porcelain)"
+if [[ -n "$(git status --porcelain)" ]]; then
+  git status --short >&2
+  echo "Refusing dirty worktree: $PROSPECTIVE_REPO" >&2
+  exit 1
+fi
 
 mkdir -p "$S5_THREE_ARM_RUN_ROOT/final/tmp" "$S5_THREE_ARM_RUN_ROOT/final/jax-cache"
 export TMPDIR="$S5_THREE_ARM_RUN_ROOT/final/tmp"

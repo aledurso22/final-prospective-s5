@@ -388,6 +388,14 @@ def run_task(args):
         raise ValueError(f"invalid task identity: {args.arm}, {args.seed}")
     os.makedirs(args.out, exist_ok=True)
     production_check(args.arm, args.seed, args.out)
+    if args.smoke:
+        result = {"status": "SMOKE_PASS", "scientific_name": SCIENTIFIC_NAMES[args.arm],
+                  "code_identifier": args.arm, "seed": args.seed,
+                  "production_check": os.path.join(args.out, "production_check.json")}
+        with open(os.path.join(args.out, "smoke_result.json"), "w") as handle:
+            json.dump(result, handle, indent=2)
+        print(json.dumps(result, indent=2))
+        return
     cache = EXPERIMENT_DATA.load_official_raw(args.data_cache, ("train", "val"))[0]
     data = {"train": cache["train"], "val": cache["val"]}
     row = train_arm(args.arm, args.seed, data, args.out)
@@ -426,6 +434,7 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--arm", choices=ARM_ORDER, required=True)
     parser.add_argument("--seed", type=int, choices=SEEDS, required=True)
+    parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
     try:
         run_task(args)
