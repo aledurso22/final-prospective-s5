@@ -440,6 +440,93 @@ real, capacity-controlled improvement in *temporal lead*. What it does not
 yet show is capacity-controlled **memory retention**, which the original
 claim requires alongside the lead. On this probe, that half is not there.
 
+## 6h. The frontier experiment, predeclared before it is run
+
+The §6g result is a point, not a curve, and three seeds cannot establish
+either half of it: an exact sign test on three pairs cannot reach p < 0.05
+even when the treatment wins all three. The next experiment measures the
+whole memory-versus-lag frontier and runs the ablation that §6g never did.
+Everything below was fixed **before** the run, and is asserted by
+`tests/test_frontier_design.py` so it cannot drift afterwards.
+
+**Delays** 16, 32, 64, 128, 256, at a fixed sequence length of 1024, so the
+only thing that changes along the frontier is the delay.
+
+**Seeds** 15, paired. A seed fixes the data stream and, where the shapes
+allow it, the initialization draw. At 15 pairs the sign test needs 12 wins
+for p < 0.05.
+
+**Arms** — five, so both equal-mode and equal-parameter comparisons exist
+for every question:
+
+| arm | gates | stages | modes | effective parameters |
+|---|---|---|---|---|
+| `native` | off | – | 16 | 160 |
+| `native_capacity_matched` | off | – | **26** | **260** |
+| `one_stage` | on | 1 | 16 | 208 |
+| `one_stage_capacity_matched` | on | 1 | **20** | **260** |
+| `two_stage` | on | 2 | 16 | 256 |
+
+Both controls carry *more* parameters than the construction (260 against
+256), which is the conservative direction. `one_stage` and `two_stage`
+share their mode count, and Λ, B and the readout do not depend on the stage
+count, so for one seed those two arms start from exactly the same
+recurrence and the same readout: the equal-mode ablation differs in the
+second stage and in nothing else.
+
+**Normalized error.** Every number is MSE divided by that channel's own
+variance. The memory target's variance moves by orders of magnitude across
+this sweep, so absolute MSEs are not comparable along the frontier; 1.0
+means "no better than predicting the mean".
+
+**Tests.** The exact paired **sign test** is primary — it assumes only that
+the seeds are independent, and it is what every verdict reads. The
+**Wilcoxon signed-rank** test is reported alongside for its extra power,
+with a normal approximation that refuses to return a p-value below ten
+pairs. Both can be read; they are allowed to disagree, and neither is the
+only one shown.
+
+**Memory non-inferiority margin: 10%**, with 5% reported alongside as a
+secondary. α = 0.05. Non-inferiority is a *separate* question from
+improvement and is tested as one — H₀ is that the paired ratio is at or
+above 1 + margin. Failing to reject is **not** evidence of non-inferiority,
+and the report says so instead of reading a null result as a pass.
+
+**Lead improvement** must be statistically paired and significant, not a
+mean comparison — the correction §6g forced.
+
+**Gate selectivity.** Per-mode gates are recorded against per-mode
+timescales. The construction predicts slow modes near g = 0 and faster
+modes opening theirs, so the gate-versus-decay-rate correlation is
+predicted **positive**, and the slow and fast halves are reported
+separately so the correlation is not the only evidence.
+
+### The decision rule, written down in advance
+
+`experiments/s5_modal/frontier_design.py:decide` is branching over booleans
+and nothing else, tested exhaustively over all 64 combinations:
+
+- **`GATES_NOT_SELECTIVE`** — neither gated arm is memory non-inferior. The
+  gates are not doing what they were designed to do, and a large lead gain
+  does not change that.
+- **`ORDINARY_SUFFICIENT`** — one stage matches two on both components. The
+  second stage is unjustified and generalized WWJ mechanics are not needed.
+- **`GENERALIZED_SUPPORTED`** — the two-stage arm retains memory, improves
+  the lead, *and* beats the one-stage filter it contains at equal modes.
+- `TWO_STAGE_WORKS_ONE_STAGE_DOES_NOT`, `NO_LEAD_IMPROVEMENT`,
+  `UNDERPOWERED`, `INCONCLUSIVE` — so that a run which answers none of the
+  three cannot be forced into one that it did not.
+
+### One correction carried into this run
+
+The previous probe drew mode decay rates **uniformly** on [0.002, 0.302].
+The minimum of 16 such draws sits near 0.02 — a 51-token timescale — so at
+a delay of 256 the model could not have held what the task asked it to
+recall, and the comparison would have measured nothing. Rates are now drawn
+**log-uniformly** across the same range, so slow modes are reliably present
+at every delay. This is identical in all five arms and so favours none of
+them.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

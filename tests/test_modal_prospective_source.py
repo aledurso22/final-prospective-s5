@@ -150,7 +150,10 @@ def test_only_reporting_methods_convert_arrays_to_python_floats():
 
 #: every file this workstream owns, checked for dangling references
 WORKSTREAM_FILES = (CASCADE, LAYER, BENCHMARK, SYNTHETIC,
-                    os.path.join(REPO, "experiments/s5_modal/production_step.py"))
+                    os.path.join(REPO, "experiments/s5_modal/production_step.py"),
+                    os.path.join(REPO, "experiments/s5_modal/frontier.py"),
+                    os.path.join(REPO, "experiments/s5_modal/frontier_design.py"),
+                    os.path.join(REPO, "experiments/s5_modal/paired.py"))
 
 
 def test_no_file_reads_a_name_nothing_binds():
