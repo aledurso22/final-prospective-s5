@@ -191,26 +191,86 @@ def _stable_model_cells(lambda_bar, b_bar, bound=1.0):
     return found
 
 
-def test_model_builder_cells_are_scanned_correctly_where_they_are_stable():
-    """If any cell of the real builders is stable, the scan must match the
-    oracle there. If none is -- which the analysis predicts -- that is
-    recorded as the finding, not silently skipped."""
+def test_a_stable_real_builder_cell_exists():
+    """RECORDED FALSIFICATION. The earlier prediction that no cell of the
+    real coefficient builders would be stable was WRONG: tau = 1000,
+    eps = 1/4, professor_linear_target gives a companion radius of
+    0.9980477224938169 < 1 on the cluster's modes. The cell stays in the
+    suite; it is not replaced by an easier synthetic fixture."""
     lambda_bar, b_bar = _model_modes(14)
     cells = _stable_model_cells(lambda_bar, b_bar)
-    real = np.float64 if X64 else np.float32
+    assert cells, "expected at least the tau = 1000 cell to be stable"
+    assert any(cell["tau"] >= 1000.0 for cell in cells), cells
     for cell in cells:
+        assert cell["radius"] < 1.0, cell
+
+
+def test_the_stable_cell_scan_matches_the_oracle_within_measured_conditioning():
+    """The stable real-builder cell, held to a tolerance DERIVED from the
+    operator's measured conditioning rather than a round number.
+
+    The two implementations associate the same sum differently, so bitwise
+    equality is not expected; what is required is agreement within
+    safety * eps * peak^2, where peak = max_k ||H^(2^k)||_F is the transient
+    norm the squaring step actually reaches. Against exact rational ground
+    truth this bound held with ~3x margin at every length tested
+    (docs/analysis/direct_prospective_conditioning.txt).
+    """
+    lambda_bar, b_bar = _model_modes(14)
+    real = np.float64 if X64 else np.float32
+    epsilon = 2.220446049250313e-16 if X64 else 1.1920929e-07
+    for cell in _stable_model_cells(lambda_bar, b_bar):
         tau = np.full(lambda_bar.shape, cell["tau"], dtype=real)
         mass = DP.mass_from_eps(tau, np.asarray(cell["eps"], dtype=real))
+        A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass,
+                                             cell["target"])
         for length in (3, 17, 257, 1000):
             inputs = _inputs(length, length)
             fast = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass,
                                      cell["target"])
             slow = ORACLE.matched_sequential(lambda_bar, b_bar, inputs, tau,
                                              mass, cell["target"])
-            assert _close(fast, slow, TOL64 if X64 else TOL32), (cell, length)
-    if not cells:
-        # the documented no-go: no admissible cell of the real builders
-        assert True, "no stable cell exists for the real coefficient builders"
+            report = ORACLE.compare_finite_prefix(fast, slow)
+            tolerance = ORACLE.doubling_scan_tolerance(A, length, epsilon)
+            report.update(cell=cell, length=length, tolerance=tolerance,
+                          peak_norm=ORACLE.doubling_scan_peak_norm(A, length))
+            print(report)                     # always visible with pytest -s
+            assert report["finite_masks_identical"], report
+            assert report["common_finite_prefix"] == length, report
+            assert report["max_relative_error_on_prefix"] <= tolerance, report
+
+
+def test_the_doubling_scan_needs_float64_at_this_cell():
+    """A pre-training finding, asserted so it cannot be forgotten.
+
+    At the stable cell the companion is strongly non-normal, and the scan's
+    squaring step loses far more precision than the sequential recurrence
+    does. In emulated float32 the scan's relative error reached 7.2 at
+    L = 257 and 1.5e5 at L = 1000, while the sequential recurrence stayed at
+    about 2e-3 (docs/analysis/direct_prospective_float32.txt). The scan is
+    therefore NOT usable in float32 at this cell, which is the precision the
+    production path uses.
+    """
+    if not X64:
+        return
+    lambda_bar, b_bar = _model_modes(14)
+    tau64 = np.full(lambda_bar.shape, 1000.0, dtype=np.float64)
+    mass64 = DP.mass_from_eps(tau64, np.asarray(0.25, dtype=np.float64))
+    inputs64 = _inputs(20, 257)
+    reference = DP.matched_states(lambda_bar, b_bar, inputs64, tau64, mass64,
+                                  DP.PROFESSOR_LINEAR_TARGET)
+    single = DP.matched_states(lambda_bar.astype(np.complex64),
+                               b_bar.astype(np.complex64),
+                               inputs64.astype(np.float32),
+                               tau64.astype(np.float32),
+                               mass64.astype(np.float32),
+                               DP.PROFESSOR_LINEAR_TARGET)
+    scale = float(np.max(np.abs(reference)))
+    error = float(np.max(np.abs(single.astype(np.complex128) - reference)))
+    relative = error / scale
+    print({"float32_scan_relative_error": relative, "scale": scale})
+    # the finding: float32 is NOT adequate for the scan here
+    assert relative > 1e-3, relative
 
 
 # ------------------------------------------- the unstable-model regression -

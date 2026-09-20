@@ -1,0 +1,29 @@
+cell: tau=1000 eps=1/4 target=professor_linear_target, b_bar=1
+
+lam=0.5+0.25j    rho=0.9980346258165436  A0=2.496014+0.250001j A1=-1.994024-0.499004j A2=0.498008+0.249004j
+   L=    3 max|fast-slow|=9.930e-16 @t=2 (|slow|=4.711e+00)  maxrel=2.108e-16 @t=2  maxULP=2
+         vs EXACT: scan 2.220e-16   oracle 2.220e-16
+   L=   17 max|fast-slow|=5.641e-13 @t=16 (|slow|=8.547e-01)  maxrel=6.600e-13 @t=16  maxULP=22320
+         vs EXACT: scan 6.808e-13   oracle 3.267e-14
+   L=  257 max|fast-slow|=4.138e-09 @t=220 (|slow|=3.641e+00)  maxrel=6.202e-09 @t=244  maxULP=1819185664
+         vs EXACT: scan 6.215e-09   oracle 1.889e-11
+   L= 1000 max|fast-slow|=6.784e-08 @t=880 (|slow|=2.406e+00)  maxrel=1.543e-07 @t=840  maxULP=7792580928
+
+lam=0.9          rho=0.9980246013975475  A0=2.896016+0.000000j A1=-2.792430+0.000000j A2=0.896414+0.000000j
+   L=    3 max|fast-slow|=0.000e+00 @t=0 (|slow|=1.000e+00)  maxrel=0.000e+00 @t=0  maxULP=0
+         vs EXACT: scan 0.000e+00   oracle 0.000e+00
+   L=   17 max|fast-slow|=1.117e-12 @t=16 (|slow|=3.124e+00)  maxrel=3.576e-13 @t=16  maxULP=2516
+         vs EXACT: scan 3.176e-13   oracle 7.097e-14
+   L=  257 max|fast-slow|=3.907e-07 @t=256 (|slow|=2.011e+01)  maxrel=9.884e-07 @t=216  maxULP=4687557248
+         vs EXACT: scan 9.872e-07   oracle 1.153e-09
+   L= 1000 max|fast-slow|=1.086e-05 @t=782 (|slow|=4.808e+00)  maxrel=2.177e-04 @t=815  maxULP=1883453817344
+
+lam=-0.6+0.4j    rho=0.9980136380531650  A0=1.396010+0.400002j A1=0.201594-0.798406j A2=-0.597610+0.398406j
+   L=    3 max|fast-slow|=1.790e-15 @t=2 (|slow|=1.120e+01)  maxrel=1.598e-16 @t=2  maxULP=1
+         vs EXACT: scan 1.586e-16   oracle 1.465e-16
+   L=   17 max|fast-slow|=5.152e-14 @t=16 (|slow|=4.130e+00)  maxrel=1.731e-14 @t=9  maxULP=220
+         vs EXACT: scan 1.401e-14   oracle 8.951e-15
+   L=  257 max|fast-slow|=7.563e-11 @t=205 (|slow|=5.802e+00)  maxrel=7.989e-11 @t=227  maxULP=23480832
+         vs EXACT: scan 8.011e-11   oracle 1.521e-12
+   L= 1000 max|fast-slow|=1.869e-09 @t=800 (|slow|=4.192e+00)  maxrel=3.505e-09 @t=925  maxULP=288903168
+

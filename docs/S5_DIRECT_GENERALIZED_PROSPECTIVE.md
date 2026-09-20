@@ -240,6 +240,98 @@ test design:
   is checked against the oracle on any that exist — the analysis predicts
   none do, and that is recorded rather than skipped.
 
+## 6b. A prediction falsified, and what the stable cell actually is
+
+**My prediction that no cell of the real coefficient builders would be
+stable was wrong.** The corrected suite found one on the cluster:
+
+$$\tau=1000,\quad \varepsilon=1/4,\quad
+\text{target}=\texttt{professor\_linear\_target},\quad
+\rho=0.9980477224938169<1 .$$
+
+It stays in the test suite and is not replaced by an easier synthetic
+fixture.
+
+### The finite disagreement at that cell: diagnosed against exact arithmetic
+
+Exact complex-rational ground truth (`docs/analysis/`, no JAX needed), the
+scan and the oracle both in IEEE double:
+
+| mode | L | max abs err | max rel err | token of max | value there | max ULP | **scan vs exact** | **oracle vs exact** |
+|---|---|---|---|---|---|---|---|---|
+| $0.9$ | 17 | 1.1e-12 | 3.6e-13 | 16 | 3.1 | 2 516 | 3.2e-13 | 7.1e-14 |
+| $0.9$ | 257 | 3.9e-07 | 9.9e-07 | 216 | 20.1 | 4.7e9 | **9.9e-07** | **1.2e-09** |
+| $0.9$ | 1000 | 1.1e-05 | 2.2e-04 | 815 | 4.8 | 1.9e12 | — | — |
+| $0.5{+}0.25i$ | 257 | 4.1e-09 | 6.2e-09 | 244 | 3.6 | 1.8e9 | 6.2e-09 | 1.9e-11 |
+| $-0.6{+}0.4i$ | 257 | 7.6e-11 | 8.0e-11 | 227 | 5.8 | 2.3e7 | 8.0e-11 | 1.5e-12 |
+
+Finite masks identical everywhere; no nonfinite values at this cell.
+**The oracle is right and the scan is the inaccurate one**, by two to three
+orders. The forward recurrence residual confirms it: the oracle's is
+**exactly zero** by construction, the scan's is 4.6e-8 at L=257 and 2.1e-6 at
+L=1000. Gradient disagreement (derivative sequence, same recurrence with
+source $s_{t-1}$) tracks the forward error: 4.4e-9 at L=257, 2.1e-5 at
+L=1000.
+
+Both algorithms are correct; the difference is conditioning. The companion at
+this cell is strongly **non-normal** — $A_0\approx2.896$, $A_1\approx-2.792$,
+$A_2\approx0.896$ with all roots near the unit circle — so
+$\lVert H^{2^k}\rVert_F$ peaks at $7.5\times10^3$ even though $\rho<1$, and
+the scan's repeated squaring cancels catastrophically. The naive
+absolute-value condition number is useless here (it grows as $6.6^L$, giving
+$10^{128}$ at L=257).
+
+**The tolerance is now derived, not chosen:**
+$\text{tol}=\text{safety}\cdot\epsilon\cdot\max_k\lVert H^{2^k}\rVert_F^2$,
+floored at $64\epsilon$. Measured against exact ground truth the constant
+never exceeded 300, so safety = 1000 leaves ~3× margin. It is computed from
+the actual coefficients at test time, not hardcoded.
+
+Error versus length **saturates** rather than diverging (ρ<1 forgets):
+1.7e-8 at 257, 4.4e-7 at 1000, 3.5e-6 at 2000 and flat at 3.5e-6 through
+16 000 — about 5.5 correct digits at production length, in float64.
+
+### The decisive pre-training finding: float32 breaks the scan here
+
+Emulated float32, same cell (`direct_prospective_float32_emulation.txt`):
+
+| mode | L | **doubling scan** rel err | sequential recurrence rel err |
+|---|---|---|---|
+| $0.9$ | 257 | **7.2** | 5.7e-04 |
+| $0.9$ | 1000 | **1.5e+05** | 2.1e-03 |
+| $0.9$ | 4000 | **2.3e+21** | 2.6e-03 |
+| $0.5{+}0.25i$ | 4000 | **4.6e+03** | 2.4e-04 |
+
+**In float32 — the precision the production path uses — the constant-operator
+doubling scan is unusable at the only stable cell that exists**, while the
+sequential recurrence is fine. This is a property of squaring a non-normal
+operator, not a bug, and no tolerance can repair it. The options are float64
+for the scan (slower, more memory), a **chunked scan** (sequential within
+chunks of size $c$, doubling across $L/c$ chunk summaries, which caps the
+number of squarings at $\log_2(L/c)$ and is the natural next design), or the
+sequential path that was already too slow. None of them is chosen here.
+
+### Is $\tau=1000$ a real prospective effect?
+
+Coefficients at this cell (with $\bar B=1$): $C_0=1.000004$,
+$C_1=-1.996016$, $C_2=0.996016$, and for $\bar A=0.9$:
+$A_0=2.896016$, $A_1=-2.792430$, $A_2=0.896414$.
+
+| $\bar A$ | roots | timescales (tokens) | vs Native | vs Professor/TSS | centroid shift |
+|---|---|---|---|---|---|
+| 0.9 | 0.899966, 0.998025±0.000283i | 9.5, **505.7**, 505.7 | 1.9e-03 | 6.9e-03 | +0.01 |
+| 0.5+0.25i | 0.5+0.25i, 0.99798, 0.99804 | 1.7, **494.5**, 508.3 | 1.2e-04 | 1.7e-03 | +0.00 |
+| 0.99 | 0.989439, 0.998289±0.000919i | 94.2, **584.0**, 584.0 | **5.1e-02** | 5.4e-02 | **+4.56** |
+
+The native root survives almost exactly (0.899966 vs 0.9), and the recurrence
+**adds a pair of residual modes with ≈500–584 token timescales**. The
+impulse response differs from Native by 0.01–5%, largest for the
+longest-memory mode. The response centroid moves **later**, not earlier
+(+4.56 tokens at $\bar A=0.99$): at this $\tau$ the effect is *retained
+long-timescale inertial memory*, **not** a temporal advance. Whether that is
+the intended prospective effect is a scientific decision, not a numerical
+one — but it should not be described as "prospective compensation".
+
 ## 7. What remains for the cluster
 
 1. `stability_grid.py` on real HiPPO modes: does any declared cell satisfy

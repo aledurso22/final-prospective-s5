@@ -1,0 +1,27 @@
+lam=0.9
+  A0=2.896015538+0.000000000j A1=-2.792430279+0.000000000j A2=0.896414343+0.000000000j
+  C0=1.000003984+0.000000000j C1=-1.996015936+0.000000000j C2=0.996015936+0.000000000j
+  roots=['0.899966-0.000000j', '0.998025+0.000283j', '0.998025-0.000283j']
+  |roots|=['0.899966', '0.998025', '0.998025']  timescales(tokens)=['9.5', '505.7', '505.7']
+  native timescale = 9.5 tokens
+  relative impulse-response difference:  vs Native 1.9021e-03   vs Professor/TSS(M=0,tau=1000) 6.8700e-03
+  response centroid: WWJ 4.27  Native 4.26  Professor 4.31  -> lag shift +0.01 tokens
+
+lam=0.5+0.25j
+  A0=2.496013944+0.250000996j A1=-1.994023904-0.499003984j A2=0.498007968+0.249003984j
+  C0=1.000003984+0.000000000j C1=-1.996015936+0.000000000j C2=0.996015936+0.000000000j
+  roots=['0.500000+0.249998j', '0.997980+0.000118j', '0.998035-0.000114j']
+  |roots|=['0.559016', '0.997980', '0.998035']  timescales(tokens)=['1.7', '494.5', '508.3']
+  native timescale = 1.7 tokens
+  relative impulse-response difference:  vs Native 1.1872e-04   vs Professor/TSS(M=0,tau=1000) 1.6594e-03
+  response centroid: WWJ 0.45  Native 0.45  Professor 0.46  -> lag shift +0.00 tokens
+
+lam=0.99
+  A0=2.986015896+0.000000000j A1=-2.972071713+0.000000000j A2=0.986055777+0.000000000j
+  C0=1.000003984+0.000000000j C1=-1.996015936+0.000000000j C2=0.996015936+0.000000000j
+  roots=['0.989439+0.000000j', '0.998289+0.000919j', '0.998289-0.000919j']
+  |roots|=['0.989439', '0.998289', '0.998289']  timescales(tokens)=['94.2', '584.0', '584.0']
+  native timescale = 99.5 tokens
+  relative impulse-response difference:  vs Native 5.0868e-02   vs Professor/TSS(M=0,tau=1000) 5.4381e-02
+  response centroid: WWJ 53.81  Native 49.25  Professor 53.75  -> lag shift +4.56 tokens
+

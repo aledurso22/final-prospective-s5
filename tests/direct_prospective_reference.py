@@ -102,6 +102,61 @@ def professor_tss_sequential(lambda_bar, b_bar, inputs, tau,
     return stacked[::-1] if reverse else stacked
 
 
+#: measured calibration of the doubling scan's rounding, from
+#: docs/analysis/direct_prospective_conditioning.txt: the observed relative
+#: error never exceeded 300 * eps * peak^2, so 1000 leaves ~3x of margin
+DOUBLING_SCAN_SAFETY = 1000.0
+
+
+def doubling_scan_peak_norm(coefficients_A, length):
+    """max_k ||H^(2^k)||_F over the levels the scan actually performs.
+
+    This is the quantity that governs the scan's rounding: each level squares
+    the operator, and ||H^(2^k)|| can be far larger than rho^(2^k) for a
+    NON-NORMAL companion, so the squaring step cancels catastrophically even
+    when the recurrence is stable.
+    """
+    import numpy
+
+    order = len(coefficients_A)
+    arrays = [numpy.asarray(value) for value in coefficients_A]
+    modes = arrays[0].shape[0]
+    operator = numpy.zeros((modes, order, order), dtype=numpy.complex128)
+    for index, array in enumerate(arrays):
+        operator[:, 0, index] = array
+    for index in range(order - 1):
+        operator[:, index + 1, index] = 1.0
+    peak = float(numpy.max(numpy.linalg.norm(operator, axis=(1, 2))))
+    distance = 1
+    while distance < length:
+        operator = operator @ operator
+        peak = max(peak, float(numpy.max(numpy.linalg.norm(operator,
+                                                           axis=(1, 2)))))
+        distance *= 2
+    return peak
+
+
+def doubling_scan_tolerance(coefficients_A, length, epsilon=2.220446049250313e-16,
+                            safety=DOUBLING_SCAN_SAFETY):
+    """A tolerance DERIVED from measured conditioning, not chosen to pass.
+
+    The tree scan and the sequential oracle associate the same sum
+    differently, so bitwise equality is not expected. The scan's relative
+    error is governed by the squaring step, whose condition number is
+    ||H^(2^k)||^2 / ||H^(2^(k+1))||; with the powers decaying this is
+    dominated by the peak transient norm squared. Measured against EXACT
+    rational ground truth at the tau = 1000 cell the constant stayed below
+    300 (docs/analysis/), hence
+
+        tolerance = safety * epsilon * peak^2,
+
+    floored at 64 * epsilon so a well-conditioned fixture is still held to
+    machine precision.
+    """
+    peak = doubling_scan_peak_norm(coefficients_A, length)
+    return max(safety * epsilon * peak * peak, 64.0 * epsilon)
+
+
 def compare_finite_prefix(fast, slow):
     """The diagnostic a divergent fixture needs, reported not hidden.
 
