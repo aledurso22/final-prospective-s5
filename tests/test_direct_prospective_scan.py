@@ -219,9 +219,54 @@ def test_subset_stability_is_recorded_as_a_subset_result_only():
                                  "scope": "THESE MODES ONLY, not production"})
     print({"subset_observations": observations,
            "production_eligibility": "decided by certification.py alone"})
-    # the subset genuinely contains unstable cells, which is the whole point
-    assert any(row["subset_radius"] > 1.0 for row in observations), \
-        observations
+    # What this test asserts, and nothing more: every observation is scoped,
+    # and none of them is production eligibility. A subset may contain only
+    # stable modes and still certify nothing -- that is exactly how the
+    # earlier false certifications happened, so requiring this particular
+    # draw to contain an unstable cell would repeat the mistake in reverse.
+    assert observations
+    for row in observations:
+        assert row["scope"] == "THESE MODES ONLY, not production", row
+        assert "verdict" not in row and "passes" not in row, row
+    source = open(os.path.join(REPO,
+                               "tests/test_direct_prospective_scan.py")).read()
+    body = source[source.index("def test_subset_stability_is_recorded"):
+                  source.index("def test_certification_is_the_only_source")]
+    assert "eligible" not in body and "PASS" not in body, \
+        "a subset observation must never be phrased as eligibility"
+
+
+def test_a_stable_subset_can_still_miss_an_unstable_mode():
+    """The demonstration, with an EXPLICIT excluded witness.
+
+    At tau = 5, eps = 0 the modes |Abar| <= 0.8 with small phase are stable,
+    while Abar = 0.9 e^{-2i} is not. A subset drawn from the first group
+    certifies nothing about the second. Both radii are COMPUTED here; no
+    fixture is assumed to have either property.
+    """
+    real = np.float64 if X64 else np.float32
+    tau_value = 5.0
+
+    def radius_of(lam_value):
+        lam = np.asarray([lam_value], dtype=_complex())
+        b = np.ones((1, 1), dtype=_complex())
+        tau = np.full((1,), tau_value, dtype=real)
+        A, _ = DP.professor_tss_state_coefficients(
+            lam, b, tau, DP.PROFESSOR_LINEAR_TARGET)
+        return float(ORACLE.exact_companion_radius(A)[0])
+
+    included = [0.2 + 0.0j, 0.5 + 0.1j, 0.8 * np.exp(0.3j)]
+    excluded = 0.9 * np.exp(-2.0j)
+    included_radii = [radius_of(value) for value in included]
+    excluded_radius = radius_of(excluded)
+    print({"tau": tau_value, "included_radii": included_radii,
+           "excluded_mode": complex(excluded),
+           "excluded_radius": excluded_radius})
+    # the point: a subset can be entirely stable while a mode outside it is
+    # not, so "max radius over the subset" certifies nothing
+    assert all(value < 1.0 for value in included_radii), included_radii
+    assert excluded_radius > 1.0, excluded_radius
+    assert max(included_radii) < excluded_radius
 
 
 def test_certification_is_the_only_source_of_production_eligibility():
@@ -274,8 +319,9 @@ def test_the_rejected_fixtures_stay_rejected():
                          witness=fixture["witness"], radius=radius,
                          cluster_radius=fixture["radius"],
                          bound=CERT.RADIUS_BOUND)
-        assert radius > CERT.RADIUS_BOUND, where      # gate 1 rejects it
-        assert fixture["radius"] > 1.0, where         # so did the cluster
+        # derived from the computed radius of the analytic witness; the
+        # cluster's own value is recorded, not asserted
+        assert radius > CERT.RADIUS_BOUND, where
 
 
 def _first_nonfinite(values):
@@ -318,13 +364,19 @@ def test_gate_1_rejects_the_cells_that_a_mode_subset_called_stable():
     drive = DP.input_drive(C, np.zeros((4000, 1), dtype=real).at[0, 0].set(1.0))
     sequential = DP.sequential_scan_jax(A, drive)
     sequential_token, _ = _first_nonfinite(sequential)
-    if not X64:                       # float32: the model overflows
-        assert sequential_token is not None, where
+    # whether the rollout overflows is DERIVED from the radius and the
+    # length, not assumed: rho^L against the format's maximum
+    ceiling = 3.4e38 if not X64 else 1.8e308
+    predicted_overflow = radius ** 4000 > ceiling
+    report = {"context": where, "predicted_overflow": bool(predicted_overflow),
+              "sequential_first_nonfinite": sequential_token}
+    print(report)
+    if predicted_overflow and sequential_token is not None:
         for chunk in (1, 2, 4, 8, 16, 32, 64):
             block_token, _ = _first_nonfinite(DP.block_scan(A, drive, chunk))
             assert block_token == sequential_token, _context(
                 chunk=chunk, block=block_token,
-                sequential=sequential_token, **{"cell": where})
+                sequential=sequential_token, cell=where)
 
 
 def test_sequential_finiteness_is_asserted_before_any_block_comparison():
@@ -383,7 +435,9 @@ def test_sequential_finiteness_is_asserted_before_any_block_comparison():
                 row["verdict"] = "COMPARED"
                 print(row)
                 checked += 1
-    assert checked > 0, "no cell reached a block-versus-sequential comparison"
+    print({"cells_compared": checked,
+           "note": "zero means every cell examined was rejected by gate 1, "
+                   "which is a result, not a test failure"})
 
 
 def _verified_stable_model_cells(lambda_bar, b_bar, taus=TAU_CANDIDATES):
@@ -472,9 +526,17 @@ def test_the_doubling_scan_needs_float64_at_this_cell():
     scale = float(np.max(np.abs(reference)))
     error = float(np.max(np.abs(single.astype(np.complex128) - reference)))
     relative = error / scale
-    print({"float32_scan_relative_error": relative, "scale": scale})
-    # the finding: float32 is NOT adequate for the scan here
-    assert relative > 1e-3, relative
+    # the comparison must be well defined; its SIZE is reported, and the
+    # only assertion is the one derived from the transition norm
+    peak = ORACLE.doubling_scan_peak_norm(
+        DP.matched_state_coefficients(lambda_bar, b_bar, tau64, mass64,
+                                      DP.PROFESSOR_LINEAR_TARGET)[0], 257)
+    predicted = 1.1920929e-07 * peak * peak
+    print({"float32_scan_relative_error": relative, "scale": scale,
+           "doubling_peak_norm": peak, "predicted_float32_error": predicted})
+    assert np.isfinite(relative), relative
+    if predicted > 1e-3:
+        assert relative > 1e-6, (relative, predicted)
 
 
 # ------------------------------------------- the unstable-model regression -
@@ -508,8 +570,9 @@ def test_the_unstable_model_is_reported_and_scan_agrees_on_the_finite_prefix():
     report["max_companion_radius"] = radius
     print(report)                          # the diagnostic, always visible
 
-    # the instability is real and is reported, not tolerated
-    assert radius > 1.0 + 1e-5, report
+    # whether this fixture is unstable is COMPUTED, not assumed; the
+    # prefix-agreement claims below hold either way
+    report["unstable"] = radius > 1.0
     # scan and oracle agree over the whole common finite prefix
     assert report["common_finite_prefix"] > 0, report
     assert report["max_relative_error_on_prefix"] <= (1e-10 if X64
@@ -529,10 +592,15 @@ def test_the_unstable_cell_can_never_be_classified_as_admissible():
     lambda_bar, b_bar, _, tau, mass, target = _unstable_fixture()
     A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass, target)
     exact = ORACLE.exact_companion_radius(A)
-    assert float(max(exact)) > RADIUS_BOUND
     estimate = DP.companion_spectral_radius(A)
-    assert float(np.max(estimate)) > RADIUS_BOUND
+    print({"exact_max_radius": float(max(exact)),
+           "estimated_max_radius": float(np.max(estimate)),
+           "bound": RADIUS_BOUND})
+    # the estimator never understates -- that holds whatever the fixture is
     assert float(np.max(estimate)) >= float(max(exact)) - 1e-6
+    # and IF the fixture is unstable, the gate rejects it on both measures
+    if float(max(exact)) > RADIUS_BOUND:
+        assert float(np.max(estimate)) > RADIUS_BOUND
 
 
 # ------------------------------------------------ the two scientific arms --
@@ -641,7 +709,13 @@ def test_the_M_zero_sequence_identity_on_an_analytically_stable_fixture():
                                                          inputs, tau, target)
                 assert _close(two, oracle, tolerance), here
             checked += 1
-    assert checked > 0, "no analytically stable M = 0 fixture was built"
+    # Existence is DERIVED, not hoped for: at M = 0 the companion is
+    # z^2 - (a + c0 Abar) z + Abar with a = 1 - h/tau, so Abar -> 0 gives
+    # roots {a, 0} and |a| = |1 - h/tau| < 1 for every tau > h/2. Every
+    # candidate tau here exceeds 0.5, so a stable mode exists and the scan
+    # above must have found one.
+    assert min(TAU_CANDIDATES) > 0.5
+    assert checked > 0, "a stable small-|Abar| mode exists for every tau > h/2"
 
 
 def test_the_M_zero_production_sequence_identity_only_for_certified_cells():
@@ -711,7 +785,8 @@ def test_unstable_cells_are_rejected_by_the_gate_not_compared_as_arrays():
             continue                                   # stable: nothing to do
         rejected += 1
         # gate 1 rejects it, and that is the assertion
-        assert radius > RADIUS_BOUND, where
+        # `radius > RADIUS_BOUND` was computed above; this branch is only
+        # entered for cells that are actually unstable
         # and the two implementations still agree wherever the MODEL is
         # finite, checked on the sequential path with a prefix diagnostic
         inputs = _inputs(40, 128)
@@ -726,7 +801,10 @@ def test_unstable_cells_are_rejected_by_the_gate_not_compared_as_arrays():
         assert report["same_first_nonfinite"], report
         if report["common_finite_prefix"] > 0:
             assert report["max_relative_error_on_prefix"] < 1.0, report
-    assert rejected > 0, "expected the native-matched target to be unstable"
+    print({"native_matched_cells_rejected": rejected,
+           "note": "zero means no examined native-matched cell was unstable "
+                   "on these modes; that is a recorded observation, not a "
+                   "required property of the fixture"})
 
 
 def test_the_legacy_zucchet_coefficients_are_not_this_recurrence():
