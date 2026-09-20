@@ -21,20 +21,23 @@ def partially_matched_scalar_coefficients(response, mass, gamma, h=1.0):
             h * (h + response) / q, -h * response / q)
 
 
-def _targets(lambda_bar, b_bar, tau, construction, h):
-    if construction == "professor":
+def _targets(lambda_bar, b_bar, tau, target_construction, h):
+    if target_construction == "professor_linear_target":
         return lambda_bar, b_bar
-    k = (tau / h).astype(lambda_bar.dtype)
-    return 1.0 + k * (lambda_bar - 1.0), k[..., None] * b_bar
+    if target_construction == "native_matched_target":
+        k = (tau / h).astype(lambda_bar.dtype)
+        return 1.0 + k * (lambda_bar - 1.0), k[..., None] * b_bar
+    raise ValueError(f"unknown target construction: {target_construction!r}")
 
 
 def matched_sequential(lambda_bar, b_bar, inputs, tau, mass,
-                       construction="professor", reverse=False, h=1.0):
+                       target_construction="professor_linear_target",
+                       reverse=False, h=1.0):
     """s_{t+1} = a s_t - b s_{t-1} + c0 f_t + c1 f_{t-1} + c2 f_{t-2},
     forming f each step, with zero state and input prehistory."""
     sequence = inputs[::-1] if reverse else inputs
     a, b, c0, c1, c2 = matched_scalar_coefficients(tau, mass, h)
-    F, G = _targets(lambda_bar, b_bar, tau, construction, h)
+    F, G = _targets(lambda_bar, b_bar, tau, target_construction, h)
     zero_state = np.zeros_like(lambda_bar)
     zero_input = np.zeros_like(sequence[0])
     s0 = s1 = zero_state
@@ -55,13 +58,14 @@ def matched_sequential(lambda_bar, b_bar, inputs, tau, mass,
 
 
 def partially_matched_sequential(lambda_bar, b_bar, inputs, response, mass,
-                                 gamma, construction="professor",
+                                 gamma,
+                                 target_construction="professor_linear_target",
                                  reverse=False, h=1.0):
     """s_{t+1} = a s_t - b s_{t-1} + c0 f_t + c1 f_{t-1}."""
     sequence = inputs[::-1] if reverse else inputs
     a, b, c0, c1 = partially_matched_scalar_coefficients(response, mass,
                                                          gamma, h)
-    F, G = _targets(lambda_bar, b_bar, response, construction, h)
+    F, G = _targets(lambda_bar, b_bar, response, target_construction, h)
     zero_state = np.zeros_like(lambda_bar)
     s0 = s1 = zero_state
     f1 = zero_state
@@ -75,6 +79,87 @@ def partially_matched_sequential(lambda_bar, b_bar, inputs, response, mass,
         f1 = f0
     stacked = np.stack(states, axis=0)
     return stacked[::-1] if reverse else stacked
+
+
+def professor_tss_sequential(lambda_bar, b_bar, inputs, tau,
+                             target_construction="professor_linear_target",
+                             reverse=False, h=1.0):
+    """The M = 0 PROFESSOR_TSS two-state recurrence, written out directly:
+    s_{t+1} = (1 - h/tau) s_t + (1 + h/tau) f_t - f_{t-1}."""
+    sequence = inputs[::-1] if reverse else inputs
+    a, c0, c1 = 1.0 - h / tau, 1.0 + h / tau, -np.ones_like(tau)
+    F, G = _targets(lambda_bar, b_bar, tau, target_construction, h)
+    s0 = np.zeros_like(lambda_bar)
+    f1 = np.zeros_like(lambda_bar)
+    states = []
+    for x0 in sequence:
+        f0 = F * s0 + G @ x0
+        nxt = (a.astype(f0.dtype) * s0 + c0.astype(f0.dtype) * f0
+               + c1.astype(f0.dtype) * f1)
+        states.append(nxt)
+        s0, f1 = nxt, f0
+    stacked = np.stack(states, axis=0)
+    return stacked[::-1] if reverse else stacked
+
+
+def compare_finite_prefix(fast, slow):
+    """The diagnostic a divergent fixture needs, reported not hidden.
+
+    Returns the finite masks, the first nonfinite token and mode on each
+    side, the length of the COMMON FINITE PREFIX and the maximum absolute
+    and relative error over it. Matching NaNs prove nothing; agreement over
+    the finite prefix plus an identical first-nonfinite token is what
+    distinguishes an unstable MODEL from a broken SCAN.
+    """
+    import numpy
+
+    fast_array = numpy.asarray(fast)
+    slow_array = numpy.asarray(slow)
+    fast_finite = numpy.isfinite(fast_array)
+    slow_finite = numpy.isfinite(slow_array)
+    length = fast_array.shape[0]
+
+    def first_bad(mask):
+        rows = numpy.where(~mask.all(axis=1))[0]
+        if rows.size == 0:
+            return None, None
+        token = int(rows[0])
+        mode = int(numpy.where(~mask[token])[0][0])
+        return token, mode
+
+    fast_token, fast_mode = first_bad(fast_finite)
+    slow_token, slow_mode = first_bad(slow_finite)
+    cut = min(fast_token if fast_token is not None else length,
+              slow_token if slow_token is not None else length)
+    prefix_fast, prefix_slow = fast_array[:cut], slow_array[:cut]
+    scale = float(numpy.max(numpy.abs(prefix_slow))) if cut else 0.0
+    absolute = (float(numpy.max(numpy.abs(prefix_fast - prefix_slow)))
+                if cut else 0.0)
+    return {
+        "length": length,
+        "finite_masks_identical": bool(numpy.array_equal(fast_finite,
+                                                         slow_finite)),
+        "first_nonfinite_fast": {"token": fast_token, "mode": fast_mode},
+        "first_nonfinite_slow": {"token": slow_token, "mode": slow_mode},
+        "same_first_nonfinite": (fast_token, fast_mode) == (slow_token,
+                                                            slow_mode),
+        "common_finite_prefix": cut,
+        "max_absolute_error_on_prefix": absolute,
+        "max_relative_error_on_prefix": (absolute / scale if scale else 0.0),
+        "max_abs_value_on_prefix": scale,
+    }
+
+
+def sequential_scan(coefficients_A, drive):
+    """s_t = sum_i A_i s_{t-i} + d_t, zero prehistory: the obvious loop."""
+    order = len(coefficients_A)
+    history = [np.zeros_like(drive[0])] * order
+    states = []
+    for d in drive:
+        value = sum(a * h for a, h in zip(coefficients_A, history)) + d
+        states.append(value)
+        history = [value] + history[:-1]
+    return np.stack(states, axis=0)
 
 
 def native_sequential(lambda_bar, b_bar, inputs):

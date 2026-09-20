@@ -31,6 +31,24 @@ and the required exact-matching diagnostic. (A)'s equation is implemented
 scan of it and because it is the natural control for (B). Nothing is renamed:
 `generalized_prospective_s5` in the production tree is untouched.
 
+## 2a. Naming: two independent axes
+
+The first cluster run failed a test called
+`..._matches_the_oracle(construction="professor", M>0)`, a name that reads
+as "the Professor model" when it meant "the WWJ model on the professor
+target". The two axes are now separate everywhere — code, tests and result
+metadata:
+
+| axis | values |
+|---|---|
+| **model** (which equation) | `professor_tss` ($M=0$, two-state), `wwj_generalized_tss` ($M>0$, three-state, with the mandatory $M\ddot f$) |
+| **target construction** (how $f$ is built) | `professor_linear_target` ($f=\bar As+\bar Bx$), `native_matched_target` ($F_\tau,G_\tau$) |
+
+`DP.model_of(mass)` returns the model from the mass, and the argument is
+`target_construction=`, never `construction=`. The legacy repository arm
+keeps its own label (`zucchet_repository_legacy`) until §3's discrepancy is
+resolved by its author.
+
 ## 2. The three equations, kept apart
 
 | name | equation | transfer function $S/F$ |
@@ -79,13 +97,25 @@ $$s_{t+1}=\Big(1-\frac h\tau\Big)s_t+\Big(1+\frac h\tau\Big)f_t-f_{t-1},$$
 and with $f=\bar As+\bar Bx$,
 $A_0=aI+c_0\bar A$, $A_1=-bI+c_1\bar A$, $A_2=c_2\bar A$, $C_i=c_i\bar B$.
 
-**Discrepancy to flag.** The repository's existing `zucchet_coefficients`
-returns $a_1=(1-k)+(1+k)\bar A$ but $a_2=(k-1)-k\bar A$ and $c_2=-k\bar B$,
-whereas the boundary above gives $a_2=-\bar A$ and $c_2=-\bar B$. They agree
-only at $k=1$. So the claim "the $M=0$ boundary *is* the existing Zucchet
-recurrence" does **not** hold against the code as written; the existing arm
-is a different discretization. It is left untouched, and the difference is
-recorded here rather than silently reconciled.
+**Discrepancy, now identified exactly.** The repository's
+`zucchet_coefficients` returns $a_1=(1-k)+(1+k)\bar A$, $a_2=(k-1)-k\bar A$,
+$c_1=(1+k)\bar B$, $c_2=-k\bar B$. The derivation above, with $h/\tau=k$,
+gives $A_0=(1-k)+(1+k)\bar A$, $A_1=-\bar A$, $C_0=(1+k)\bar B$,
+$C_1=-\bar B$. The first taps agree exactly; the differences are
+
+$$a_2-A_1=-(1-k)(1-\bar A),\qquad c_2-C_1=(1-k)\bar B,$$
+
+which together add exactly $-(1-k)\,(s_{t-1}-f_{t-1})=-(1-k)\,r_{t-1}$ to the
+update: **an extra residual-feedback term**, vanishing only at $k=1$.
+
+So the cause is **not indexing** (both emit $s_{t+1}$ from $s_t,f_t,f_{t-1}$)
+and **not the target construction** (both use $f=\bar As+\bar Bx$ in the
+comparison). It is (i) the meaning of the stored parameter — the legacy $k$
+matches the derivation only if `response` denotes the **rate** $h/\tau$, not
+the timescale $\tau$ — and (ii) a term the stated discretization does not
+contain. Whether (ii) is deliberate or a legacy error is for its author to
+say; the arm is left untouched and the difference is proved in
+`tests/test_direct_prospective_algebra.py`.
 
 ## 4. The exact-matching consequence, proved
 
@@ -177,6 +207,38 @@ decides first. The previous generalized run's 2.98 steps/minute is the
 execution failure being fixed, and the doubling scan is the fix — but
 throughput is only worth measuring for a recurrence that is stable enough to
 train.
+
+## 6a. The first cluster failure was the fixture, not the scan
+
+`test_the_matched_scan_matches_the_oracle_at_many_lengths` failed at
+`length=1000`, $M=\tau^2/4$, professor target. Reproducing that fixture's
+arithmetic locally in IEEE double (`docs/analysis/`, pure Python — no JAX
+needed for this question):
+
+| mode | companion radius | first nonfinite, scan / oracle | common finite prefix | max **relative** error on the prefix |
+|---|---|---|---|---|
+| $0.9e^{2.0i}$ | 3.1107 | **626 / 626** | 626 tokens | 1.9e-14 |
+| $-0.95$ | 3.5778 | **558 / 558** | 558 tokens | 2.3e-14 |
+| $0.7e^{-1.2i}$ | 2.0583 | **983 / 983** | 983 tokens | 1.2e-14 |
+
+The scan and the oracle agree to ~1e-14 relative over the entire finite
+prefix and go nonfinite at the *same token*. The absolute error looks
+enormous (~2e294) only because the values themselves are ~1e308. **The
+recurrence and scan code were therefore not changed**; what changed is the
+test design:
+
+* scan correctness is now tested on **analytically certified stable**
+  companion fixtures, built from roots inside the unit disc, at lengths
+  through 1500, orders 2 and 3, real and complex, values *and* gradients,
+  with a comparison that **fails on any nonfinite value** — `equal_nan` is
+  never used;
+* the divergent production-derived fixture is kept as an **unstable-model
+  regression** asserting agreement over the complete common finite prefix,
+  the same first nonfinite token and mode, and that the cell can never be
+  classified as admissible;
+* the real coefficient builders are searched for stable cells, and the scan
+  is checked against the oracle on any that exist — the analysis predicts
+  none do, and that is recorded rather than skipped.
 
 ## 7. What remains for the cluster
 

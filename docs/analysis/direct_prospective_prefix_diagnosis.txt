@@ -1,0 +1,9 @@
+lam=0.9 e^{i2.0}   rho=  3.1107 first_nonfinite fast=626 slow=626
+    common finite prefix = 626 tokens; max abs err 2.457e+294; max rel err 1.882e-14
+    |slow| at end of prefix = 1.312e+308
+lam=-0.95          rho=  3.5778 first_nonfinite fast=558 slow=558
+    common finite prefix = 558 tokens; max abs err 1.457e+294; max rel err 2.320e-14
+    |slow| at end of prefix = 6.310e+307
+lam=0.7 e^{-i1.2}  rho=  2.0583 first_nonfinite fast=983 slow=983
+    common finite prefix = 983 tokens; max abs err 1.872e+294; max rel err 1.214e-14
+    |slow| at end of prefix = 1.572e+308

@@ -281,3 +281,69 @@ def test_the_input_alignment_and_the_absence_of_wraparound():
         assert states[impulse] == C[0]                          # sees x_t
         if impulse + 1 < length:
             assert states[impulse + 1] == A0 * C[0] + C[1]      # then x_{t-1}
+
+
+# ------------------------------- the two arms, and the legacy difference ---
+def professor_tss(tau, h=H):
+    """(a, c0, c1) of the M = 0 two-state Professor/TSS recurrence."""
+    return 1 - h / tau, 1 + h / tau, F(-1)
+
+
+def test_the_generalized_model_reduces_to_the_professor_model_at_M_zero():
+    """WWJ_GENERALIZED_TSS at M = 0 is PROFESSOR_TSS, coefficient by
+    coefficient and sequence by sequence: the third state disappears."""
+    for tau in (F(2), F(10), F(100), F(1, 20)):
+        a, b, c0, c1, c2 = matched(tau, F(0))
+        pa, pc0, pc1 = professor_tss(tau)
+        assert (a, c0, c1) == (pa, pc0, pc1)
+        assert b == 0 and c2 == 0                  # no second state, no f_{t-2}
+        # and with f = lam s + g x the third tap vanishes identically
+        lam, g = F(3, 5), F(2)
+        A0, A1, A2 = a + c0 * lam, -b + c1 * lam, c2 * lam
+        P0, P1 = pa + pc0 * lam, pc1 * lam
+        assert (A0, A1) == (P0, P1) and A2 == 0
+
+
+def test_the_legacy_zucchet_recurrence_differs_by_a_residual_feedback_term():
+    """EXACT identification of the discrepancy, so it is explained rather
+    than reconciled.
+
+    Legacy `zucchet_coefficients` (k = response/h):
+        a1 = (1-k) + (1+k) lam      a2 = (k-1) - k lam
+        c1 = (1+k) b                c2 = -k b
+    The derivation above, with h/tau = k:
+        A0 = (1-k) + (1+k) lam      A1 = -lam
+        C0 = (1+k) b                C1 = -b
+
+    The first taps agree exactly. The differences are
+
+        a2 - A1 = -(1-k)(1 - lam),        c2 - C1 = (1-k) b,
+
+    which together add exactly  -(1-k) * (s_{t-1} - f_{t-1}) = -(1-k) r_{t-1}
+    to the update: an extra RESIDUAL FEEDBACK term. It vanishes only at
+    k = 1. So the discrepancy is NOT indexing (both emit s_{t+1} from s_t,
+    f_t, f_{t-1}) and NOT the target construction (both use f = lam s + b x
+    here); it is (i) the meaning of the stored parameter -- the legacy `k`
+    matches the derivation only if `response` denotes the RATE h/tau rather
+    than the timescale tau -- and (ii) a term the stated discretization does
+    not contain. The legacy arm is left untouched.
+    """
+    for k in (F(1, 20), F(1, 2), F(1), F(3)):
+        tau = H / k                                  # h/tau = k
+        lam, g = F(3, 5), F(2)
+        a1_legacy = (1 - k) + (1 + k) * lam
+        a2_legacy = (k - 1) - k * lam
+        c1_legacy, c2_legacy = (1 + k) * g, -k * g
+        pa, pc0, pc1 = professor_tss(tau)
+        A0, A1 = pa + pc0 * lam, pc1 * lam
+        C0, C1 = pc0 * g, pc1 * g
+        assert a1_legacy == A0 and c1_legacy == C0        # first taps agree
+        assert a2_legacy - A1 == -(1 - k) * (1 - lam)     # exact difference
+        assert c2_legacy - C1 == (1 - k) * g
+        # the two differences together are -(1-k) * residual at t-1
+        s1, x1 = F(7, 3), F(-2)
+        f1 = lam * s1 + g * x1
+        extra = (a2_legacy - A1) * s1 + (c2_legacy - C1) * x1
+        assert extra == -(1 - k) * (s1 - f1)
+        if k == 1:
+            assert extra == 0                             # they coincide here

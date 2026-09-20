@@ -43,8 +43,10 @@ RADIUS_BOUND = 1.0 + 1e-5
 GRID_TAU = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0)
 GRID_EPS = (0.0, 0.0625, 0.25)
 GRID_GAMMA = (0.0, 1.0)
-EQUATIONS = ("matched", "partially_matched")
-TARGETS = ("professor", "native_matched")
+#: MODELS (which equation), never conflated with target constructions
+EQUATIONS = ("wwj_generalized_tss", "partially_matched_two_compartment")
+#: TARGET CONSTRUCTIONS (how f is built)
+TARGETS = (DP.PROFESSOR_LINEAR_TARGET, DP.NATIVE_MATCHED_TARGET)
 IMPULSE_LENGTH = 64
 
 
@@ -69,7 +71,7 @@ def production_modes(seed=301):
 def coefficients_for(equation, lambda_bar, b_bar, tau, eps, gamma, target):
     """((A_i), (C_i)) for one cell."""
     tau_vector = jnp.full((lambda_bar.shape[0],), tau, dtype=jnp.float32)
-    if equation == "matched":
+    if equation == "wwj_generalized_tss":
         mass = DP.mass_from_eps(tau_vector, jnp.asarray(eps, jnp.float32))
         return DP.matched_state_coefficients(lambda_bar, b_bar, tau_vector,
                                              mass, target)
@@ -100,7 +102,7 @@ def rollout_finite(equation, lambda_bar, b_bar, tau, eps, gamma, target,
     inputs = jax.random.normal(jax.random.PRNGKey(0),
                                (length, b_bar.shape[1])).astype(dtype)
     tau_vector = jnp.full((lambda_bar.shape[0],), tau, dtype=dtype)
-    if equation == "matched":
+    if equation == "wwj_generalized_tss":
         mass = DP.mass_from_eps(tau_vector, jnp.asarray(eps, dtype))
         states = DP.matched_states(lambda_bar.astype(
             jnp.complex64 if dtype == jnp.float32 else jnp.complex128),
@@ -126,7 +128,7 @@ def gradient_finite(equation, lambda_bar, b_bar, tau, eps, gamma, target,
 
     def loss(lam, b, tau_value, eps_value):
         tau_vector = jnp.full((lam.shape[0],), tau_value)
-        if equation == "matched":
+        if equation == "wwj_generalized_tss":
             mass = DP.mass_from_eps(tau_vector, eps_value)
             states = DP.matched_states(lam, b, inputs, tau_vector, mass,
                                        target)
@@ -156,7 +158,10 @@ def impulse_responses(lambda_bar, b_bar, tau, eps):
         (a1, a2), DP.input_drive((c1, c2), inputs), remat=None)
     collapsed = DP.common_stencil_collapsed_state(lambda_bar, b_bar, inputs)
     mixed = DP.matched_states(lambda_bar, b_bar, inputs, tau_vector, mass,
-                              "professor")
+                              DP.PROFESSOR_LINEAR_TARGET)
+    professor = DP.professor_tss_states(lambda_bar, b_bar, inputs,
+                                        tau_vector,
+                                        DP.PROFESSOR_LINEAR_TARGET)
 
     def summary(states):
         magnitude = jnp.abs(states[:, 0])
@@ -168,9 +173,11 @@ def impulse_responses(lambda_bar, b_bar, tau, eps):
                     float(jnp.sum(magnitude[1:] ** 2)),
                 "finite": bool(jnp.all(jnp.isfinite(states)))}
 
-    return {"native_s5": summary(native), "zucchet_repository": summary(zucchet),
+    return {"native_s5": summary(native),
+            "zucchet_repository_legacy": summary(zucchet),
+            "professor_tss_M_zero": summary(professor),
             "exact_common_stencil_collapsed": summary(collapsed),
-            "causal_mixed_stencil": summary(mixed)}
+            "wwj_generalized_tss_causal_mixed_stencil": summary(mixed)}
 
 
 def main():
@@ -187,7 +194,9 @@ def main():
         for target in TARGETS:
             for tau in GRID_TAU:
                 for eps in GRID_EPS:
-                    for gamma in (GRID_GAMMA if equation == "partially_matched"
+                    for gamma in (GRID_GAMMA
+                                  if equation ==
+                                  "partially_matched_two_compartment"
                                   else (0.0,)):
                         A, _ = coefficients_for(equation, lambda_bar, b_bar,
                                                 tau, eps, gamma, target)

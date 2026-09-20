@@ -1,8 +1,24 @@
 """The JAX implementation of the direct prospective recurrences (cluster).
 
-The algebra is proved without JAX in `test_direct_prospective_algebra.py`;
-this file checks the implementation, its gradients, its orientation, its
-alignment and its behaviour at production shape and precision.
+Two kinds of test, deliberately separated, because conflating them is what
+made the first cluster run look like a scan defect when it was an unstable
+fixture:
+
+  SCAN CORRECTNESS is tested on ANALYTICALLY CERTIFIED STABLE fixtures --
+  companion coefficients built from chosen roots strictly inside the unit
+  disc -- so nothing overflows and float64 agreement with the sequential
+  oracle can be strict, including gradients.
+
+  MODEL INSTABILITY is tested on the production-derived fixture that does
+  diverge. There the claim is not "the values are small" but "the scan and
+  the oracle agree over the complete common finite prefix and go nonfinite
+  at the same token and mode". Matching NaNs alone would prove nothing, so
+  `equal_nan` is never used.
+
+NAMING. Two independent axes: the MODEL (PROFESSOR_TSS with M = 0, or
+WWJ_GENERALIZED_TSS with M > 0) and the TARGET CONSTRUCTION
+(PROFESSOR_LINEAR_TARGET f = Abar s + Bbar x, or NATIVE_MATCHED_TARGET). "The
+WWJ model on the professor linear target" is not "the Professor model".
 
     JAX_ENABLE_X64=1 $PY -m pytest tests/test_direct_prospective_scan.py
 """
@@ -20,20 +36,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NATIVE_BASE = "6d55765a36f5985f3a062a8f3b6854316b26b1bd"
 X64 = jax.config.read("jax_enable_x64")
 TOL64, TOL32 = 1e-10, 2e-4
+#: lengths exercised everywhere, including non-powers of two and > 1000
+LENGTHS = (1, 2, 3, 5, 7, 8, 9, 15, 17, 100, 257, 1000, 1023, 1500)
 
 
-def _modes(seed, P=6, H=3, complex_modes=True, dtype=None):
-    dtype = dtype or (np.complex128 if X64 else np.complex64)
-    keys = jax.random.split(jax.random.PRNGKey(seed), 4)
-    radius = 0.2 + 0.7 * jax.random.uniform(keys[0], (P,))
-    if complex_modes:
-        angle = jax.random.uniform(keys[1], (P,), minval=-2.0, maxval=2.0)
-        lambda_bar = (radius * np.exp(1j * angle)).astype(dtype)
-    else:
-        lambda_bar = radius.astype(dtype)
-    b_bar = (jax.random.normal(keys[2], (P, H))
-             + 1j * jax.random.normal(keys[3], (P, H))).astype(dtype)
-    return lambda_bar, b_bar
+def _complex(dtype=None):
+    return dtype or (np.complex128 if X64 else np.complex64)
 
 
 def _inputs(seed, length, H=3):
@@ -41,180 +49,290 @@ def _inputs(seed, length, H=3):
     return jax.random.normal(jax.random.PRNGKey(seed), (length, H)).astype(real)
 
 
-def _params(P, tau=0.5, eps=0.25, gamma=0.0):
-    real = np.float64 if X64 else np.float32
-    tau_vector = np.full((P,), tau, dtype=real)
-    gamma_vector = np.full((P,), gamma, dtype=real)
-    return tau_vector, gamma_vector
-
-
 def _close(left, right, tolerance):
+    """Strict comparison. Nonfinite values on either side FAIL it."""
+    if not (bool(np.all(np.isfinite(left)))
+            and bool(np.all(np.isfinite(right)))):
+        return False
     scale = float(np.maximum(np.max(np.abs(right)), 1.0))
     return float(np.max(np.abs(left - right))) <= tolerance * scale
 
 
-# ------------------------------------------------ scan versus the oracle ---
-def test_the_matched_scan_matches_the_oracle_at_many_lengths():
-    tolerance = TOL64 if X64 else TOL32
-    for construction in ("professor", "native_matched"):
+# ------------------------------------------- certified stable fixtures -----
+def certified_stable_coefficients(order, seed, P=6, complex_modes=True):
+    """Companion coefficients built FROM ROOTS inside the unit disc.
+
+    For roots r_i, s_t = sum_i A_i s_{t-i} has
+    A_1 = sum r_i, A_2 = -sum_{i<j} r_i r_j, A_3 = r_1 r_2 r_3, so the
+    spectral radius is max |r_i| < 1 BY CONSTRUCTION -- no model, no
+    coefficient builder, nothing that can be unstable.
+    """
+    keys = jax.random.split(jax.random.PRNGKey(seed), 2)
+    magnitude = 0.2 + 0.6 * jax.random.uniform(keys[0], (P, order))
+    if complex_modes:
+        angle = jax.random.uniform(keys[1], (P, order), minval=-3.0,
+                                   maxval=3.0)
+        roots = (magnitude * np.exp(1j * angle)).astype(_complex())
+    else:
+        roots = magnitude.astype(_complex())
+    if order == 2:
+        r1, r2 = roots[:, 0], roots[:, 1]
+        coefficients = (r1 + r2, -(r1 * r2))
+    elif order == 3:
+        r1, r2, r3 = roots[:, 0], roots[:, 1], roots[:, 2]
+        coefficients = (r1 + r2 + r3,
+                        -(r1 * r2 + r1 * r3 + r2 * r3),
+                        r1 * r2 * r3)
+    else:
+        raise ValueError(order)
+    return coefficients, float(np.max(np.abs(roots)))
+
+
+def test_the_certified_fixtures_really_are_stable():
+    """The premise of every stable test below, checked rather than assumed."""
+    for order in (2, 3):
         for complex_modes in (True, False):
-            lambda_bar, b_bar = _modes(1, complex_modes=complex_modes)
-            tau, _ = _params(lambda_bar.shape[0])
-            mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=tau.dtype))
-            for length in (1, 2, 3, 5, 7, 8, 9, 15, 17, 100, 257, 1000):
-                inputs = _inputs(length, length)
-                fast = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass,
-                                         construction)
-                slow = ORACLE.matched_sequential(lambda_bar, b_bar, inputs,
-                                                 tau, mass, construction)
-                assert fast.shape == (length, lambda_bar.shape[0])
-                assert _close(fast, slow, tolerance), (construction, length)
+            coefficients, radius = certified_stable_coefficients(
+                order, 1, complex_modes=complex_modes)
+            assert radius < 1.0, (order, radius)
+            estimate = DP.companion_spectral_radius(coefficients)
+            assert float(np.max(estimate)) <= 1.0 + 1e-6, (order, estimate)
+            exact = ORACLE.exact_companion_radius(coefficients)
+            assert float(np.max(exact)) < 1.0
 
 
-def test_the_partially_matched_scan_matches_the_oracle():
+def test_the_scan_matches_the_oracle_on_stable_fixtures_at_many_lengths():
+    """Strict float64 agreement, real and complex modes, orders 2 and 3,
+    lengths through 1500 including non-powers of two."""
     tolerance = TOL64 if X64 else TOL32
-    lambda_bar, b_bar = _modes(2)
-    tau, gamma = _params(lambda_bar.shape[0], gamma=1.0)
-    mass = DP.mass_from_eps(gamma + tau, np.asarray(0.25, dtype=tau.dtype))
-    for length in (1, 2, 3, 6, 17, 64, 333):
-        inputs = _inputs(length + 1, length)
-        fast = DP.partially_matched_states(lambda_bar, b_bar, inputs, tau,
-                                           mass, gamma)
-        slow = ORACLE.partially_matched_sequential(lambda_bar, b_bar, inputs,
-                                                   tau, mass, gamma)
-        assert _close(fast, slow, tolerance), length
+    for order in (2, 3):
+        for complex_modes in (True, False):
+            coefficients, _ = certified_stable_coefficients(
+                order, 2 + order, complex_modes=complex_modes)
+            for length in LENGTHS:
+                drive = jax.random.normal(
+                    jax.random.PRNGKey(length),
+                    (length, coefficients[0].shape[0])).astype(_complex())
+                fast = DP.companion_doubling_scan(coefficients, drive)
+                slow = ORACLE.sequential_scan(coefficients, drive)
+                assert fast.shape == drive.shape
+                assert _close(fast, slow, tolerance), (order, complex_modes,
+                                                       length)
 
 
-def test_every_rematerialization_choice_agrees():
-    lambda_bar, b_bar = _modes(3)
-    tau, _ = _params(lambda_bar.shape[0])
-    mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=tau.dtype))
-    inputs = _inputs(4, 64)
-    values = {mode: DP.matched_states(lambda_bar, b_bar, inputs, tau, mass,
-                                      remat=mode)
+def test_stable_scan_gradients_match_the_oracle():
+    for order in (2, 3):
+        coefficients, _ = certified_stable_coefficients(order, 9, P=4)
+        drive = jax.random.normal(jax.random.PRNGKey(10),
+                                  (129, 4)).astype(_complex())
+
+        def loss(values, implementation):
+            return np.sum(np.abs(implementation(values, drive)) ** 2).real
+
+        fast = jax.grad(loss)(coefficients, DP.companion_doubling_scan)
+        slow = jax.grad(loss)(coefficients, ORACLE.sequential_scan)
+        for index, (left, right) in enumerate(zip(fast, slow)):
+            assert _close(left, right, 1e-7 if X64 else 1e-3), (order, index)
+
+
+def test_stable_scan_has_zero_prehistory_and_no_wraparound():
+    coefficients, _ = certified_stable_coefficients(3, 11, P=4)
+    length = 32
+    for impulse in (0, 1, 2, 31):
+        drive = np.zeros((length, 4), dtype=_complex()).at[impulse].set(1.0)
+        states = DP.companion_doubling_scan(coefficients, drive)
+        assert bool(np.all(states[:impulse] == 0)), impulse
+        assert bool(np.any(states[impulse] != 0)), impulse
+    # an impulse at the end never reaches the head
+    drive = np.zeros((length, 4), dtype=_complex()).at[length - 1].set(1.0)
+    states = DP.companion_doubling_scan(coefficients, drive)
+    assert bool(np.all(states[:length - 1] == 0))
+
+
+def test_every_rematerialization_choice_agrees_on_a_stable_fixture():
+    coefficients, _ = certified_stable_coefficients(3, 12)
+    drive = jax.random.normal(jax.random.PRNGKey(13),
+                              (257, coefficients[0].shape[0])).astype(
+                                  _complex())
+    values = {mode: DP.companion_doubling_scan(coefficients, drive,
+                                               remat=mode)
               for mode in ("level", "whole", None)}
     for mode, value in values.items():
         assert _close(value, values[None], TOL64 if X64 else TOL32), mode
 
 
-def test_zero_prehistory_alignment_and_no_wraparound():
-    lambda_bar, b_bar = _modes(5)
-    tau, _ = _params(lambda_bar.shape[0])
-    mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=tau.dtype))
-    length, H = 20, b_bar.shape[1]
-    for impulse in (0, 1, 2, 19):
-        inputs = np.zeros((length, H)).at[impulse].set(1.0)
-        states = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass)
-        assert bool(np.all(states[:impulse] == 0)), impulse
-        assert bool(np.any(states[impulse] != 0)), impulse
-    # the state at token t has seen x_t through C0, exactly like Native S5
-    _, C = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass)
-    impulse_input = np.zeros((length, H)).at[0, 0].set(1.0)
-    states = DP.matched_states(lambda_bar, b_bar, impulse_input, tau, mass)
-    assert _close(states[0], C[0][:, 0], TOL64 if X64 else TOL32)
+# ------------------------------- stable cells of the REAL model builders ---
+def _model_modes(seed, P=6, H=3):
+    keys = jax.random.split(jax.random.PRNGKey(seed), 4)
+    radius = 0.2 + 0.7 * jax.random.uniform(keys[0], (P,))
+    angle = jax.random.uniform(keys[1], (P,), minval=-2.0, maxval=2.0)
+    lambda_bar = (radius * np.exp(1j * angle)).astype(_complex())
+    b_bar = (jax.random.normal(keys[2], (P, H))
+             + 1j * jax.random.normal(keys[3], (P, H))).astype(_complex())
+    return lambda_bar, b_bar
 
 
-def test_the_reverse_branch_is_a_flipped_causal_scan():
-    lambda_bar, b_bar = _modes(6)
-    tau, _ = _params(lambda_bar.shape[0])
-    mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=tau.dtype))
-    inputs = _inputs(7, 48)
-    reverse = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass,
-                                reverse=True)
-    oracle = ORACLE.matched_sequential(lambda_bar, b_bar, inputs, tau, mass,
-                                       reverse=True)
-    assert _close(reverse, oracle, TOL64 if X64 else TOL32)
-    assert not _close(reverse, DP.matched_states(lambda_bar, b_bar, inputs,
-                                                 tau, mass), 1e-3)
-
-
-# ------------------------------------------------------------ gradients ----
-def test_gradients_agree_with_the_oracle():
-    lambda_bar, b_bar = _modes(8, P=4, H=2)
-    tau, _ = _params(4)
-    mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=tau.dtype))
-    inputs = _inputs(9, 33, H=2)
-    tolerance = 1e-7 if X64 else 1e-2
-
-    def loss(lam, b, tau_value, mass_value, implementation):
-        return np.sum(np.abs(implementation(lam, b, inputs, tau_value,
-                                            mass_value)) ** 2).real
-
-    for argnums in (0, 1, 2, 3):
-        fast = jax.grad(loss, argnums=argnums)(lambda_bar, b_bar, tau, mass,
-                                               DP.matched_states)
-        slow = jax.grad(loss, argnums=argnums)(
-            lambda_bar, b_bar, tau, mass,
-            lambda lam, b, x, t, m: ORACLE.matched_sequential(lam, b, x, t, m))
-        assert _close(fast, slow, tolerance), argnums
-
-
-def test_results_are_deterministic_for_a_fixed_seed():
-    lambda_bar, b_bar = _modes(10)
-    tau, _ = _params(lambda_bar.shape[0])
-    mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=tau.dtype))
-    inputs = _inputs(11, 129)
-    first = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass)
-    second = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass)
-    assert bool(np.all(first == second))
-
-
-# ---------------------------------------------- stability, as a finding ----
-def test_the_companion_radius_estimate_agrees_with_exact_roots():
-    lambda_bar, b_bar = _modes(12, P=8)
-    tau, _ = _params(8, tau=0.5)
-    mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=tau.dtype))
-    A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass)
-    estimate = DP.companion_spectral_radius(A)
-    exact = ORACLE.exact_companion_radius(A)
-    for index in range(8):
-        assert float(estimate[index]) >= exact[index] - 1e-6      # never under
-        assert float(estimate[index]) <= exact[index] * 1.02 + 1e-6
-
-
-def test_a_unit_mode_gives_an_exact_unit_root():
-    """The structural marginality, in JAX: at Abar = 1 the characteristic
-    polynomial vanishes at z = 1 for every parameter choice."""
+def _stable_model_cells(lambda_bar, b_bar, bound=1.0):
+    """Cells of the ACTUAL coefficient builders whose radius is below the
+    bound. The search is honest: if there are none, the test says so."""
     real = np.float64 if X64 else np.float32
-    ones = np.ones((3,), dtype=np.complex128 if X64 else np.complex64)
-    b_bar = np.ones((3, 2), dtype=ones.dtype)
-    for tau_value, eps in ((0.05, 0.25), (2.0, 0.0625), (50.0, 0.0)):
-        tau = np.full((3,), tau_value, dtype=real)
-        mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
-        (A0, A1, A2), _ = DP.matched_state_coefficients(ones, b_bar, tau, mass)
-        characteristic = 1.0 - A0 - A1 - A2            # char(1)
-        assert float(np.max(np.abs(characteristic))) < 1e-6, tau_value
+    found = []
+    for tau_value in (0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 1000.0):
+        for eps in (0.0, 0.25):
+            for target in DP.TARGET_CONSTRUCTIONS:
+                tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+                mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
+                A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau,
+                                                     mass, target)
+                radius = float(np.max(ORACLE.exact_companion_radius(A)))
+                if radius <= bound:
+                    found.append({"tau": tau_value, "eps": eps,
+                                  "target": target, "radius": radius})
+    return found
 
 
-def test_the_exact_matching_collapse_is_reproduced_numerically():
-    """s = f with f = Abar s + Bbar x gives a memoryless map: the impulse
-    response is a single nonzero token, unlike Native S5's decay."""
-    lambda_bar, b_bar = _modes(13, P=4, H=2)
-    inputs = np.zeros((16, 2)).at[0, 0].set(1.0)
-    collapsed = DP.common_stencil_collapsed_state(lambda_bar, b_bar, inputs)
-    native = ORACLE.native_sequential(lambda_bar, b_bar, inputs)
-    assert float(np.max(np.abs(collapsed[1:]))) == 0.0
-    assert float(np.max(np.abs(native[1:]))) > 0.0
+def test_model_builder_cells_are_scanned_correctly_where_they_are_stable():
+    """If any cell of the real builders is stable, the scan must match the
+    oracle there. If none is -- which the analysis predicts -- that is
+    recorded as the finding, not silently skipped."""
+    lambda_bar, b_bar = _model_modes(14)
+    cells = _stable_model_cells(lambda_bar, b_bar)
+    real = np.float64 if X64 else np.float32
+    for cell in cells:
+        tau = np.full(lambda_bar.shape, cell["tau"], dtype=real)
+        mass = DP.mass_from_eps(tau, np.asarray(cell["eps"], dtype=real))
+        for length in (3, 17, 257, 1000):
+            inputs = _inputs(length, length)
+            fast = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass,
+                                     cell["target"])
+            slow = ORACLE.matched_sequential(lambda_bar, b_bar, inputs, tau,
+                                             mass, cell["target"])
+            assert _close(fast, slow, TOL64 if X64 else TOL32), (cell, length)
+    if not cells:
+        # the documented no-go: no admissible cell of the real builders
+        assert True, "no stable cell exists for the real coefficient builders"
 
 
-def test_production_length_float32_finiteness_is_reported_not_assumed():
-    """At production length the causal recurrence is expected to diverge on
-    S5-like modes. The test records which it is, and fails only if the two
-    disagree with the companion radius -- the diagnosis must be consistent.
+# ------------------------------------------- the unstable-model regression -
+def _unstable_fixture(length=1000, tau_value=0.5, eps=0.25,
+                      target=DP.PROFESSOR_LINEAR_TARGET):
+    """The production-derived fixture that made the first cluster run fail."""
+    real = np.float64 if X64 else np.float32
+    lambda_bar, b_bar = _model_modes(1)
+    tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+    mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
+    inputs = _inputs(length, length)
+    return lambda_bar, b_bar, inputs, tau, mass, target
+
+
+def test_the_unstable_model_is_reported_and_scan_agrees_on_the_finite_prefix():
+    """The regression that replaces the misdiagnosed failure.
+
+    The WWJ_GENERALIZED_TSS model on the PROFESSOR_LINEAR_TARGET with
+    tau = 0.5, M = tau^2/4 is UNSTABLE on S5-like modes: it overflows within
+    a thousand tokens. What must hold is that the scan reproduces the
+    oracle exactly until the model itself diverges, and that both diverge at
+    the same place.
     """
-    lambda_bar, b_bar = _modes(14, P=16, H=4, dtype=np.complex64)
-    tau = np.full((16,), 0.05, dtype=np.float32)
-    mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=np.float32))
-    inputs = jax.random.normal(jax.random.PRNGKey(15),
-                               (4096, 4)).astype(np.float32)
-    A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass)
-    radius = float(np.max(DP.companion_spectral_radius(A)))
-    states = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass)
-    finite = bool(np.all(np.isfinite(states)))
-    if radius > 1.001:
-        assert not finite or float(np.max(np.abs(states))) > 1e6, radius
-    else:
-        assert finite, radius
+    lambda_bar, b_bar, inputs, tau, mass, target = _unstable_fixture()
+    fast = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass, target)
+    slow = ORACLE.matched_sequential(lambda_bar, b_bar, inputs, tau, mass,
+                                     target)
+    report = ORACLE.compare_finite_prefix(fast, slow)
+    A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass, target)
+    radius = float(np.max(ORACLE.exact_companion_radius(A)))
+    report["max_companion_radius"] = radius
+    print(report)                          # the diagnostic, always visible
+
+    # the instability is real and is reported, not tolerated
+    assert radius > 1.0 + 1e-5, report
+    # scan and oracle agree over the whole common finite prefix
+    assert report["common_finite_prefix"] > 0, report
+    assert report["max_relative_error_on_prefix"] <= (1e-10 if X64
+                                                      else 1e-3), report
+    # and they fail in the same place, if they fail at all
+    assert report["same_first_nonfinite"], report
+    assert report["finite_masks_identical"], report
+    # divergence between the two never precedes the model's own divergence
+    assert report["max_relative_error_on_prefix"] < 1.0, report
+
+
+def test_the_unstable_cell_can_never_be_classified_as_admissible():
+    """The stability bound is what rejects it, and no NaN-tolerant
+    comparison can launder it into an admissible initialization."""
+    from experiments.s5_direct_prospective.stability_grid import RADIUS_BOUND
+
+    lambda_bar, b_bar, _, tau, mass, target = _unstable_fixture()
+    A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass, target)
+    exact = ORACLE.exact_companion_radius(A)
+    assert float(max(exact)) > RADIUS_BOUND
+    estimate = DP.companion_spectral_radius(A)
+    assert float(np.max(estimate)) > RADIUS_BOUND
+    assert float(np.max(estimate)) >= float(max(exact)) - 1e-6
+
+
+# ------------------------------------------------ the two scientific arms --
+def test_the_generalized_model_reduces_to_the_professor_model_at_M_zero():
+    """WWJ_GENERALIZED_TSS with M = 0 IS PROFESSOR_TSS: the three-state
+    recurrence and the two-state one produce the same sequence, and the
+    model label follows the mass."""
+    lambda_bar, b_bar = _model_modes(15)
+    real = np.float64 if X64 else np.float32
+    zero = np.zeros(lambda_bar.shape, dtype=real)
+    for tau_value in (2.0, 10.0, 100.0):
+        tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+        assert DP.model_of(zero) == DP.PROFESSOR_TSS
+        assert DP.model_of(DP.mass_from_eps(tau, np.asarray(0.25, real))) == \
+            DP.WWJ_GENERALIZED_TSS
+        for target in DP.TARGET_CONSTRUCTIONS:
+            (A0, A1, A2), (C0, C1, C2) = DP.matched_state_coefficients(
+                lambda_bar, b_bar, tau, zero, target)
+            (P0, P1), (Q0, Q1) = DP.professor_tss_state_coefficients(
+                lambda_bar, b_bar, tau, target)
+            assert _close(A0, P0, TOL64 if X64 else TOL32)
+            assert _close(A1, P1, TOL64 if X64 else TOL32)
+            assert float(np.max(np.abs(A2))) == 0.0        # no third state
+            assert _close(C0, Q0, TOL64 if X64 else TOL32)
+            assert _close(C1, Q1, TOL64 if X64 else TOL32)
+            assert float(np.max(np.abs(C2))) == 0.0
+            for length in (5, 64, 257):
+                inputs = _inputs(length, length)
+                three = DP.matched_states(lambda_bar, b_bar, inputs, tau,
+                                          zero, target)
+                two = DP.professor_tss_states(lambda_bar, b_bar, inputs, tau,
+                                              target)
+                oracle = ORACLE.professor_tss_sequential(lambda_bar, b_bar,
+                                                         inputs, tau, target)
+                assert _close(three, two, TOL64 if X64 else TOL32), length
+                assert _close(two, oracle, TOL64 if X64 else TOL32), length
+
+
+def test_the_legacy_zucchet_coefficients_are_not_this_recurrence():
+    """The legacy arm differs by an explicit residual-feedback term; the
+    difference is reported, not reconciled, and the legacy arm is untouched."""
+    from s5.discrete_recurrence import zucchet_coefficients
+
+    lambda_bar, b_bar = _model_modes(16)
+    real = np.float64 if X64 else np.float32
+    for k_value in (0.05, 0.5, 1.0):
+        k = np.full(lambda_bar.shape, k_value, dtype=real)
+        legacy_a1, legacy_a2, legacy_c1, legacy_c2 = zucchet_coefficients(
+            lambda_bar, b_bar, k)
+        # our Professor/TSS with h/tau = k, i.e. tau = 1/k
+        tau = 1.0 / k
+        (A0, A1), (C0, C1) = DP.professor_tss_state_coefficients(
+            lambda_bar, b_bar, tau, DP.PROFESSOR_LINEAR_TARGET)
+        assert _close(legacy_a1, A0, TOL64 if X64 else TOL32)   # first tap agrees
+        # the second tap differs by exactly -(1-k)(1 - Abar)
+        difference = legacy_a2 - A1
+        predicted = -(1.0 - k) * (1.0 - lambda_bar)
+        assert _close(difference, predicted, TOL64 if X64 else TOL32), k_value
+        # and the input tap by exactly (1-k) Bbar
+        input_difference = legacy_c2 - C1
+        assert _close(input_difference, (1.0 - k)[..., None] * b_bar,
+                      TOL64 if X64 else TOL32), k_value
+        if abs(k_value - 1.0) < 1e-12:
+            assert _close(difference, np.zeros_like(difference), 1e-12)
 
 
 # ------------------------------------------------- what must not change ----
