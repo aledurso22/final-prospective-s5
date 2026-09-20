@@ -152,7 +152,8 @@ def test_the_new_wwj_files_exist_and_are_tracked():
                          "experiments/s5_direct_prospective/",
                          "docs/S5_DIRECT_", "docs/analysis/",
                          "tests/direct_prospective_reference.py",
-                         "tests/test_direct_prospective_")
+                         "tests/test_direct_prospective_",
+                         "tests/source_introspection.py")
     added = set(_git("diff", "--name-only", "--diff-filter=A", FROZEN_BASE,
                      "--").split())
     unexplained = {name for name in added

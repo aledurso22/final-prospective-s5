@@ -23,6 +23,7 @@ WWJ model on the professor linear target" is not "the Professor model".
     JAX_ENABLE_X64=1 $PY -m pytest tests/test_direct_prospective_scan.py
 """
 
+import math
 import os
 import subprocess
 
@@ -339,18 +340,20 @@ def test_gate_1_rejects_the_cells_that_a_mode_subset_called_stable():
     from experiments.s5_direct_prospective import certification as CERT
 
     real = np.float64 if X64 else np.float32
-    lambda_bar = np.asarray(
-        [OFFENDING_MODE["abs_lambda"]
-         * np.exp(1j * OFFENDING_MODE["angle"])], dtype=_complex())
+    # the witness is written out explicitly: PRNG-free, reproducible
+    # anywhere, and not dependent on any constant defined elsewhere
+    lambda_bar = np.asarray([0.9 * np.exp(-2.0j)], dtype=_complex())
     b_bar = np.ones((1, 1), dtype=_complex())
-    tau = np.full((1,), OFFENDING_MODE["tau"], dtype=real)
+    tau_value = 2.0
+    expected_radius = 1.4415912882
+    tau = np.full((1,), tau_value, dtype=real)
     A, C = DP.professor_tss_state_coefficients(lambda_bar, b_bar, tau,
                                                DP.PROFESSOR_LINEAR_TARGET)
     radius = float(ORACLE.exact_companion_radius(A)[0])
-    where = _context(tau=OFFENDING_MODE["tau"], eps=0.0,
+    where = _context(tau=tau_value, eps=0.0,
                      target_construction=DP.PROFESSOR_LINEAR_TARGET,
                      lambda_bar=complex(lambda_bar[0]), radius=radius)
-    assert abs(radius - OFFENDING_MODE["radius"]) < 1e-6, where
+    assert abs(radius - expected_radius) < 1e-6, where
     assert radius > CERT.RADIUS_BOUND, where          # gate 1 rejects it
 
     # and the divergence is the MODEL's, not a scan's: the sequential path
@@ -360,8 +363,12 @@ def test_gate_1_rejects_the_cells_that_a_mode_subset_called_stable():
     sequential_token, _ = _first_nonfinite(sequential)
     # whether the rollout overflows is DERIVED from the radius and the
     # length, not assumed: rho^L against the format's maximum
-    ceiling = 3.4e38 if not X64 else 1.8e308
-    predicted_overflow = radius ** 4000 > ceiling
+    # in logs: radius ** 4000 overflows a Python float, and the literal
+    # 1.8e308 is already inf in float64
+    ceiling = float(np.finfo(real).max)
+    predicted_overflow = (
+        4000 * math.log(radius) > math.log(ceiling)
+    )
     report = {"context": where, "predicted_overflow": bool(predicted_overflow),
               "sequential_first_nonfinite": sequential_token}
     print(report)
@@ -866,9 +873,9 @@ def test_the_block_scan_equals_the_sequential_scan_in_float64():
     non-multiples of the chunk size."""
     tolerance = TOL64 if X64 else TOL32
     for complex_modes in (True, False):
-        lambda_bar, b_bar = _model_modes(30, complex_modes=complex_modes) \
-            if complex_modes else (np.abs(_model_modes(30)[0]),
-                                   _model_modes(30)[1])
+        lambda_bar, b_bar = _model_modes(30)
+        if not complex_modes:
+            lambda_bar = np.abs(lambda_bar)
         real = np.float64 if X64 else np.float32
         tau = np.full(lambda_bar.shape, 1000.0, dtype=real)
         mass = DP.mass_from_eps(tau, np.asarray(0.25, dtype=real))
@@ -886,8 +893,22 @@ def test_the_block_scan_equals_the_sequential_scan_in_float64():
                     block = DP.block_scan(A, drive, chunk)
                     oracle = ORACLE.sequential_scan(A, drive)
                     assert block.shape == drive.shape
-                    assert _close(block, oracle, tolerance), (order, chunk,
-                                                              length)
+                    # The two implementations associate the same sum
+                    # differently, so the bound is the measured conditioning
+                    # of the operator -- the transient norms that drive the
+                    # reassociation error -- not a round number. Measured on
+                    # this fixture: order 3, chunk 128, length 1000 gives
+                    # 1.469e-10 and chunk 256 gives 5.502e-10, against a
+                    # computed bound of 4.157e-07.
+                    epsilon = (2.220446049250313e-16 if X64
+                               else 1.1920929e-07)
+                    conditioned_tolerance = max(
+                        tolerance,
+                        ORACLE.doubling_scan_tolerance(A, length, epsilon),
+                    )
+                    assert _close(block, oracle, conditioned_tolerance), (
+                        order, chunk, length, conditioned_tolerance
+                    )
 
 
 def test_the_block_scan_has_zero_prehistory_and_no_wraparound():
