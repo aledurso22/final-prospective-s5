@@ -402,6 +402,44 @@ carry no information.
 Until that runs, the honest statement is: **a promising single-seed result
 with the capacity confound uncontrolled.** Not a demonstration yet.
 
+## 6g. The controlled result: lead is the mechanism, memory was capacity
+
+Three seeds, three arms — gated (16 modes, 256 effective parameters),
+Native (16 modes, 160), and **Native capacity-matched (26 modes, 260)**.
+Paired seed by seed, because the same seed is the same data and the same
+initialization draw:
+
+| component | vs Native (16) | **vs capacity-matched (26)** | verdict |
+|---|---|---|---|
+| **lead** | 3/3, 31–655× | **3/3, 28–85×** | **mechanism** |
+| long-delay memory | 3/3, 5–178× | **2/3, and the control's mean is lower** | **capacity** |
+
+Means: lead — gated 5.25e-6, Native 1.32e-3, capacity-matched 2.75e-4.
+Memory — gated 1.88e-5, Native 2.58e-3, capacity-matched **1.25e-5**.
+
+**The honest split.** The cascade delivers a large, robust improvement in
+lead that extra modes do **not** buy: against a Native arm with *more*
+parameters it is still 28–85× better on every seed. The apparent memory
+gain, by contrast, is matched and slightly beaten by simply adding modes —
+the capacity-matched control has the lower mean and wins one seed outright.
+So the earlier "12× better on both" was mechanism on one channel and
+capacity on the other, and only the control separated them.
+
+**A statistical correction this exposed.** The mean-versus-spread test
+vetoed the memory comparison against plain Native even at a −99.3%
+difference, because one Native seed was 180× worse than its siblings and its
+half-range alone exceeded the effect. A paired seed-by-seed test is the
+right instrument when the baseline is that unstable, and it is now reported
+alongside, with per-seed factors and a per-component verdict.
+
+**Where this leaves the construction.** It does what it was built to do —
+gates specialize (71× across modes, correlation 0.679 between a mode's gate
+and its share of the lead channel), stages stay independent, poles stay
+inside the disc, Native is recovered exactly at closed gates — and it buys a
+real, capacity-controlled improvement in *temporal lead*. What it does not
+yet show is capacity-controlled **memory retention**, which the original
+claim requires alongside the lead. On this probe, that half is not there.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

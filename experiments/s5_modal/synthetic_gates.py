@@ -362,23 +362,44 @@ def main():
     # seed-to-seed half-range of the baseline to count
     components = {"long_delay": "long_delay_component_error",
                   "lead": "lead_component_error"}
-    comparison, survives = {}, True
+    comparison, per_component = {}, {}
     for name, field in components.items():
         row = {arm: summarize(runs, field) for arm, runs in arms.items()}
+        component_holds = True
         for baseline in ("native", "native_capacity_matched"):
             change = ((row["gated"]["mean"] - row[baseline]["mean"])
                       / max(row[baseline]["mean"], 1e-12))
             margin = row[baseline]["half_range"] / max(row[baseline]["mean"],
                                                        1e-12)
+            # PAIRED comparison: the same seed is the same data and the same
+            # initialization draw, so seed-by-seed is the right test. A mean
+            # comparison is fragile when a baseline seed blows up, which is
+            # exactly what happened: one Native seed was 180x worse than its
+            # siblings and its spread alone then vetoed a real difference.
+            wins = sum(g < b for g, b in zip(row["gated"]["per_seed"],
+                                             row[baseline]["per_seed"]))
+            factors = [b / max(g, 1e-30) for g, b in
+                       zip(row["gated"]["per_seed"],
+                           row[baseline]["per_seed"])]
+            unanimous = wins == len(args.seeds)
             row[f"vs_{baseline}"] = {
                 "relative_change": change,
                 "baseline_seed_half_range_relative": margin,
                 "improved_beyond_seed_spread": bool(change < -margin
                                                     and change
-                                                    < -args.component_margin)}
-            survives = survives and row[f"vs_{baseline}"][
-                "improved_beyond_seed_spread"]
+                                                    < -args.component_margin),
+                "paired_seed_wins": f"{wins}/{len(args.seeds)}",
+                "paired_factor_per_seed": factors,
+                "improved_on_every_seed": bool(unanimous)}
+            component_holds = component_holds and unanimous
         comparison[name] = row
+        per_component[name] = ("DEMONSTRATED_AGAINST_BOTH_CONTROLS"
+                               if component_holds else
+                               "EXPLAINED_BY_CAPACITY"
+                               if row["vs_native"]["improved_on_every_seed"]
+                               else "NOT_IMPROVED")
+    survives = all(value == "DEMONSTRATED_AGAINST_BOTH_CONTROLS"
+                   for value in per_component.values())
     baseline_power = {name: summarize(arms["native"], "variance_explained",
                                       name)["mean"]
                       for name in components}
@@ -395,6 +416,7 @@ def main():
             "native_capacity_matched":
                 effective_parameters(wide, False, args.channels)},
         "component_comparison": comparison,
+        "per_component_verdict": per_component,
         "improvement_survives_seeds_and_capacity_control": bool(survives),
         "task": ("long-delay memory and switch-edge lead on separate "
                  "outputs" if args.channels == 2 else
@@ -420,6 +442,12 @@ def main():
         "status": ("PROBE_UNDERPOWERED" if underpowered else
                    "DEMONSTRATED_AGAINST_BOTH_CONTROLS"
                    if differentiated and survives
+                   else "PARTIAL_" + "_".join(
+                       f"{name}:{verdict}" for name, verdict
+                       in sorted(per_component.items()))
+                   if differentiated and any(
+                       value == "DEMONSTRATED_AGAINST_BOTH_CONTROLS"
+                       for value in per_component.values())
                    else "NOT_DEMONSTRATED"),
         "criterion": ("heterogeneous gates AND both components improved "
                       "beyond the baseline's seed-to-seed spread, against "
@@ -435,7 +463,7 @@ def main():
                       ("status", "channels", "criterion", "seeds",
                        "effective_parameters",
                        "capacity_matched_native_modes",
-                       "component_comparison",
+                       "component_comparison", "per_component_verdict",
                        "improvement_survives_seeds_and_capacity_control",
                        "baseline_variance_explained",
                        "underpowered_channels", "gates_are_heterogeneous",
