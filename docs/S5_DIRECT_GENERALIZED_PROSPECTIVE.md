@@ -332,6 +332,81 @@ long-timescale inertial memory*, **not** a temporal advance. Whether that is
 the intended prospective effect is a scientific decision, not a numerical
 one — but it should not be described as "prospective compensation".
 
+## 6c. The block/chunked scan: implemented, and measured honestly
+
+The full-sequence doubling scan is **rejected for float32 production** (error
+1.5e5 by L=1000, 2.3e21 by L=4000). It is kept only as a labelled diagnostic
+and regression, and no states function selects it implicitly — every default
+is `scan_kind="block"`.
+
+**The algorithm**, orders two and three, in `s5/direct_prospective.py`:
+
+1. the sequence is padded to a multiple of $C$ with **zero drive at the
+   end**; the recurrence is causal, so no real token sees the padding and
+   there is no wraparound, and the outputs are truncated back to $L$;
+2. each chunk's affine summary $z_\text{end}=H^Cz_\text{start}+g_\text{chunk}$
+   is computed **sequentially in token order with `lax.scan`, vmapped across
+   chunks** — a JAX primitive, never a Python token loop;
+3. $H^C$ is built from `order` zero-drive **basis runs of the ordinary
+   recurrence**, never by repeated squaring;
+4. chunk boundaries are propagated with a **sequential `lax.scan` over the
+   $L/C$ summaries** — deliberately not a doubling scan over summaries,
+   which would reintroduce the same problem;
+5. each chunk is re-run from its own boundary, vmapped, giving every token;
+6. `remat="chunk"` wraps the in-chunk scan; peak backward memory is reported
+   by the chunk study.
+
+Sequential depth falls from $L$ to $C+L/C$ — about 253 instead of 16 000 at
+$C=126$.
+
+**Measured in emulated float32 at the stable cell**
+(`docs/analysis/direct_prospective_block.txt`), relative to float64
+sequential:
+
+| $\bar A$ | L | doubling | block C=2 | C=8 | C=16 | C=64 | C=256 | **sequential** |
+|---|---|---|---|---|---|---|---|---|
+| 0.9 | 1000 | 3.1e+05 | 4.8e-02 | 2.4e-02 | 1.6e-01 | 4.5e+00 | 1.1e+00 | **1.1e-03** |
+| 0.9 | 4000 | 3.2e+21 | — | — | 2.6e-01 | 8.0e+02 | 5.6e+00 | **2.1e-03** |
+| 0.5+0.25i | 1000 | 3.3e+00 | 1.1e-03 | 3.6e-03 | 2.4e-03 | 1.8e-02 | 8.8e-02 | **8.5e-05** |
+
+So the block scan is an improvement of up to **eighteen orders of magnitude**
+over doubling — but at this cell it is still 20–400× worse than the ordinary
+sequential recurrence, and its absolute error (1.6e-1 at C=16, L=1000) is not
+usable. The cause is the same one, one step removed: $|H^C|$ reaches 1.7e2 at
+$C=16$ and 2.9e3 at $C=256$ while the states are $O(1)$
+(`direct_prospective_chunk_transition_norms.txt`), so every boundary
+application injects about $\epsilon_{32}|H^C|$, and those errors are then
+amplified by later boundary applications.
+
+**Provisional conclusion, to be confirmed on the GPU**: chunking fixes the
+catastrophe but not the marginality. At this cell even the plain sequential
+float32 recurrence carries ~1e-3 relative error — the recurrence is
+ill-conditioned in production precision, independently of the scan. The chunk
+study is built to measure exactly this on real modes and applies its decision
+rule in code (float32 forward *and* gradient error within 10× the sequential
+float32 error, finite, deterministic); if nothing qualifies it reports
+`BLOCK_SCAN_NOT_USABLE_IN_FLOAT32`.
+
+## 6d. Three gates, never conflated
+
+| gate | question | where it is decided |
+|---|---|---|
+| **1 mathematical stability** | companion radius over the production horizon | `stability_grid.py`, exact CPU roots, bound $1+10^{-5}$ |
+| **2 numerical computability** | float32 forward *and* backward accuracy of the scan that would actually run | `chunk_study.py` |
+| **3 scientific usefulness** | a measurable, correctly labelled temporal effect | `stability_grid.py`, `scientific_usefulness` + `label_effect` |
+
+Gate 3 reports the response difference from Native and from the corrected
+Professor/TSS, the impulse-response **centroid shift**, the **peak-response
+shift**, the **early-response error after an innovation** and the **retained
+long-delay response**, and labels the result. A cell that only moves the
+response later is labelled
+`ADDITIONAL_LAG_NOT_PROSPECTIVE_COMPENSATION` — which is what $\tau=1000$
+looks like so far (+4.56 tokens at $\bar A=0.99$).
+
+**Eligibility for training** requires all three gates plus throughput and
+memory. The grid now records `eligible_for_training: false` with the reason,
+because no cell can be eligible on gate 1 alone.
+
 ## 7. What remains for the cluster
 
 1. `stability_grid.py` on real HiPPO modes: does any declared cell satisfy

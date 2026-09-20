@@ -347,3 +347,94 @@ def test_the_legacy_zucchet_recurrence_differs_by_a_residual_feedback_term():
         assert extra == -(1 - k) * (s1 - f1)
         if k == 1:
             assert extra == 0                             # they coincide here
+
+
+# ------------------------------------------------------- the block scan ----
+def block_scan(coefficients, drive, chunk):
+    """Exact rational mirror of `s5.direct_prospective.block_scan`.
+
+    In-chunk sequential, H^C from basis runs (never squared), boundaries
+    propagated sequentially, chunks re-run from their boundary.
+    """
+    order = len(coefficients)
+    length = len(drive)
+    count = -(-length // chunk)
+    padded = list(drive) + [F(0)] * (count * chunk - length)
+
+    def run(init, values):
+        history, out = list(init), []
+        for d in values:
+            value = sum(c * h for c, h in zip(coefficients, history)) + d
+            out.append(value)
+            history = [value] + history[:-1]
+        return history, out
+
+    transition = []                                   # columns of H^C
+    for index in range(order):
+        init = [F(1) if i == index else F(0) for i in range(order)]
+        end, _ = run(init, [F(0)] * chunk)
+        transition.append(end)
+    summaries = [run([F(0)] * order, padded[c * chunk:(c + 1) * chunk])[0]
+                 for c in range(count)]
+    boundaries, state = [], [F(0)] * order
+    for c in range(count):
+        boundaries.append(list(state))
+        state = [sum(transition[j][i] * state[j] for j in range(order))
+                 + summaries[c][i] for i in range(order)]
+    out = []
+    for c in range(count):
+        _, tokens = run(boundaries[c], padded[c * chunk:(c + 1) * chunk])
+        out.extend(tokens)
+    return out[:length]
+
+
+def test_the_block_scan_equals_the_sequential_recurrence_exactly():
+    """Every order, every chunk size, arbitrary lengths including
+    non-multiples of the chunk -- exactly, in rational arithmetic."""
+    random.seed(20260920)
+    for order in (2, 3):
+        for chunk in (1, 2, 3, 16, 32, 64):
+            for length in (1, 2, 3, 5, 17, 31, 33, 64, 65, 100, 257):
+                coefficients = [F(random.randint(-5, 5), random.randint(1, 6))
+                                for _ in range(order)]
+                drive = [F(random.randint(-9, 9), random.randint(1, 5))
+                         for _ in range(length)]
+                assert block_scan(coefficients, drive, chunk) == \
+                    sequential(coefficients, drive), (order, chunk, length)
+
+
+def test_the_block_scan_has_zero_prehistory_and_no_tail_to_head_wraparound():
+    """The padding of the last partial chunk is zero drive at the END, and
+    the recurrence is causal, so no real token can see it."""
+    coefficients = [F(1, 2), F(1, 3)]
+    for chunk in (4, 8, 16):
+        for length in (5, 13, 17):
+            for impulse in range(length):
+                drive = [F(1) if t == impulse else F(0)
+                         for t in range(length)]
+                states = block_scan(coefficients, drive, chunk)
+                assert all(value == 0 for value in states[:impulse])
+                assert states[impulse] == 1
+            # an impulse in the final, padded chunk never reaches the head
+            drive = [F(0)] * (length - 1) + [F(1)]
+            states = block_scan(coefficients, drive, chunk)
+            assert all(value == 0 for value in states[:length - 1])
+
+
+def test_the_block_scan_never_squares_the_transition():
+    """H^C is built from `order` zero-drive basis runs of the ORDINARY
+    recurrence, so its accuracy is the sequential recurrence's. The rational
+    mirror above is the specification; this checks the production module
+    matches it structurally."""
+    import io as _io
+    import os as _os
+
+    source = _io.open(_os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+        "s5/direct_prospective.py")).read()
+    block = source[source.index("def chunk_transition("):
+                   source.index("def sequential_scan_jax(")]
+    assert "NEVER by squaring" in block
+    assert "operator @ operator" not in block          # no doubling here
+    assert "jax.lax.scan" in block and "jax.vmap" in block
+    assert "for token" not in block and "for t in range" not in block

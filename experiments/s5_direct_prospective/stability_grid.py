@@ -17,6 +17,22 @@ For every declared cell it reports:
   * impulse responses for Native S5, the repository's Zucchet arm, the exact
     common-stencil matched operator and the causal mixed-stencil recurrence.
 
+THREE GATES, NEVER CONFLATED. Each cell records all three, and a cell is
+eligible for training only if it passes all of them:
+
+  GATE 1  MATHEMATICAL STABILITY   companion radius over the production
+                                   horizon, from exact CPU roots.
+  GATE 2  NUMERICAL COMPUTABILITY  forward and backward accuracy in the
+                                   PRODUCTION precision (float32), for the
+                                   scan that would actually be used. A cell
+                                   that is stable but cannot be computed in
+                                   float32 is NOT eligible.
+  GATE 3  SCIENTIFIC USEFULNESS    a measurable, correctly labelled temporal
+                                   effect. A cell whose only effect is to
+                                   move the response LATER is additional
+                                   lag, and must not be called prospective
+                                   compensation.
+
 DECLARED STABILITY BOUND. A companion radius rho grows as rho^L over the
 L = 16000-token sequence, so the bound is tied to the sequence length rather
 than guessed: RADIUS_BOUND = 1 + 1e-5, which permits at most a factor
@@ -145,6 +161,72 @@ def gradient_finite(equation, lambda_bar, b_bar, tau, eps, gamma, target,
             "grad_tau": float(grads[2]), "grad_eps": float(grads[3])}
 
 
+def scientific_usefulness(lambda_bar, b_bar, tau, eps, length=4000):
+    """GATE 3: is the effect prospective, or merely additional lag?
+
+    Reports the response difference from Native and from the corrected
+    Professor/TSS, the impulse-response centroid shift, the peak-response
+    shift, the early-response error just after an innovation, and the
+    retained long-delay response. A positive centroid or peak shift is LAG,
+    and is labelled as such.
+    """
+    from tests import direct_prospective_reference as ORACLE
+
+    inputs = jnp.zeros((length, b_bar.shape[1])).at[0, 0].set(1.0)
+    tau_vector = jnp.full((lambda_bar.shape[0],), tau, dtype=jnp.float32)
+    mass = DP.mass_from_eps(tau_vector, jnp.asarray(eps, jnp.float32))
+    native = ORACLE.native_sequential(lambda_bar, b_bar, inputs)
+    professor = DP.professor_tss_states(lambda_bar, b_bar, inputs, tau_vector,
+                                        DP.PROFESSOR_LINEAR_TARGET,
+                                        scan_kind="sequential")
+    wwj = DP.matched_states(lambda_bar, b_bar, inputs, tau_vector, mass,
+                            DP.PROFESSOR_LINEAR_TARGET,
+                            scan_kind="sequential")
+
+    def energy(values):
+        return float(jnp.sqrt(jnp.sum(jnp.abs(values) ** 2)))
+
+    def centroid(values):
+        weight = jnp.abs(values) ** 2
+        total = jnp.sum(weight)
+        index = jnp.arange(values.shape[0])[:, None]
+        return float(jnp.sum(index * weight) / total) if float(total) else \
+            float("nan")
+
+    def peak(values):
+        return float(jnp.argmax(jnp.sum(jnp.abs(values) ** 2, axis=1)))
+
+    early = slice(0, 8)
+    late = slice(max(length - 512, 0), length)
+    return {
+        "response_difference_from_native":
+            energy(wwj - native) / max(energy(native), 1e-30),
+        "response_difference_from_professor_tss":
+            energy(wwj - professor) / max(energy(professor), 1e-30),
+        "centroid_shift_tokens": centroid(wwj) - centroid(native),
+        "peak_shift_tokens": peak(wwj) - peak(native),
+        "early_response_error_after_innovation":
+            energy(wwj[early] - native[early]) / max(energy(native[early]),
+                                                     1e-30),
+        "retained_long_delay_response":
+            energy(wwj[late]) / max(energy(native[late]), 1e-30),
+        "label": None,      # filled by `label_effect`
+    }
+
+
+def label_effect(usefulness):
+    """Name the effect honestly, from the measured shifts."""
+    centroid = usefulness["centroid_shift_tokens"]
+    difference = usefulness["response_difference_from_native"]
+    if difference < 1e-4:
+        return "INDISTINGUISHABLE_FROM_NATIVE"
+    if centroid > 0.5:
+        return "ADDITIONAL_LAG_NOT_PROSPECTIVE_COMPENSATION"
+    if centroid < -0.5:
+        return "TEMPORAL_ADVANCE"
+    return "RESHAPED_RESPONSE_WITHOUT_NET_SHIFT"
+
+
 def impulse_responses(lambda_bar, b_bar, tau, eps):
     """Native, Zucchet, exact common-stencil and mixed-stencil, on one impulse."""
     from tests import direct_prospective_reference as ORACLE
@@ -216,6 +298,17 @@ def main():
                                     finite and exact is not None
                                     and exact <= RADIUS_BOUND)}
                         if cell["admissible"]:
+                            usefulness = scientific_usefulness(
+                                lambda_bar, b_bar, tau, eps)
+                            usefulness["label"] = label_effect(usefulness)
+                            cell["gate_3_scientific_usefulness"] = usefulness
+                            cell["gate_2_numerical_computability"] = (
+                                "not measured here; run chunk_study.py")
+                            cell["eligible_for_training"] = False
+                            cell["eligibility_reason"] = (
+                                "gate 2 (float32 computability) and the "
+                                "throughput gate are measured elsewhere; no "
+                                "cell is eligible on gate 1 alone")
                             cell["float32_rollout"] = rollout_finite(
                                 equation, lambda_bar, b_bar, tau, eps, gamma,
                                 target, args.length, jnp.float32)
@@ -238,6 +331,15 @@ def main():
                  "targets": list(TARGETS)},
         "cells": cells,
         "impulse_responses": impulse_responses(lambda_bar, b_bar, 0.05, 0.25),
+        "gates": {
+            "gate_1_mathematical_stability": "companion radius <= bound",
+            "gate_2_numerical_computability":
+                "measured by experiments/s5_direct_prospective/chunk_study.py "
+                "in float32; a stable cell that fails it is NOT eligible",
+            "gate_3_scientific_usefulness":
+                "response difference, centroid and peak shift, early error, "
+                "retained long-delay response; a later-only response is "
+                "labelled ADDITIONAL_LAG_NOT_PROSPECTIVE_COMPENSATION"},
         "status": "SELECTED" if admissible else "NO_ADMISSIBLE_INITIALIZATION",
         "analytic_reason": (
             "z = 1 is an exact root of both causal recurrences at a mode "

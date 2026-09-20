@@ -235,9 +235,136 @@ def companion_doubling_scan(coefficients_A, drive, remat="level"):
     return state[..., 0]
 
 
+# ------------------------------------------------------------ block scan --
+#: how a state sequence may be computed. "block" is the production candidate;
+#: "doubling" is a LABELLED DIAGNOSTIC and must never be selected
+#: automatically for a float32 production path (its float32 error at the
+#: stable tau = 1000 cell reaches 1.5e5 by L = 1000); "sequential" is the
+#: reference path and is the one that was too slow (about 2.98 steps/minute).
+SCAN_KINDS = ("block", "sequential", "doubling")
+DEFAULT_CHUNK = 64
+
+
+def _chunk_step(coefficients_A):
+    """One token of s_t = sum_i A_i s_{t-i} + d_t, carrying (..., n)."""
+    order = len(coefficients_A)
+
+    def step(carry, drive_value):
+        first = sum(coefficients_A[index] * carry[..., index]
+                    for index in range(order)) + drive_value
+        return (np.concatenate((first[..., None], carry[..., :order - 1]),
+                               axis=-1), first)
+
+    return step
+
+
+def _run_chunk(coefficients_A, init, chunk_drive):
+    """Sequential over the tokens of ONE chunk, via lax.scan.
+
+    No Python token loop: this is a JAX primitive, and it is vmapped across
+    chunks so the only sequential dependency left is within a chunk.
+    """
+    return jax.lax.scan(_chunk_step(coefficients_A), init, chunk_drive)
+
+
+def chunk_transition(coefficients_A, chunk):
+    """H^C per mode, from `order` zero-drive basis runs -- NEVER by squaring.
+
+    Repeated squaring is what makes the doubling scan fail in float32 on a
+    non-normal companion. Here H^C is produced by running the ordinary
+    recurrence for C tokens from each basis vector, so its accuracy is the
+    accuracy of the sequential recurrence itself.
+    """
+    order = len(coefficients_A)
+    modes = coefficients_A[0].shape[0]
+    dtype = coefficients_A[0].dtype
+    zeros = np.zeros((chunk, modes), dtype=dtype)
+    columns = []
+    for index in range(order):
+        init = np.zeros((modes, order), dtype=dtype).at[:, index].set(1.0)
+        end, _ = _run_chunk(coefficients_A, init, zeros)
+        columns.append(end)
+    return np.stack(columns, axis=-1)
+
+
+def block_scan(coefficients_A, drive, chunk=DEFAULT_CHUNK, remat="chunk"):
+    """Chunked scan: sequential within chunks, sequential across boundaries.
+
+    Sequential depth falls from L to C + L/C (about 253 instead of 16000 at
+    C = 126, L = 16000) while every arithmetic step is one the ordinary
+    recurrence also performs.
+
+      1. the sequence is padded to a multiple of C with ZERO drive. The
+         padding is at the END and the recurrence is causal, so no real
+         token sees it and there is no wraparound; the outputs are
+         truncated back to L.
+      2. every chunk's affine summary z_end = H^C z_start + g_chunk is
+         computed from zero, vmapped across chunks.
+      3. chunk boundaries are propagated with a sequential lax.scan over the
+         L/C summaries. Deliberately NOT a doubling scan across summaries:
+         that would reintroduce repeated squaring of a non-normal operator.
+      4. each chunk is re-run from its own boundary state, vmapped, giving
+         every token.
+
+    MEASURED CAVEAT, recorded rather than assumed: at the stable tau = 1000
+    cell this does NOT rescue float32. Applying H^C is the same cancellation
+    in another guise -- |H^C| reaches 1.7e2 at C = 16 and 2.9e3 at C = 256
+    while the states are O(1), so each boundary application injects about
+    eps*|H^C| of error. Emulated float32 gives worse results than the plain
+    sequential recurrence (docs/analysis/direct_prospective_block.txt). The
+    cluster chunk study measures it for real; nothing here assumes it works.
+    """
+    order = len(coefficients_A)
+    length, modes = drive.shape
+    chunk = int(chunk)
+    count = -(-length // chunk)
+    padding = count * chunk - length
+    if padding:
+        drive = np.concatenate(
+            (drive, np.zeros((padding, modes), dtype=drive.dtype)), axis=0)
+    chunks = drive.reshape(count, chunk, modes)
+    transition = chunk_transition(coefficients_A, chunk)
+    zero = np.zeros((modes, order), dtype=drive.dtype)
+
+    def run(init, chunk_drive):
+        return _run_chunk(coefficients_A, init, chunk_drive)
+
+    stepper = jax.checkpoint(run) if remat in ("chunk", True) else run
+    ends, _ = jax.vmap(stepper, in_axes=(None, 0))(zero, chunks)
+
+    def boundary(carry, summary):
+        return (np.einsum("pij,pj->pi", transition, carry) + summary, carry)
+
+    _, starts = jax.lax.scan(boundary, zero, ends)
+    _, outputs = jax.vmap(stepper, in_axes=(0, 0))(starts, chunks)
+    return outputs.reshape(count * chunk, modes)[:length]
+
+
+def sequential_scan_jax(coefficients_A, drive):
+    """The ordinary recurrence as one lax.scan: the reference path, and the
+    one that was operationally too slow at production length."""
+    zero = np.zeros((drive.shape[1], len(coefficients_A)), dtype=drive.dtype)
+    _, states = _run_chunk(coefficients_A, zero, drive)
+    return states
+
+
+def run_scan(coefficients_A, drive, scan_kind="block", chunk=DEFAULT_CHUNK,
+             remat="chunk"):
+    """Dispatch. `doubling` is never chosen implicitly for production."""
+    if scan_kind == "block":
+        return block_scan(coefficients_A, drive, chunk, remat)
+    if scan_kind == "sequential":
+        return sequential_scan_jax(coefficients_A, drive)
+    if scan_kind == "doubling":
+        return companion_doubling_scan(coefficients_A, drive,
+                                       remat="level" if remat else None)
+    raise ValueError(f"unknown scan kind {scan_kind!r}; expected {SCAN_KINDS}")
+
+
 def matched_states(lambda_bar, b_bar, input_sequence, tau, mass,
                    target_construction=PROFESSOR_LINEAR_TARGET, reverse=False,
-                   h=H_TOKEN, remat="level"):
+                   h=H_TOKEN, remat="chunk", scan_kind="block",
+                   chunk=DEFAULT_CHUNK):
     """States of the WWJ_GENERALIZED_TSS causal recurrence, one direction.
 
     M = 0 makes this the PROFESSOR_TSS model, and `professor_tss_states`
@@ -246,20 +373,21 @@ def matched_states(lambda_bar, b_bar, input_sequence, tau, mass,
     sequence = input_sequence[::-1] if reverse else input_sequence
     A, C = matched_state_coefficients(lambda_bar, b_bar, tau, mass,
                                       target_construction, h)
-    states = companion_doubling_scan(A, input_drive(C, sequence), remat)
+    states = run_scan(A, input_drive(C, sequence), scan_kind, chunk, remat)
     return states[::-1] if reverse else states
 
 
 def partially_matched_states(lambda_bar, b_bar, input_sequence, response,
                              mass, gamma,
                              target_construction=PROFESSOR_LINEAR_TARGET,
-                             reverse=False, h=H_TOKEN, remat="level"):
+                             reverse=False, h=H_TOKEN, remat="chunk",
+                             scan_kind="block", chunk=DEFAULT_CHUNK):
     """States of the PARTIALLY MATCHED (two-compartment) recurrence."""
     sequence = input_sequence[::-1] if reverse else input_sequence
     A, C = partially_matched_state_coefficients(lambda_bar, b_bar, response,
                                                 mass, gamma,
                                                 target_construction, h)
-    states = companion_doubling_scan(A, input_drive(C, sequence), remat)
+    states = run_scan(A, input_drive(C, sequence), scan_kind, chunk, remat)
     return states[::-1] if reverse else states
 
 
@@ -286,12 +414,13 @@ def professor_tss_state_coefficients(lambda_bar, b_bar, tau,
 
 def professor_tss_states(lambda_bar, b_bar, input_sequence, tau,
                          target_construction=PROFESSOR_LINEAR_TARGET,
-                         reverse=False, h=H_TOKEN, remat="level"):
+                         reverse=False, h=H_TOKEN, remat="chunk",
+                         scan_kind="block", chunk=DEFAULT_CHUNK):
     """States of the PROFESSOR_TSS (M = 0) two-state recurrence."""
     sequence = input_sequence[::-1] if reverse else input_sequence
     A, C = professor_tss_state_coefficients(lambda_bar, b_bar, tau,
                                             target_construction, h)
-    states = companion_doubling_scan(A, input_drive(C, sequence), remat)
+    states = run_scan(A, input_drive(C, sequence), scan_kind, chunk, remat)
     return states[::-1] if reverse else states
 
 
