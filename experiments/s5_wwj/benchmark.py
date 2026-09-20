@@ -13,8 +13,11 @@ THE GATE (all of it must hold, or full training is not authorized):
   2. peak GPU memory stays below MEMORY_CEILING_FRACTION of the device;
   3. loss, gradients and states are finite;
   4. the parallel scan matches the sequential oracle at production width;
-  5. the projected wall clock for 15 epochs, with three seeds CONCURRENT on
-     three GPUs, fits the requested allocation with >= TIME_MARGIN to spare;
+  5. the projected wall clock for 15 epochs fits the requested allocation
+     with >= TIME_MARGIN to spare, for the plan that `--waves` declares:
+     one arm's wave (three seeds concurrent on three GPUs) or both WWJ arms
+     as two sequential waves. A one-arm projection is never reported as the
+     wall time of the whole WWJ experiment;
   6. WWJ throughput is at least THROUGHPUT_FLOOR of Native throughput.
 
 Failing 6 means the scan needs optimizing, not that training should start.
@@ -158,16 +161,30 @@ def scan_matches_oracle(seed=301, length=256):
             "tolerance": 2e-4, "matches": error / scale <= 2e-4}
 
 
-def project(steps_per_minute, compile_seconds):
-    """Wall clock for 15 epochs; three seeds run CONCURRENTLY on three GPUs,
-    so the wave takes one seed's time, not three."""
+def project(steps_per_minute, compile_seconds, waves):
+    """Wall clock for 15 epochs, and WHAT THAT NUMBER COVERS.
+
+    Three seeds of one arm run CONCURRENTLY on three GPUs, so one arm's wave
+    costs one seed's time, not three. It does NOT cover the other WWJ arm:
+    `wwj_critical_s5` and `wwj_passive_s5` are two waves. `waves` states
+    which plan is being projected, and the gate is applied to
+    `hours_planned`, never to the one-arm number when two waves are planned.
+    """
     steps_per_epoch = TRAIN_EXAMPLES // RUNNER.BATCH_SIZE
     total_steps = steps_per_epoch * EPOCHS
     hours = total_steps / steps_per_minute / 60.0 + compile_seconds / 3600.0
+    scope = {1: "ONE arm: three seeds concurrent on three GPUs. The other "
+                "WWJ arm needs its own allocation and is NOT included.",
+             2: "BOTH WWJ arms, run as two sequential waves in one "
+                "allocation, three seeds concurrent within each wave."}
     return {"steps_per_epoch": steps_per_epoch, "total_steps": total_steps,
             "hours_one_seed": hours,
-            "hours_three_concurrent_seeds": hours,
-            "note": "three seeds share one wave on three GPUs"}
+            "hours_one_arm_wave_three_concurrent_seeds": hours,
+            "hours_both_wwj_arms_sequential": 2.0 * hours,
+            "waves_planned": waves, "hours_planned": waves * hours,
+            "covers": scope[waves],
+            "excludes": "the Native and Zucchet waves, which this "
+                        "measurement does not project"}
 
 
 def gate(native, wwj, oracle, projection, allocation_hours):
@@ -185,11 +202,12 @@ def gate(native, wwj, oracle, projection, allocation_hours):
                         f"{MEMORY_CEILING_FRACTION:.0%} of "
                         f"{limit / 2**30:.2f} GiB")
     budget = allocation_hours * (1.0 - TIME_MARGIN)
-    if projection["hours_three_concurrent_seeds"] > budget:
+    if projection["hours_planned"] > budget:
         problems.append(
-            f"projected {projection['hours_three_concurrent_seeds']:.2f} h "
-            f"exceeds the {budget:.2f} h budget "
-            f"({allocation_hours:.1f} h minus a {TIME_MARGIN:.0%} margin)")
+            f"projected {projection['hours_planned']:.2f} h for "
+            f"{projection['waves_planned']} wave(s) exceeds the "
+            f"{budget:.2f} h budget ({allocation_hours:.1f} h minus a "
+            f"{TIME_MARGIN:.0%} margin)")
     ratio = wwj["steps_per_minute"] / native["steps_per_minute"]
     if ratio < THROUGHPUT_FLOOR:
         problems.append(f"WWJ throughput is {ratio:.2f}x Native, below the "
@@ -208,6 +226,10 @@ def main():
     parser.add_argument("--tau-init", type=float, default=0.25)
     parser.add_argument("--eps-init", type=float, default=0.0625)
     parser.add_argument("--allocation-hours", type=float, required=True)
+    parser.add_argument("--waves", type=int, choices=(1, 2), default=2,
+                        help="1: this arm only, in its own allocation. "
+                             "2 (default): both WWJ arms sequentially in one "
+                             "allocation. The gate uses this.")
     args = parser.parse_args()
 
     native_state = RUNNER.init_state("native_matched_s5", args.seed)
@@ -229,7 +251,8 @@ def main():
                              args.steps, args.seed)
 
     oracle = scan_matches_oracle(args.seed)
-    projection = project(wwj["steps_per_minute"], wwj["compile_seconds"])
+    projection = project(wwj["steps_per_minute"], wwj["compile_seconds"],
+                         args.waves)
     report = {
         "schema": "s5-wwj/benchmark-v1",
         "protocol": {"epochs": EPOCHS, "batch_size": RUNNER.BATCH_SIZE,

@@ -124,9 +124,24 @@ rollout for lengths 1…100 including non-powers of two.
 
 The production path calls neither `scan_companion` nor
 `scan_companion_sequential`, contains no loop over tokens, and does not
-rematerialize the rollout per step. Each doubling level is wrapped in
-`jax.checkpoint`, so the backward pass recomputes levels instead of storing
-all 14 of them; the only $O(L)$ array is the $(L,P,3)$ lifted state.
+rematerialize the rollout per step.
+
+**Memory: three different quantities, only one of them established.**
+
+| quantity | status |
+|---|---|
+| forward live storage | $O(LP\cdot 3)$: the lifted state and one shifted copy. Established by construction. |
+| backward (autodiff residual) storage | **not** $O(LP)$. With `remat="level"` (the default) each level recomputes its internals, but reverse mode still needs every level **boundary**, so residuals are bounded by about $\lceil\log_2L\rceil$ arrays of size $LP\cdot3$, i.e. $O(LP\log L)$, unless XLA elides some. Per-level checkpointing improves the constant, not the log factor. |
+| measured peak device memory | **unknown until the GPU benchmark runs.** It is the authority. |
+
+An earlier version of this document claimed the $(L,P,3)$ state was the only
+large array under per-level checkpointing. That was wrong and is withdrawn.
+
+`remat="whole"` is available and keeps only the scan's inputs, giving
+$O(LP\cdot3)$ residuals at roughly twice the forward flops. If the benchmark
+shows the residuals are too large, the response is that switch, a coarser
+rematerialization region, or a custom VJP for the structured recurrence —
+**never** a change to the mathematics.
 
 **No eigendecomposition** is used anywhere in the forward or backward path.
 The companion spectral radius, a diagnostic, is computed as
@@ -177,7 +192,16 @@ number is consulted.
 
 ## 8. Gates before any training
 
-**Performance gate** (`experiments/s5_wwj/benchmark.py`), Native vs WWJ on
+**Both principal arms are gated separately.** `wwj_critical_s5` and
+`wwj_passive_s5` each run the JAX correctness suite, the performance gate
+and the developmental gate, into their own artifact directories
+(`<run>/<arm>/benchmark.json`, `<run>/<arm>/dev_gate/dev_gate.json`). A
+critical-arm pass authorizes **nothing** about the passive arm. The
+initialization grid runs once and is shared, because it depends only on the
+initialized S5 modes.
+
+**Performance gate** (`experiments/s5_wwj/benchmark.py`), Native vs one WWJ
+arm on
 the same GPU, same batch 16, length 16,000, width 96, depth 6,
 bidirectional, same update and precision. It reports compile time
 separately, steady-state steps/minute, peak GPU memory, forward time,

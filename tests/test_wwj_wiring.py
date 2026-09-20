@@ -29,33 +29,78 @@ def _text(path):
     return io.open(path).read()
 
 
+#: the files this work is allowed to add, and nothing else
+NEW_WWJ_FILES = (
+    "s5/wwj_recurrence.py", "s5/wwj_prospective_ssm.py",
+    "experiments/s5_wwj/__init__.py", "experiments/s5_wwj/wwj_model.py",
+    "experiments/s5_wwj/init_grid.py", "experiments/s5_wwj/benchmark.py",
+    "experiments/s5_wwj/dev_gate.py",
+    "bin/run_experiments/allocation_s5_wwj_gates.sh",
+    "docs/S5_WWJ_PROSPECTIVE.md", "tests/wwj_sequential_reference.py",
+    "tests/test_wwj_algebra.py", "tests/test_wwj_wiring.py",
+    "tests/test_wwj_recurrence.py",
+)
+
+
+def _git(*arguments):
+    return subprocess.run(["git", "-C", REPO, *arguments],
+                          capture_output=True, text=True).stdout
+
+
 def _tracked_at(commit):
-    listing = subprocess.run(["git", "-C", REPO, "ls-tree", "-r", "--name-only",
-                              commit], capture_output=True, text=True)
-    return listing.stdout.split()
+    return set(_git("ls-tree", "-r", "--name-only", commit).split())
 
 
 def test_no_file_that_existed_before_this_work_has_changed():
-    """The strongest available invariant: every file tracked at the base
-    commit is byte-identical now, so Native S5, the old generalized arm, the
-    data, the runner and the launchers cannot have moved."""
-    changed = subprocess.run(
-        ["git", "-C", REPO, "diff", "--name-only", FROZEN_BASE, "--"],
-        capture_output=True, text=True).stdout.split()
-    assert changed == [], changed
-    # and the control itself, named explicitly
+    """Additions are allowed; touching anything that existed is not.
+
+    The earlier version of this test compared `git diff` against the empty
+    list, which was true only while the new files were still untracked: it
+    could not have passed once they were committed. It now intersects the
+    CHANGED paths with the files TRACKED AT THE BASE COMMIT, which catches a
+    modification, a deletion, a rename or a type change of a pre-existing
+    file while permitting genuinely new ones.
+    """
+    base_files = _tracked_at(FROZEN_BASE)
+    assert base_files, "the base commit must be reachable"
+    # names on both sides of a rename, and every status letter
+    changed = set()
+    for entry in _git("diff", "--name-status", "-M", FROZEN_BASE,
+                      "--").splitlines():
+        parts = entry.split("\t")
+        changed.update(parts[1:])
+    assert changed & base_files == set(), sorted(changed & base_files)
+    # belt and braces: the same question asked of git's own filters
+    touched = _git("diff", "--name-only", "--diff-filter=MDRTC", "-M",
+                   FROZEN_BASE, "--").split()
+    assert touched == [], touched
+    # every file that existed then still exists and is byte-identical now
+    for relative in sorted(base_files):
+        path = os.path.join(REPO, relative)
+        assert os.path.exists(path), f"deleted: {relative}"
+        blob = _git("rev-parse", f"{FROZEN_BASE}:{relative}").strip()
+        now = _git("hash-object", path).strip()
+        assert blob == now != "", relative
+    # and the control is named explicitly, so the intent is readable
     for relative in ("s5/ssm.py", "s5/three_arm_factory.py",
                      "s5/discrete_recurrence.py",
                      "s5/generalized_prospective_ssm.py",
                      "experiments/s5_three_arm_full/runner.py"):
-        assert relative in _tracked_at(FROZEN_BASE)
-        blob = subprocess.run(["git", "-C", REPO, "rev-parse",
-                               f"{FROZEN_BASE}:{relative}"],
-                              capture_output=True, text=True).stdout.strip()
-        now = subprocess.run(["git", "-C", REPO, "hash-object",
-                              os.path.join(REPO, relative)],
-                             capture_output=True, text=True).stdout.strip()
-        assert blob == now != "", relative
+        assert relative in base_files
+
+
+def test_the_new_wwj_files_exist_and_are_tracked():
+    """The other half of the invariant: the additions are really there, and
+    committed, not merely sitting in the worktree."""
+    tracked = set(_git("ls-files").split())
+    for relative in NEW_WWJ_FILES:
+        assert os.path.exists(os.path.join(REPO, relative)), relative
+        assert relative in tracked, f"untracked: {relative}"
+        assert relative not in _tracked_at(FROZEN_BASE), relative
+    # nothing else was added either
+    added = set(_git("diff", "--name-only", "--diff-filter=A", FROZEN_BASE,
+                     "--").split())
+    assert added == set(NEW_WWJ_FILES), sorted(added ^ set(NEW_WWJ_FILES))
 
 
 def test_native_s5_cannot_even_see_the_wwj_code():
@@ -96,13 +141,16 @@ def test_the_production_path_never_uses_a_sequential_scan():
     assert "distance *= 2" in source
     # the oracle is a reference for tests and for the pre-training gate; the
     # MODEL never sees it, and neither does any launcher
+    # source files only: a __pycache__ entry is a build artifact, not an
+    # import path, and matching one made this assertion depend on whether
+    # anything had been byte-compiled
     reachable = subprocess.run(
-        ["grep", "-rl", "wwj_sequential_reference", "s5", "bin"],
-        capture_output=True, text=True, cwd=REPO)
+        ["grep", "-rl", "--include=*.py", "wwj_sequential_reference", "s5",
+         "bin"], capture_output=True, text=True, cwd=REPO)
     assert reachable.stdout.strip() == ""
     users = subprocess.run(
-        ["grep", "-rl", "wwj_sequential_reference", "experiments"],
-        capture_output=True, text=True, cwd=REPO).stdout.split()
+        ["grep", "-rl", "--include=*.py", "wwj_sequential_reference",
+         "experiments"], capture_output=True, text=True, cwd=REPO).stdout.split()
     assert users == ["experiments/s5_wwj/benchmark.py"], users
 
 
@@ -203,3 +251,51 @@ def test_every_new_python_file_parses_and_declares_an_entry_point():
         if path in (BENCHMARK, DEV_GATE, INIT_GRID):
             assert 'if __name__ == "__main__":' in source, path
             assert "def main(" in source, path
+
+
+def test_both_principal_arms_are_gated_separately():
+    """A critical-arm pass must not authorize passive training: each arm is
+    benchmarked and dev-gated on its own, into its own directory."""
+    text = _text(LAUNCHER)
+    assert 'S5_WWJ_ARMS:-wwj_critical_s5 wwj_passive_s5' in text
+    loop = text[text.index('for ARM in "${WWJ_ARMS[@]}"'):]
+    assert "experiments.s5_wwj.benchmark" in loop
+    assert "experiments.s5_wwj.dev_gate" in loop
+    # separate artifact directories, per arm
+    assert '--out "$RUN_ROOT/$ARM/benchmark.json"' in loop
+    assert '--out "$RUN_ROOT/$ARM/dev_gate"' in loop
+    assert '"$ARM-benchmark"' in loop and '"$ARM-dev_gate"' in loop
+    # the initialization grid runs once, before the loop, and is shared
+    assert text.index("experiments.s5_wwj.init_grid") < text.index(
+        'for ARM in "${WWJ_ARMS[@]}"')
+    assert "authorizes nothing about the passive arm" in text
+
+
+def test_the_projection_states_what_it_covers():
+    """A one-arm wave is not the wall time of the WWJ experiment."""
+    benchmark = _text(BENCHMARK)
+    for field in ("hours_one_arm_wave_three_concurrent_seeds",
+                  "hours_both_wwj_arms_sequential", "waves_planned",
+                  "hours_planned", "covers", "excludes"):
+        assert field in benchmark, field
+    # the gate is applied to the planned scope, not to the one-arm number
+    gate = benchmark[benchmark.index("def gate("):benchmark.index("def main(")]
+    assert 'projection["hours_planned"]' in gate
+    assert "hours_one_arm_wave" not in gate
+    # and the launcher passes the number of waves it is actually gating
+    launcher = _text(LAUNCHER)
+    assert '--waves "$WAVES"' in launcher
+    assert 'WAVES="${S5_WWJ_WAVES:-${#WWJ_ARMS[@]}}"' in launcher
+
+
+def test_the_memory_claim_is_qualified():
+    """The earlier O(L*P) backward-memory claim was wrong; the document and
+    the module must distinguish forward, residual and measured memory."""
+    recurrence = _text(RECURRENCE)
+    assert "FORWARD LIVE STORAGE" in recurrence
+    assert "BACKWARD (AUTODIFF RESIDUAL) STORAGE IS NOT O(L*P*3)" in recurrence
+    assert "MEASURED PEAK DEVICE MEMORY" in recurrence
+    assert 'remat="whole"' in recurrence
+    documentation = _text(os.path.join(REPO, "docs/S5_WWJ_PROSPECTIVE.md"))
+    assert "withdrawn" in documentation
+    assert "unknown until the GPU benchmark runs" in documentation

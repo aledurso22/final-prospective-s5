@@ -53,13 +53,33 @@ third-order recurrence
 h is the TOKEN step and is 1.0 here. It is deliberately NOT identified with
 S5's learned continuous-time step Delta, which enters only through Abar, Bbar.
 
-WHY THE SCAN IS CHEAP. F_tau is diagonal in the S5 mode basis, so A0, A1, A2
-are diagonal: per mode the recurrence is a scalar order-3 linear recurrence
-whose companion matrix H is 3x3 and, crucially, CONSTANT IN TIME. The scan
-therefore never materializes a per-token matrix: a Hillis-Steele doubling
-carries a single 3x3 matrix per mode per level, log2(L) levels, with the
-O(L*P*3) drive vector as the only large array. No sequential loop over
-tokens, no rematerialized rollout per step.
+WHY THE SCAN IS CHEAP IN TIME. F_tau is diagonal in the S5 mode basis, so
+A0, A1, A2 are diagonal: per mode the recurrence is a scalar order-3 linear
+recurrence whose companion matrix H is 3x3 and, crucially, CONSTANT IN TIME.
+The scan therefore never materializes a per-token transition matrix: a
+Hillis-Steele doubling carries a single 3x3 matrix per mode per LEVEL,
+ceil(log2 L) levels. No sequential loop over tokens, no rematerialized
+rollout per step.
+
+WHAT IS AND IS NOT KNOWN ABOUT MEMORY. Three different quantities:
+
+  * FORWARD LIVE STORAGE is O(L*P*3): the lifted state, plus one shifted
+    copy while a level is being applied.
+  * BACKWARD (AUTODIFF RESIDUAL) STORAGE IS NOT O(L*P*3). With
+    `remat="level"` each level recomputes its own internals, but reverse
+    mode still needs each level BOUNDARY, so the residuals are bounded by
+    about ceil(log2 L) arrays of size L*P*3 -- O(L*P*log L) -- unless XLA
+    elides some of them. Per-level checkpointing improves the constant, not
+    the log factor. `remat="whole"` instead keeps only the scan's inputs and
+    recomputes every level in the backward pass, trading roughly 2x the
+    forward flops for O(L*P*3) residuals.
+  * MEASURED PEAK DEVICE MEMORY is what actually decides, and only the GPU
+    benchmark can report it.
+
+No memory bound is claimed here beyond the forward one. If the benchmark
+shows the residuals are too large, the fix is `remat="whole"`, a coarser
+rematerialization region, or a custom VJP for this structured recurrence --
+never a change to the mathematics above.
 """
 
 import jax
@@ -156,10 +176,23 @@ def wwj_scan(A0, A1, A2, drive, remat=True):
     """Parallel prefix scan of s_{t+1} = A0 s_t + A1 s_{t-1} + A2 s_{t-2} + d_t.
 
     Zero state prehistory (s_0 = s_{-1} = s_{-2} = 0); returns s_{t+1} for
-    t = 0..L-1, i.e. the state that has already seen x_t. Depth log2(L), and
-    the only O(L) array is the (L, P, 3) lifted state: there is no per-token
-    transition matrix and no sequential loop.
+    t = 0..L-1, i.e. the state that has already seen x_t. Depth
+    ceil(log2 L), with no per-token transition matrix and no sequential loop.
+
+    `remat` selects the rematerialization region, which changes BACKWARD
+    memory only, never the result:
+
+      True / "level"  each doubling level is rematerialized; the level
+                      boundaries are still retained for the backward pass
+                      (see the module docstring: O(L*P*log L) residuals);
+      "whole"         the entire scan is rematerialized: O(L*P*3) residuals,
+                      at roughly twice the forward flops;
+      False           no rematerialization; the largest backward footprint.
     """
+    if remat == "whole":
+        return jax.checkpoint(
+            lambda a0, a1, a2, d: wwj_scan(a0, a1, a2, d, remat=False))(
+                A0, A1, A2, drive)
     length = drive.shape[0]
     zero = np.zeros_like(drive)
     state = np.stack((drive, zero, zero), axis=-1)

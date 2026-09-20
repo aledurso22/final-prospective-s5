@@ -8,11 +8,15 @@
 #   1. initialization grid: sweep k = tau/h and eps over the ACTUAL
 #      initialized S5 modes and select tau by the declared rule in
 #      experiments/s5_wwj/init_grid.py. No validation result is consulted.
-#   2. performance gate: Native S5 versus the WWJ arm, production-shaped, on
-#      one GPU. Authorizes nothing unless every declared condition holds,
+#   2. performance gate: Native S5 versus each WWJ arm, production-shaped,
+#      on one GPU. Authorizes nothing unless every declared condition holds,
 #      including WWJ throughput at least half of Native's.
 #   3. developmental gate: two real updates, a fixed subset, checkpoint save
 #      and reload, validation. Never the test split.
+#
+# Stages 2 and 3 run for EVERY principal arm -- wwj_critical_s5 and
+# wwj_passive_s5 -- into separate artifact directories. A critical-arm pass
+# authorizes nothing about the passive arm.
 #
 # A full 15-epoch experiment is NOT launched here and is not authorized until
 # stages 2 and 3 pass and their artifacts have been read.
@@ -26,7 +30,12 @@ cd "$PROSPECTIVE_REPO"
 REPO_ROOT="$(pwd -P)"
 export PROSPECTIVE_REPO="$REPO_ROOT"
 
-ARM="${S5_WWJ_ARM:-wwj_critical_s5}"
+# BOTH principal arms are gated, each into its own artifact directory. A
+# critical-arm pass authorizes nothing about the passive arm. Override with
+# S5_WWJ_ARMS="wwj_critical_s5" to gate one of them alone.
+read -r -a WWJ_ARMS <<< "${S5_WWJ_ARMS:-wwj_critical_s5 wwj_passive_s5}"
+#: how many 15-epoch waves the projection must cover: one per gated arm
+WAVES="${S5_WWJ_WAVES:-${#WWJ_ARMS[@]}}"
 SEED="${S5_WWJ_SEED:-301}"
 ALLOCATION_HOURS="${S5_WWJ_ALLOCATION_HOURS:-18}"
 BENCH_STEPS="${S5_WWJ_BENCH_STEPS:-10}"
@@ -70,7 +79,8 @@ STAMP="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_ROOT="$OUT_ROOT/$STAMP"
 
 echo "WWJ gates, direct children of allocation $ALLOCATION"
-echo "arm: $ARM (seed $SEED)   gpu token: $TOKEN   allocation: ${ALLOCATION_HOURS}h"
+echo "arms: ${WWJ_ARMS[*]} (seed $SEED)   gpu token: $TOKEN"
+echo "allocation: ${ALLOCATION_HOURS}h   projection covers $WAVES wave(s)"
 echo "commit: $(git rev-parse HEAD)"
 echo "data cache: $DATA_CACHE"
 echo "run root: $RUN_ROOT"
@@ -99,9 +109,9 @@ run_child() {   # name -- command...
 
 if [[ "$DRY_RUN" != "1" ]]; then
   mkdir -p "$RUN_ROOT/logs"
-  printf 'commit=%s\narm=%s\nseed=%s\nallocation=%s\ngpu_token=%s\nallocation_hours=%s\n' \
-    "$EXPECTED_COMMIT" "$ARM" "$SEED" "$ALLOCATION" "$TOKEN" \
-    "$ALLOCATION_HOURS" > "$RUN_ROOT/run_metadata.txt"
+  printf 'commit=%s\narms=%s\nseed=%s\nallocation=%s\ngpu_token=%s\nallocation_hours=%s\nwaves_projected=%s\n' \
+    "$EXPECTED_COMMIT" "${WWJ_ARMS[*]}" "$SEED" "$ALLOCATION" "$TOKEN" \
+    "$ALLOCATION_HOURS" "$WAVES" > "$RUN_ROOT/run_metadata.txt"
 fi
 
 echo
@@ -117,19 +127,25 @@ if [[ "$DRY_RUN" != "1" ]]; then
   echo "selected by the declared rule: tau_init=$TAU_INIT eps_init=$EPS_INIT"
 fi
 
-echo
-echo "STAGE 2: performance gate, Native S5 versus $ARM"
-run_child benchmark "$PY" -u -m experiments.s5_wwj.benchmark \
-  --out "$RUN_ROOT/benchmark.json" --arm "$ARM" --seed "$SEED" \
-  --steps "$BENCH_STEPS" --tau-init "$TAU_INIT" --eps-init "$EPS_INIT" \
-  --allocation-hours "$ALLOCATION_HOURS"
+# Each arm is gated on its own, in its own directory, and a failure in one
+# arm stops the script: a gate that has not run has not passed.
+stage=2
+for ARM in "${WWJ_ARMS[@]}"; do
+  echo
+  echo "STAGE $stage.1: performance gate, Native S5 versus $ARM"
+  run_child "$ARM-benchmark" "$PY" -u -m experiments.s5_wwj.benchmark \
+    --out "$RUN_ROOT/$ARM/benchmark.json" --arm "$ARM" --seed "$SEED" \
+    --steps "$BENCH_STEPS" --tau-init "$TAU_INIT" --eps-init "$EPS_INIT" \
+    --allocation-hours "$ALLOCATION_HOURS" --waves "$WAVES"
 
-echo
-echo "STAGE 3: developmental learning gate (validation only, never test)"
-run_child dev_gate "$PY" -u -m experiments.s5_wwj.dev_gate \
-  --data-cache "$DATA_CACHE" --out "$RUN_ROOT/dev_gate" --arm "$ARM" \
-  --seed "$SEED" --subset-steps "$SUBSET_STEPS" \
-  --tau-init "$TAU_INIT" --eps-init "$EPS_INIT"
+  echo
+  echo "STAGE $stage.2: developmental learning gate for $ARM (never the test split)"
+  run_child "$ARM-dev_gate" "$PY" -u -m experiments.s5_wwj.dev_gate \
+    --data-cache "$DATA_CACHE" --out "$RUN_ROOT/$ARM/dev_gate" --arm "$ARM" \
+    --seed "$SEED" --subset-steps "$SUBSET_STEPS" \
+    --tau-init "$TAU_INIT" --eps-init "$EPS_INIT"
+  stage=$((stage + 1))
+done
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo
@@ -140,7 +156,10 @@ fi
 echo
 echo "artifacts:"
 echo "  $RUN_ROOT/init_grid.json"
-echo "  $RUN_ROOT/benchmark.json"
-echo "  $RUN_ROOT/dev_gate/dev_gate.json"
-echo "Read them before authorizing any 15-epoch experiment; a passing gate"
-echo "authorizes nothing by itself."
+for ARM in "${WWJ_ARMS[@]}"; do
+  echo "  $RUN_ROOT/$ARM/benchmark.json"
+  echo "  $RUN_ROOT/$ARM/dev_gate/dev_gate.json"
+done
+echo "Read them before authorizing any 15-epoch experiment. Each arm is"
+echo "authorized only by its OWN artifacts, and a passing gate authorizes"
+echo "nothing by itself."

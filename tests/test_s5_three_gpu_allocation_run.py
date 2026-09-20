@@ -228,11 +228,14 @@ def test_three_distinct_gpu_tokens_and_private_paths(tmp_path):
     assert done.returncode == 0, done.stderr
     training = [row for row in launched if row[3] == "train"]
     assert len(training) == 9
+    # the children of a wave run CONCURRENTLY, so the order in which they
+    # record themselves is not deterministic: assert the assignment, which
+    # is, and leave ordering to the wave-level test below
     for arm in ARMS:                      # one wave, three seeds, three GPUs
         wave = [row for row in training if row[0] == arm]
-        assert [row[1] for row in wave] == ["301", "302", "303"]
+        assert sorted(row[1] for row in wave) == ["301", "302", "303"]
         assert sorted(row[2] for row in wave) == ["0", "1", "2"]
-        assert len({row[2] for row in wave}) == 3        # distinct tokens
+        assert len({(row[1], row[2]) for row in wave}) == 3
     assert all(row[2] != "3" for row in launched)        # token 3 unused
     # each child had its own task directory, TMPDIR and compilation cache
     seen = set()
@@ -284,8 +287,10 @@ def test_the_smoke_runs_first_concurrently_and_gates_training(tmp_path):
     done, launched, root = _run(tmp_path)
     smoke = [row for row in launched if row[3] == "smoke"]
     assert len(smoke) == 3
-    assert [row[0] for row in smoke[:2]] == ["native_matched_s5",
-                                             "generalized_prospective_s5"]
+    # concurrent, so unordered: what matters is which tasks and which GPUs
+    assert sorted((row[0], row[1]) for row in smoke) == [
+        ("generalized_prospective_s5", "301"), ("native_matched_s5", "301"),
+        ("native_matched_s5", "302")]
     assert sorted(row[2] for row in smoke) == ["0", "1", "2"]
     # the smoke precedes every training child
     assert all(launched.index(row) < min(launched.index(other)
@@ -307,6 +312,8 @@ def test_a_failed_smoke_gate_stops_the_run_before_training(tmp_path):
 
 
 def test_waves_are_sequential_and_awaited(tmp_path):
+    """Within a wave the order is racy; BETWEEN waves it is not, because
+    every child is awaited before the next arm starts."""
     done, launched, _ = _run(tmp_path)
     training = [row for row in launched if row[3] == "train"]
     assert [row[0] for row in training] == [arm for arm in ARMS
