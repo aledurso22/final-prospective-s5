@@ -361,6 +361,47 @@ answer was unwelcome: it is that the previous measurement provably had no
 power. If the powered probe shows a trade, that is the answer and it gets
 written up as the negative result.
 
+## 6f. The powered probe shows both components improving — and what that
+still does not settle
+
+With the probe fixed, the gates unpenalised, 16 modes and 1200 steps:
+
+| channel | Native | gated | change | Native R² |
+|---|---|---|---|---|
+| long-delay memory | 7.53e-5 | **2.48e-5** | **−67.1%** | 0.9984 |
+| lead | 2.76e-4 | **4.10e-6** | **−98.5%** | 0.9989 |
+| total MSE | 1.76e-4 | **1.44e-5** | **12.2× better** | |
+
+**Both components improved**, the gates are strongly heterogeneous (spread
+0.87, a 71× ratio across modes), the stages are independent
+(\|n₁−n₂\| = 5.56), every added pole stayed inside the disc (max 0.846),
+and the specialization correlation — a mode's gate against its share of the
+**lead** channel — is **0.678**, against 0.22 on the degenerate probe. That
+is the construction doing what it was built to do.
+
+**The run was nonetheless reported `PROBE_UNDERPOWERED`, by my own guard,
+and the guard was wrong.** It rejected a baseline at R² = 0.9984 as
+"already solved" while the gated arm was cutting that residual twelvefold.
+R² near 1 is the wrong way to ask whether headroom exists. The ceiling is
+removed; the floor (0.20) stays, because a channel nobody learns really does
+carry no information.
+
+**What replaces it, because a single-seed win is not a finding:**
+
+* **three seeds**, and an improvement must exceed the baseline's
+  seed-to-seed half-range to count;
+* **a capacity-matched Native control.** With the gates off, `d_raw`,
+  `delta_raw` and `gate_raw` are inert, so the all-Native arm had 160
+  effective parameters against the gated arm's 256 — the improvement could
+  be capacity rather than mechanism. A second Native arm now runs at **26
+  modes** (260 parameters) to remove that confound;
+* the verdict `DEMONSTRATED_AGAINST_BOTH_CONTROLS` requires heterogeneous
+  gates **and** both components improved beyond seed spread against **both**
+  Native arms.
+
+Until that runs, the honest statement is: **a promising single-seed result
+with the capacity confound uncontrolled.** Not a demonstration yet.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

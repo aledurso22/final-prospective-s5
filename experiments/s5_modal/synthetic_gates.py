@@ -53,9 +53,13 @@ MEMORY_TIMESCALE = float(DELAY)
 #: prospective mechanics; the old target was the first difference of an
 #: input channel, which a two-tap readout solves exactly
 BLUR_TIMESCALE = 8.0
-#: the baseline must explain at least this much of a channel, and not more
-#: than this much, for a comparison on that channel to carry information
-POWER_FLOOR, POWER_CEILING = 0.20, 0.99
+#: the baseline must explain at least this much of a channel for a
+#: comparison on it to mean anything. There is NO upper ceiling: a first
+#: version rejected a baseline at R2 = 0.9984 as "already solved", while the
+#: gated arm was cutting that residual twelve-fold. R2 near 1 is the wrong
+#: way to ask whether headroom exists; the right way is whether the
+#: difference survives seed-to-seed variation, which is now measured.
+POWER_FLOOR = 0.20
 
 
 def make_batch(key, batch=BATCH, length=LENGTH, delay=DELAY, channels=2):
@@ -137,7 +141,7 @@ def loss_fn(params, inputs, target, use_gates, gate_penalty):
     return error + cost, error
 
 
-def initial_params(key, stages=2, channels=2):
+def initial_params(key, stages=2, channels=2, modes=MODES):
     """Asymmetric across stages AND across modes.
 
     Identical stages receive identical gradients and stay tied for ever,
@@ -147,29 +151,29 @@ def initial_params(key, stages=2, channels=2):
     """
     keys = jax.random.split(key, 8)
     stage_offset = jnp.linspace(-0.5, 0.5, stages)[:, None]
-    mode_offset = jnp.linspace(-0.3, 0.3, MODES)[None, :]
+    mode_offset = jnp.linspace(-0.3, 0.3, modes)[None, :]
     return {
         # the slowest representable mode must outlast the memory timescale:
         # the previous range topped out at 20 tokens for a 32-token task, so
         # the probe could not hold what it asked the model to recall
-        "lambda_re": -(0.002 + 0.3 * jax.random.uniform(keys[0], (MODES,))),
-        "lambda_im": jax.random.uniform(keys[1], (MODES,), minval=-2.0,
+        "lambda_re": -(0.002 + 0.3 * jax.random.uniform(keys[0], (modes,))),
+        "lambda_im": jax.random.uniform(keys[1], (modes,), minval=-2.0,
                                         maxval=2.0),
-        "b_re": jax.random.normal(keys[2], (MODES, 2)) * 0.5,
-        "b_im": jax.random.normal(keys[3], (MODES, 2)) * 0.5,
+        "b_re": jax.random.normal(keys[2], (modes, 2)) * 0.5,
+        "b_im": jax.random.normal(keys[3], (modes, 2)) * 0.5,
         "d_raw": stage_offset + mode_offset,
         "delta_raw": 0.5 + stage_offset
-                     + 0.1 * jax.random.normal(keys[5], (stages, MODES)),
+                     + 0.1 * jax.random.normal(keys[5], (stages, modes)),
         "gate_raw": -2.0 + stage_offset
-                    + 0.5 * jax.random.normal(keys[6], (stages, MODES)),
-        "readout": jax.random.normal(keys[4], (2 * MODES, channels)) * 0.1,
+                    + 0.5 * jax.random.normal(keys[6], (stages, modes)),
+        "readout": jax.random.normal(keys[4], (2 * modes, channels)) * 0.1,
     }
 
 
-def train(use_gates, steps, seed, gate_penalty, channels=2,
+def train(use_gates, steps, seed, gate_penalty, channels=2, modes=MODES,
           learning_rate=3e-2):
     key = jax.random.PRNGKey(seed)
-    params = initial_params(key, channels=channels)
+    params = initial_params(key, channels=channels, modes=modes)
     optimizer = optax.adam(learning_rate)
     state = optimizer.init(params)
 
@@ -222,7 +226,8 @@ def evaluate(params, use_gates, seed=99, channels=2):
     # says how prospective it is. A positive correlation between the gate
     # and the LEAD channel's share is direct evidence of specialization.
     readout = jnp.asarray(params["readout"])
-    weight = jnp.abs(readout[:MODES]) + jnp.abs(readout[MODES:])
+    modes = readout.shape[0] // 2
+    weight = jnp.abs(readout[:modes]) + jnp.abs(readout[modes:])
     specialization = None
     if channels == 2:
         share = weight[:, 1] / (jnp.sum(weight, axis=1) + 1e-12)
@@ -267,11 +272,49 @@ def evaluate(params, use_gates, seed=99, channels=2):
     }
 
 
+def effective_parameters(modes, gated, channels=2, stages=2):
+    """Parameters that actually influence the output.
+
+    With the gates off, d_raw, delta_raw and gate_raw are inert, so the
+    all-Native arm has FEWER effective parameters than the gated one. A
+    capacity-matched Native control is therefore run with more modes.
+    """
+    base = 2 * modes + 2 * modes * 2 + 2 * modes * channels
+    return base + (3 * stages * modes if gated else 0)
+
+
+def matched_modes(modes, channels=2, stages=2):
+    target = effective_parameters(modes, True, channels, stages)
+    width = modes
+    while effective_parameters(width, False, channels, stages) < target:
+        width += 1
+    return width
+
+
+def run_arm(use_gates, modes, args):
+    """One arm across every seed; returns the per-seed evaluations."""
+    out = []
+    for seed in args.seeds:
+        params, _ = train(use_gates, args.steps, seed, args.gate_penalty,
+                          args.channels, modes)
+        out.append(evaluate(params, use_gates, channels=args.channels))
+    return out
+
+
+def summarize(runs, key, sub=None):
+    values = [(run[key][sub] if sub else run[key]) for run in runs]
+    mean = sum(values) / len(values)
+    spread = (max(values) - min(values)) / 2.0
+    return {"mean": mean, "half_range": spread, "per_seed": values}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True)
     parser.add_argument("--steps", type=int, default=1200)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2],
+                        help="the improvement must survive seed variation")
+    parser.add_argument("--modes", type=int, default=MODES)
     parser.add_argument("--gate-penalty", type=float, default=1e-3)
     parser.add_argument("--spread-threshold", type=float, default=0.1)
     parser.add_argument("--channels", type=int, choices=(1, 2), default=2,
@@ -283,12 +326,13 @@ def main():
                              "component")
     args = parser.parse_args()
 
-    gated_params, gated_errors = train(True, args.steps, args.seed,
-                                       args.gate_penalty, args.channels)
-    native_params, native_errors = train(False, args.steps, args.seed,
-                                         args.gate_penalty, args.channels)
-    gated = evaluate(gated_params, True, channels=args.channels)
-    native = evaluate(native_params, False, channels=args.channels)
+    wide = matched_modes(args.modes, args.channels)
+    arms = {
+        "gated": run_arm(True, args.modes, args),
+        "native": run_arm(False, args.modes, args),
+        "native_capacity_matched": run_arm(False, wide, args),
+    }
+    gated, native = arms["gated"][0], arms["native"][0]
     differentiated = any(spread > args.spread_threshold
                          for spread in gated["gate_spread"])
     # BOTH components, not the total: the claim is retained long-delay
@@ -302,22 +346,56 @@ def main():
     lead_improved = lead_change < -args.component_margin
     memory_retained = memory_change < args.component_margin
     better = gated["mean_squared_error"] < native["mean_squared_error"]
-    # POWER CHECK, before any verdict. A channel the baseline cannot learn
-    # at all, or already solves completely, carries no information about
-    # whether the cascade helps: the first probe compared two models on a
-    # lead channel Native solved to R2 = 0.997 and a memory channel neither
-    # arm learned (R2 0.111 -> -0.000), and no verdict follows from that.
-    baseline_power = native.get("variance_explained", {})
+    # POWER CHECK, before any verdict: a channel the baseline cannot learn
+    # at all carries no information about whether the cascade helps. The
+    # first probe compared two models on a memory channel neither arm
+    # learned (R2 0.111 -> -0.000), and no verdict follows from that. The
+    # baseline_power used below is averaged over seeds.
+    #
+    # every comparison is against BOTH Native arms, and must exceed the
+    # seed-to-seed half-range of the baseline to count
+    components = {"long_delay": "long_delay_component_error",
+                  "lead": "lead_component_error"}
+    comparison, survives = {}, True
+    for name, field in components.items():
+        row = {arm: summarize(runs, field) for arm, runs in arms.items()}
+        for baseline in ("native", "native_capacity_matched"):
+            change = ((row["gated"]["mean"] - row[baseline]["mean"])
+                      / max(row[baseline]["mean"], 1e-12))
+            margin = row[baseline]["half_range"] / max(row[baseline]["mean"],
+                                                       1e-12)
+            row[f"vs_{baseline}"] = {
+                "relative_change": change,
+                "baseline_seed_half_range_relative": margin,
+                "improved_beyond_seed_spread": bool(change < -margin
+                                                    and change
+                                                    < -args.component_margin)}
+            survives = survives and row[f"vs_{baseline}"][
+                "improved_beyond_seed_spread"]
+        comparison[name] = row
+    baseline_power = {name: summarize(arms["native"], "variance_explained",
+                                      name)["mean"]
+                      for name in components}
     underpowered = {name: value for name, value in baseline_power.items()
-                    if not (POWER_FLOOR <= value <= POWER_CEILING)}
+                    if value < POWER_FLOOR}
     report = {
-        "schema": "s5-modal/synthetic-gates-v1",
+        "schema": "s5-modal/synthetic-gates-v2",
+        "seeds": args.seeds,
+        "modes": args.modes,
+        "capacity_matched_native_modes": wide,
+        "effective_parameters": {
+            "gated": effective_parameters(args.modes, True, args.channels),
+            "native": effective_parameters(args.modes, False, args.channels),
+            "native_capacity_matched":
+                effective_parameters(wide, False, args.channels)},
+        "component_comparison": comparison,
+        "improvement_survives_seeds_and_capacity_control": bool(survives),
         "task": ("long-delay memory and switch-edge lead on separate "
                  "outputs" if args.channels == 2 else
                  "long-delay memory plus switch-edge lead summed into one "
                  "output (the original probe)"),
         "channels": args.channels,
-        "steps": args.steps, "seed": args.seed,
+        "steps": args.steps,
         "gate_penalty": args.gate_penalty,
         "gated": gated, "all_native_baseline": native,
         "final_training_error": {"gated": gated_errors[-1],
@@ -331,14 +409,15 @@ def main():
         "long_delay_memory_retained": bool(memory_retained),
         "baseline_variance_explained": baseline_power,
         "underpowered_channels": underpowered,
-        "power_band": [POWER_FLOOR, POWER_CEILING],
+        "power_floor": POWER_FLOOR,
         "status": ("PROBE_UNDERPOWERED" if underpowered else
-                   "DIFFERENTIATION_DEMONSTRATED"
-                   if differentiated and lead_improved and memory_retained
+                   "DEMONSTRATED_AGAINST_BOTH_CONTROLS"
+                   if differentiated and survives
                    else "NOT_DEMONSTRATED"),
-        "criterion": ("heterogeneous gates AND reduced lead error AND "
-                      "long-delay memory not degraded; a trade between the "
-                      "two components is not a success"),
+        "criterion": ("heterogeneous gates AND both components improved "
+                      "beyond the baseline's seed-to-seed spread, against "
+                      "BOTH an equal-mode Native arm and a "
+                      "capacity-matched one"),
         "scope": ("a synthetic demonstration that per-mode gates can "
                   "differentiate; NOT evidence of benefit on Speech "
                   "Commands, and no scientific claim follows from it alone"),
@@ -346,7 +425,11 @@ def main():
     with open(args.out, "w") as handle:
         json.dump(report, handle, indent=2)
     print(json.dumps({key: report[key] for key in
-                      ("status", "channels", "criterion",
+                      ("status", "channels", "criterion", "seeds",
+                       "effective_parameters",
+                       "capacity_matched_native_modes",
+                       "component_comparison",
+                       "improvement_survives_seeds_and_capacity_control",
                        "baseline_variance_explained",
                        "underpowered_channels", "gates_are_heterogeneous",
                        "lead_improved", "long_delay_memory_retained",

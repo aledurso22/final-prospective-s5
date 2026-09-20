@@ -73,14 +73,27 @@ def test_the_cascade_builds_no_dense_companion_and_reuses_the_s5_scan():
         assert SI.defines_function(tree, name), name
 
 
-def test_the_synthetic_criterion_requires_both_components():
-    """A trade between lead and memory must not read as a success."""
+def test_the_synthetic_criterion_requires_both_components_and_controls():
+    """A trade must not read as a success, an improvement inside seed noise
+    must not either, and neither must extra capacity."""
     source = io.open(SYNTHETIC).read()
-    main = SI.function_node(SI.parse(SYNTHETIC), "main")
+    tree = SI.parse(SYNTHETIC)
+    main = SI.function_node(tree, "main")
     text = ast.get_source_segment(source, main) or source
-    for token in ("lead_improved", "memory_retained", "component_margin"):
+    # both components, both controls, and the seed spread
+    for token in ("long_delay", "lead", "native_capacity_matched",
+                  "improved_beyond_seed_spread", "component_margin",
+                  "half_range"):
         assert token in text, token
-    assert "differentiated and lead_improved and memory_retained" in text
+    assert "differentiated and survives" in text
+    # the controls exist as code, not as prose
+    for name in ("effective_parameters", "matched_modes", "run_arm",
+                 "summarize", "variance_explained"):
+        assert SI.defines_function(tree, name), name
+    # the power floor survives; the ceiling that rejected a real result does
+    # not
+    assert "POWER_FLOOR" in source
+    assert "POWER_CEILING" not in source
 
 
 def test_the_layer_reports_the_diagnostics_the_construction_promises():
