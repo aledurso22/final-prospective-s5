@@ -30,8 +30,19 @@ CHUNK_CANDIDATES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 #: |H^C| ceiling, from the measured relationship between |H^C| and the
 #: float32 error of the block scan
 TRANSITION_NORM_CEILING = 10.0
-#: rho^L growth allowed end to end over the production sequence
-RADIUS_BOUND = 1.0 + 1e-5
+#: A radius above 1 is rejected outright. The earlier 1 + 1e-5 allowance is
+#: WITHDRAWN: a cell with rho > 1 is unstable, whether or not a particular
+#: 4000-token rollout happens to stay finite, and tau = 5 with eps = 0
+#: printed 1.0063 on one fixture and 1.0787247827275395 on another while
+#: being called stable. This threshold is a tightening, never a loosening.
+RADIUS_BOUND = 1.0
+#: the tau values worth certifying. This is a CANDIDATE list, not a list of
+#: stable values: every one of them is certified, and none is assumed.
+TAU_CANDIDATES = (2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0)
+#: the production seeds
+SEEDS = (301, 302, 303)
+#: (order, eps) of each model
+MODEL_SPECS = {"professor_tss": (2, 0.0), "wwj_generalized_tss": (3, 0.25)}
 
 
 def production_mode_inventory(seed=301):
@@ -140,8 +151,57 @@ def select_chunk(norms, ceiling=TRANSITION_NORM_CEILING):
                      f"sequential depth is about C + L/C = {chosen} + L/{chosen}")}
 
 
+def certify_seeds(tau_value, eps, order, seeds=SEEDS, inventories=None):
+    """Gate 1 over EVERY layer and mode of EVERY production seed.
+
+    A cell is eligible only if every mode of every seed passes. The worst
+    mode across all seeds is named. This function, and nothing else, decides
+    production eligibility: tests, the chunk study and any eventual training
+    selection consume its output rather than maintaining a list of their own.
+    """
+    inventories = inventories or {seed: production_mode_inventory(seed)
+                                  for seed in seeds}
+    per_seed, worst = {}, None
+    for seed, layers in inventories.items():
+        stability = gate_1_stability(layers, tau_value, eps, order)
+        per_seed[seed] = stability
+        if worst is None or stability["max_radius_over_all_modes"] > \
+                worst["max_radius_over_all_modes"]:
+            worst = dict(stability, seed=seed)
+    return {"tau": tau_value, "eps": eps, "order": order,
+            "target_construction": DP.PROFESSOR_LINEAR_TARGET,
+            "seeds": list(inventories),
+            "per_seed": per_seed,
+            "worst_over_seeds": worst,
+            "max_radius": worst["max_radius_over_all_modes"],
+            "bound": RADIUS_BOUND,
+            "passes": all(value["passes"] for value in per_seed.values()),
+            "verdict": ("PASS" if all(value["passes"]
+                                      for value in per_seed.values())
+                        else "REJECT")}
+
+
+def eligible_cells(tau_candidates=TAU_CANDIDATES, seeds=SEEDS,
+                   models=None):
+    """Certify every (model, tau) candidate. Returns all rows and the
+    eligible subset -- which may be EMPTY, and that is a result to record,
+    not a reason to invent a candidate."""
+    models = models or MODEL_SPECS
+    inventories = {seed: production_mode_inventory(seed) for seed in seeds}
+    rows = []
+    for model, (order, eps) in models.items():
+        for tau_value in tau_candidates:
+            row = certify_seeds(tau_value, eps, order, seeds, inventories)
+            row["model"] = model
+            rows.append(row)
+    eligible = [row for row in rows if row["passes"]]
+    return {"rows": rows, "eligible": eligible,
+            "status": "ELIGIBLE_CELLS_FOUND" if eligible
+                      else "NO_ELIGIBLE_CELL_IN_THE_PRODUCTION_INVENTORY"}
+
+
 def certify(layers, tau_value, eps, order):
-    """Gate 1 over the whole inventory, then the chunk selection."""
+    """Gate 1 over one inventory, then the chunk selection."""
     stability = gate_1_stability(layers, tau_value, eps, order)
     report = {"tau": tau_value, "eps": eps, "order": order,
               "target_construction": DP.PROFESSOR_LINEAR_TARGET,

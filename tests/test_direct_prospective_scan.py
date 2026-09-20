@@ -39,28 +39,24 @@ TOL64, TOL32 = 1e-10, 2e-4
 #: lengths exercised everywhere, including non-powers of two and > 1000
 LENGTHS = (1, 2, 3, 5, 7, 8, 9, 15, 17, 100, 257, 1000, 1023, 1500)
 
-#: Cells the CLUSTER measured as stable on the real-builder fixture with
-#: professor_linear_target (commit 94455c5): (tau, eps, measured radius).
-#: tau = 5 and tau = 10 are the well-conditioned ones and must be exercised;
-#: tau = 1000 is the weak, nearly marginal limit and must not be the only
-#: cell studied.
-CLUSTER_STABLE_CELLS = (
-    (2.0, 0.0, 0.9512748075), (5.0, 0.0, 0.8294413371),
-    (10.0, 0.0, 0.8990310402), (50.0, 0.0, 0.9799557162),
-    (100.0, 0.0, 0.9899888330), (1000.0, 0.0, 0.9989998876),
-    (2.0, 0.25, 0.9923729495), (5.0, 0.25, 0.8776972719),
-    (10.0, 0.25, 0.8851554058), (50.0, 0.25, 0.9662813133),
-    (100.0, 0.25, 0.9819794261), (1000.0, 0.25, 0.9980477225),
+#: NO LIST OF "STABLE TAU VALUES" LIVES HERE ANY MORE. Three separate
+#: subset-certification errors came from maintaining one: tau = 2 and tau = 5
+#: were called stable from small random mode draws, and this file then
+#: hard-coded (5.0, 10.0, 50.0) as stable while its own header had already
+#: withdrawn tau = 5. Production eligibility comes from
+#: `experiments.s5_direct_prospective.certification` and nowhere else.
+#:
+#: Cluster-measured rejections, kept as regressions rather than as a
+#: "stable" list:
+REJECTED_FIXTURES = (
+    {"tau": 2.0, "eps": 0.0, "radius": 1.4415912882,
+     "witness": "Abar = 0.9 e^{-2i}", "first_nonfinite_token": 242},
+    {"tau": 5.0, "eps": 0.0, "radius": 1.0787247827275395,
+     "witness": "the _model_modes(15) fixture on the cluster",
+     "analytic_witness_radius": 1.0977},
 )
-#: WITHDRAWN. tau = 2 and tau = 5 were called well-conditioned on the
-#: strength of a handful of randomly drawn modes. Over the mode region they
-#: are UNSTABLE -- at tau = 2 the mode Abar = 0.9 e^{-2i} has radius 1.4416
-#: and the model (sequential float32 included) diverges at token 242. Cells
-#: are certified over the WHOLE production inventory now, not a subset.
-WELL_CONDITIONED_TAU = (10.0,)
-#: the offending mode, preserved as a permanent regression
-OFFENDING_MODE = {"tau": 2.0, "eps": 0.0, "abs_lambda": 0.9, "angle": -2.0,
-                  "radius": 1.4415912882, "first_nonfinite_token": 242}
+#: candidate tau values a test may EXAMINE; none is assumed stable
+TAU_CANDIDATES = (2.0, 5.0, 10.0, 50.0, 100.0, 1000.0)
 
 
 def _context(**fields):
@@ -200,56 +196,86 @@ def _model_modes(seed, P=6, H=3):
     return lambda_bar, b_bar
 
 
-def _stable_model_cells(lambda_bar, b_bar, bound=1.0):
-    """Cells of the ACTUAL coefficient builders whose radius is below the
-    bound. The search is honest: if there are none, the test says so."""
+def test_subset_stability_is_recorded_as_a_subset_result_only():
+    """A radius measured on a mode SUBSET is a fact about that subset.
+
+    tau = 1000 with eps = 1/4 really does give rho = 0.998 on the cluster's
+    small fixture; that is recorded here as a subset observation and is
+    explicitly NOT production eligibility, which only full-inventory
+    certification decides. Three earlier errors came from blurring the two.
+    """
+    lambda_bar, b_bar = _model_modes(14)
     real = np.float64 if X64 else np.float32
-    found = []
-    for tau_value in (0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 1000.0):
+    observations = []
+    for tau_value in TAU_CANDIDATES:
         for eps in (0.0, 0.25):
-            for target in DP.TARGET_CONSTRUCTIONS:
-                tau = np.full(lambda_bar.shape, tau_value, dtype=real)
-                mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
-                A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau,
-                                                     mass, target)
-                radius = float(np.max(ORACLE.exact_companion_radius(A)))
-                if radius <= bound:
-                    found.append({"tau": tau_value, "eps": eps,
-                                  "target": target, "radius": radius})
-    return found
+            tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+            mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
+            A, _ = DP.matched_state_coefficients(
+                lambda_bar, b_bar, tau, mass, DP.PROFESSOR_LINEAR_TARGET)
+            radius = float(np.max(ORACLE.exact_companion_radius(A)))
+            observations.append({"tau": tau_value, "eps": eps,
+                                 "subset_radius": radius,
+                                 "scope": "THESE MODES ONLY, not production"})
+    print({"subset_observations": observations,
+           "production_eligibility": "decided by certification.py alone"})
+    # the subset genuinely contains unstable cells, which is the whole point
+    assert any(row["subset_radius"] > 1.0 for row in observations), \
+        observations
 
 
-def test_a_stable_real_builder_cell_exists():
-    """RECORDED FALSIFICATION. The earlier prediction that no cell of the
-    real coefficient builders would be stable was WRONG: tau = 1000,
-    eps = 1/4, professor_linear_target gives a companion radius of
-    0.9980477224938169 < 1 on the cluster's modes. The cell stays in the
-    suite; it is not replaced by an easier synthetic fixture."""
-    lambda_bar, b_bar = _model_modes(14)
-    cells = _stable_model_cells(lambda_bar, b_bar)
-    assert cells, "expected at least the tau = 1000 cell to be stable"
-    assert any(cell["tau"] >= 1000.0 for cell in cells), cells
-    for cell in cells:
-        assert cell["radius"] < 1.0, cell
+def test_certification_is_the_only_source_of_production_eligibility():
+    """No test, study or launcher may keep its own stable-tau list.
+
+    Every hard-coded list of "stable" tau values is a subset-certification
+    error waiting to happen; three of them already were. This asserts the
+    lists are gone and that the certification module exposes the API the
+    others consume.
+    """
+    from experiments.s5_direct_prospective import certification as CERT
+
+    for name in ("WELL_CONDITIONED_TAU", "CLUSTER_STABLE_CELLS"):
+        assert name not in globals(), name
+    source = open(os.path.join(REPO,
+                               "tests/test_direct_prospective_scan.py")).read()
+    assert "def _stable_model_cells" not in source
+    study = open(os.path.join(
+        REPO, "experiments/s5_direct_prospective/chunk_study.py")).read()
+    assert "CLUSTER_STABLE_CELLS" not in study
+    assert "certification" in study
+    # the single source of truth, with the tightened bound
+    assert CERT.RADIUS_BOUND == 1.0
+    for attribute in ("production_mode_inventory", "gate_1_stability",
+                      "certify_seeds", "eligible_cells", "TAU_CANDIDATES",
+                      "SEEDS", "MODEL_SPECS"):
+        assert hasattr(CERT, attribute), attribute
+    assert tuple(CERT.SEEDS) == (301, 302, 303)
 
 
-def test_the_cluster_stable_cells_are_reproduced():
-    """The cells the cluster measured are stable here too, and the
-    well-conditioned ones are exercised, not just the tau = 1000 limit."""
-    lambda_bar, b_bar = _model_modes(14)
+def test_the_rejected_fixtures_stay_rejected():
+    """REGRESSIONS. tau = 2 and tau = 5 with eps = 0 are unstable; the
+    second is the cell this file wrongly hard-coded as stable, whose
+    cluster-measured radius was 1.0787247827275395.
+
+    The witness used here is analytic and PRNG-free -- Abar = 0.9 e^{-2i} --
+    so the rejection reproduces anywhere.
+    """
+    from experiments.s5_direct_prospective import certification as CERT
+
     real = np.float64 if X64 else np.float32
-    for tau_value, eps, expected in CLUSTER_STABLE_CELLS:
-        tau = np.full(lambda_bar.shape, tau_value, dtype=real)
-        mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
-        A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass,
-                                             DP.PROFESSOR_LINEAR_TARGET)
-        radius = float(np.max(ORACLE.exact_companion_radius(A)))
-        where = _context(tau=tau_value, eps=eps,
-                         target_construction=DP.PROFESSOR_LINEAR_TARGET,
-                         radius=radius, cluster_radius=expected)
-        assert radius < 1.0, where
-    assert any(tau in WELL_CONDITIONED_TAU
-               for tau, _, _ in CLUSTER_STABLE_CELLS)
+    lambda_bar = np.asarray([0.9 * np.exp(-2.0j)], dtype=_complex())
+    b_bar = np.ones((1, 1), dtype=_complex())
+    for fixture in REJECTED_FIXTURES:
+        tau = np.full((1,), fixture["tau"], dtype=real)
+        A, _ = DP.professor_tss_state_coefficients(
+            lambda_bar, b_bar, tau, DP.PROFESSOR_LINEAR_TARGET)
+        radius = float(ORACLE.exact_companion_radius(A)[0])
+        where = _context(tau=fixture["tau"], eps=fixture["eps"],
+                         witness=fixture["witness"], radius=radius,
+                         cluster_radius=fixture["radius"],
+                         bound=CERT.RADIUS_BOUND)
+        assert radius > CERT.RADIUS_BOUND, where      # gate 1 rejects it
+        assert fixture["radius"] > 1.0, where         # so did the cluster
 
 
 def _first_nonfinite(values):
@@ -360,28 +386,43 @@ def test_sequential_finiteness_is_asserted_before_any_block_comparison():
     assert checked > 0, "no cell reached a block-versus-sequential comparison"
 
 
-def test_the_stable_cell_scan_matches_the_oracle_within_measured_conditioning():
-    """The stable real-builder cell, held to a tolerance DERIVED from the
-    operator's measured conditioning rather than a round number.
+def _verified_stable_model_cells(lambda_bar, b_bar, taus=TAU_CANDIDATES):
+    """Cells whose radius is VERIFIED below 1 on THESE modes.
 
-    The two implementations associate the same sum differently, so bitwise
-    equality is not expected; what is required is agreement within
-    safety * eps * peak^2, where peak = max_k ||H^(2^k)||_F is the transient
-    norm the squaring step actually reaches. Against exact rational ground
-    truth this bound held with ~3x margin at every length tested
-    (docs/analysis/direct_prospective_conditioning.txt).
+    This certifies nothing about production -- `certification.py` does that
+    over the whole inventory. It exists so a numerical-conditioning test has
+    a fixture whose stability is established rather than assumed, and every
+    cell it returns carries its measured radius.
     """
+    real = np.float64 if X64 else np.float32
+    found = []
+    for tau_value in taus:
+        for eps in (0.0, 0.25):
+            tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+            mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
+            A, _ = DP.matched_state_coefficients(
+                lambda_bar, b_bar, tau, mass, DP.PROFESSOR_LINEAR_TARGET)
+            radius = float(np.max(ORACLE.exact_companion_radius(A)))
+            if radius < 1.0:
+                found.append({"tau": tau_value, "eps": eps,
+                              "radius": radius,
+                              "target": DP.PROFESSOR_LINEAR_TARGET})
+    return found
+
+
+def test_the_stable_cell_scan_matches_the_oracle_within_measured_conditioning():
+    """Numerical conditioning, on cells whose stability is VERIFIED on the
+    very modes used -- never assumed, never taken from a list."""
     lambda_bar, b_bar = _model_modes(14)
     real = np.float64 if X64 else np.float32
     epsilon = 2.220446049250313e-16 if X64 else 1.1920929e-07
-    for cell in _stable_model_cells(lambda_bar, b_bar):
+    examined = 0
+    for cell in _verified_stable_model_cells(lambda_bar, b_bar):
         tau = np.full(lambda_bar.shape, cell["tau"], dtype=real)
         mass = DP.mass_from_eps(tau, np.asarray(cell["eps"], dtype=real))
         A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass,
                                              cell["target"])
         for length in (3, 17, 257, 1000):
-            # the BLOCK path is the production candidate; the doubling path
-            # is exercised only by its own labelled diagnostic below
             fast = DP.matched_states(lambda_bar, b_bar, _inputs(length, length),
                                      tau, mass, cell["target"],
                                      scan_kind="block", chunk=64)
@@ -391,13 +432,16 @@ def test_the_stable_cell_scan_matches_the_oracle_within_measured_conditioning():
             report = ORACLE.compare_finite_prefix(fast, slow)
             tolerance = ORACLE.doubling_scan_tolerance(A, length, epsilon)
             report.update(context=_context(
-                tau=cell["tau"], eps=cell["eps"],
+                tau=cell["tau"], eps=cell["eps"], radius=cell["radius"],
                 target_construction=cell["target"], length=length,
                 scan="block"), tolerance=tolerance)
-            print(report)                     # always visible with pytest -s
+            print(report)
             assert report["finite_masks_identical"], report
             assert report["common_finite_prefix"] == length, report
             assert report["max_relative_error_on_prefix"] <= tolerance, report
+            examined += 1
+    print({"cells_examined": examined,
+           "note": "zero means no cell of these modes was verifiably stable"})
 
 
 def test_the_doubling_scan_needs_float64_at_this_cell():
@@ -522,43 +566,126 @@ def test_the_M_zero_coefficient_identities_hold_for_every_target_construction():
             assert float(np.max(np.abs(C2))) == 0.0, where
 
 
-def test_the_M_zero_sequence_identity_on_stable_cells_with_the_block_scan():
-    """SEQUENCE-LEVEL M = 0 reduction, on ANALYTICALLY STABLE cells only,
-    through the BLOCK implementation -- never the rejected full-doubling
-    path:
+def _analytically_stable_M_zero_fixture(tau_value, modes=6):
+    """Modes DELIBERATELY CONSTRUCTED so the M = 0 recurrence is stable.
 
-        order-three WWJ at M = 0  ==  order-two Professor  ==  oracle
-
-    at lengths up to 16000.
+    For M = 0 the companion is z^2 - (a + c0 Abar) z + Abar with
+    a = 1 - h/tau, c0 = 1 + h/tau, so stability depends on Abar. Rather than
+    hoping a random draw is stable, candidate Abar values are scanned and
+    only those with radius <= 0.9 are kept; the test then asserts that bound
+    again on the assembled fixture. Nothing here is a claim about
+    production, which `certification.py` alone decides.
     """
-    lambda_bar, b_bar = _model_modes(15)
     real = np.float64 if X64 else np.float32
-    zero = np.zeros(lambda_bar.shape, dtype=real)
+    candidates = []
+    for magnitude in (0.2, 0.35, 0.5, 0.65, 0.8):
+        for angle in np.linspace(-np.pi, np.pi, 37):
+            lam = np.asarray([magnitude * np.exp(1j * float(angle))],
+                             dtype=_complex())
+            b = np.ones((1, 1), dtype=_complex())
+            tau = np.full((1,), tau_value, dtype=real)
+            A, _ = DP.professor_tss_state_coefficients(
+                lam, b, tau, DP.PROFESSOR_LINEAR_TARGET)
+            if float(ORACLE.exact_companion_radius(A)[0]) <= 0.9:
+                candidates.append(complex(lam[0]))
+            if len(candidates) >= modes:
+                break
+        if len(candidates) >= modes:
+            break
+    if not candidates:
+        return None, None
+    lambda_bar = np.asarray(candidates, dtype=_complex())
+    b_bar = np.ones((len(candidates), 2), dtype=_complex())
+    return lambda_bar, b_bar
+
+
+def test_the_M_zero_sequence_identity_on_an_analytically_stable_fixture():
+    """SEQUENCE-LEVEL M = 0 reduction, on a fixture whose stability is
+    constructed and then re-asserted, through the BLOCK implementation:
+
+        order-three WWJ at M = 0 == order-two Professor == sequential oracle
+
+    at lengths up to 16000. No production claim is made here.
+    """
+    real = np.float64 if X64 else np.float32
     target = DP.PROFESSOR_LINEAR_TARGET
     tolerance = TOL64 if X64 else TOL32
-    for tau_value in (5.0, 10.0, 50.0):
+    checked = 0
+    for tau_value in TAU_CANDIDATES:
+        lambda_bar, b_bar = _analytically_stable_M_zero_fixture(tau_value)
+        if lambda_bar is None:
+            print(_context(tau=tau_value,
+                           note="no mode of the scan is stable at this tau"))
+            continue
         tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+        zero = np.zeros(lambda_bar.shape, dtype=real)
         A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, zero,
                                              target)
         radius = float(np.max(ORACLE.exact_companion_radius(A)))
-        assert radius < 1.0, _context(tau=tau_value,
-                                      target_construction=target,
-                                      radius=radius)
+        where = _context(tau=tau_value, target_construction=target,
+                         radius=radius, modes=int(lambda_bar.shape[0]))
+        assert radius <= 0.9, where            # constructed AND verified
         for length in (17, 257, 4096, 16000):
-            where = _context(tau=tau_value, target_construction=target,
-                             length=length, scan="block", radius=radius)
-            inputs = _inputs(length, length)
+            here = _context(tau=tau_value, target_construction=target,
+                            length=length, radius=radius, scan="block")
+            inputs = _inputs(length, length, H=b_bar.shape[1])
             three = DP.matched_states(lambda_bar, b_bar, inputs, tau, zero,
                                       target, scan_kind="block", chunk=64)
             two = DP.professor_tss_states(lambda_bar, b_bar, inputs, tau,
                                           target, scan_kind="block",
                                           chunk=64)
-            assert bool(np.all(np.isfinite(three))), where
-            assert _close(three, two, tolerance), where
-            if length <= 4096:          # the oracle is a Python-level loop
+            assert bool(np.all(np.isfinite(three))), here
+            assert _close(three, two, tolerance), here
+            if length <= 4096:
                 oracle = ORACLE.professor_tss_sequential(lambda_bar, b_bar,
                                                          inputs, tau, target)
-                assert _close(two, oracle, tolerance), where
+                assert _close(two, oracle, tolerance), here
+            checked += 1
+    assert checked > 0, "no analytically stable M = 0 fixture was built"
+
+
+def test_the_M_zero_production_sequence_identity_only_for_certified_cells():
+    """The production version of the same identity, run ONLY on cells that
+    full-inventory certification returns PASS for. If there are none, the
+    result is RECORDED, not skipped silently and not replaced by a
+    fabricated candidate."""
+    from experiments.s5_direct_prospective import certification as CERT
+
+    inventory = CERT.production_mode_inventory(301)
+    certified = []
+    for tau_value in TAU_CANDIDATES:
+        row = CERT.gate_1_stability(inventory, tau_value, 0.0, 2)
+        row["tau"] = tau_value
+        print({"tau": tau_value, "verdict": "PASS" if row["passes"]
+               else "REJECT", "max_radius": row["max_radius_over_all_modes"],
+               "worst_mode": row["worst_mode"],
+               "modes_certified": row["modes_certified"]})
+        if row["passes"]:
+            certified.append(row)
+    if not certified:
+        print({"status": "NO_ELIGIBLE_CELL_IN_THE_PRODUCTION_INVENTORY",
+               "seed": 301, "tau_candidates": list(TAU_CANDIDATES)})
+        return
+    real = np.float64 if X64 else np.float32
+    entry = inventory[0]
+    for row in certified:
+        tau = np.full(entry["lambda_bar"].shape, row["tau"], dtype=real)
+        zero = np.zeros(entry["lambda_bar"].shape, dtype=real)
+        for length in (257, 4096):
+            here = _context(tau=row["tau"], length=length, seed=301,
+                            target_construction=DP.PROFESSOR_LINEAR_TARGET,
+                            max_radius=row["max_radius_over_all_modes"])
+            inputs = _inputs(length, length, H=entry["b_bar"].shape[1])
+            three = DP.matched_states(entry["lambda_bar"], entry["b_bar"],
+                                      inputs, tau, zero,
+                                      DP.PROFESSOR_LINEAR_TARGET,
+                                      scan_kind="block", chunk=64)
+            two = DP.professor_tss_states(entry["lambda_bar"], entry["b_bar"],
+                                          inputs, tau,
+                                          DP.PROFESSOR_LINEAR_TARGET,
+                                          scan_kind="block", chunk=64)
+            assert bool(np.all(np.isfinite(three))), here
+            assert _close(three, two, TOL64 if X64 else TOL32), here
 
 
 def test_unstable_cells_are_rejected_by_the_gate_not_compared_as_arrays():

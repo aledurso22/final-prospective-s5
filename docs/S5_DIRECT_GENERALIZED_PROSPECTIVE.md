@@ -381,7 +381,46 @@ amplified by later boundary applications.
 **That provisional conclusion was too pessimistic, and is corrected below.**
 It was drawn from τ = 1000 alone, which is the *weak, nearly marginal* limit.
 
-## 6c-ter. WITHDRAWN AGAIN: §6c-bis was subset certification, not certification
+## 6c-quater. One source of truth for stability, and the lists are gone
+
+Three failures in a row had the same cause: a **list of "stable τ values"
+maintained somewhere other than the certifier**. τ = 2 and τ = 5 were called
+stable from small random mode draws; then this suite hard-coded
+`(5.0, 10.0, 50.0)` as stable *in the same commit whose header had already
+withdrawn τ = 5*, and the cluster duly found ρ = 1.0787247827275395 at τ = 5,
+ε = 0 on its own fixture.
+
+Corrections now in place:
+
+* **`experiments/s5_direct_prospective/certification.py` is the single
+  source of truth.** Tests, the chunk study and any eventual training
+  selection consume its output; a test asserts that no
+  `WELL_CONDITIONED_TAU`, `CLUSTER_STABLE_CELLS` or `_stable_model_cells`
+  survives anywhere.
+* **Eligibility is whole-inventory, over seeds 301, 302 and 303**: every
+  layer, every mode, both directions (S5's reverse branch shares a layer's
+  `Lambda_bar`/`B_bar`, recorded in the inventory). `certify_seeds` passes
+  only if every mode of every seed passes; `eligible_cells` certifies every
+  candidate τ and may legitimately return **none**.
+* **ρ > 1 is rejected outright.** The earlier `1 + 1e-5` allowance is
+  withdrawn — a finite 4 000-token rollout does not make ρ = 1.0063 stable.
+  This is a tightening; the threshold is never loosened.
+* **M = 0 verification is split three ways**: the coefficient identity for
+  every target construction and τ, independent of stability; the full
+  sequence identity on a fixture whose modes are *constructed* to be stable
+  and then re-verified (ρ ≤ 0.9); and the production sequence identity only
+  for cells certification returns PASS for — with
+  `NO_ELIGIBLE_CELL_IN_THE_PRODUCTION_INVENTORY` printed if there are none.
+* **Rejected cells assert gate-1 rejection**, optionally with a sequential
+  finite-prefix comparison; full unstable sequences are never compared.
+* **Regressions** preserve both rejected fixtures: τ = 2, ε = 0 (ρ = 1.4416,
+  divergence at token 242) and τ = 5, ε = 0 (cluster ρ = 1.0787247827275395),
+  using the PRNG-free analytic witness Ā = 0.9·e^{−2i}.
+* `experiments/s5_direct_prospective/certification_table.py` emits **one
+  consolidated table** for both models over seeds 301–303: worst seed,
+  worst layer, worst mode, its Ā, the maximum radius, and PASS/REJECT.
+
+## 6c-ter. WITHDRAWN: §6c-bis was subset certification, not certification
 
 **The τ = 2, 5, 10 "well-conditioned" conclusion below is withdrawn.** It was
 measured on two representative modes (angles 0 and 0.46 rad) and the

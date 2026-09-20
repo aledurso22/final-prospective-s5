@@ -42,16 +42,10 @@ from s5.ssm import discretize_zoh
 
 CHUNKS = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 ORDERS = {"professor_tss": 2, "wwj_generalized_tss": 3}
-#: every cell the cluster measured as stable, NOT only the weak tau = 1000
-#: limit: (tau, measured radius at eps = 0, measured radius at eps = 1/4)
-CLUSTER_STABLE_CELLS = (
-    (2.0, 0.9512748075, 0.9923729495),
-    (5.0, 0.8294413371, 0.8776972719),
-    (10.0, 0.8990310402, 0.8851554058),
-    (50.0, 0.9799557162, 0.9662813133),
-    (100.0, 0.9899888330, 0.9819794261),
-    (1000.0, 0.9989998876, 0.9980477225),
-)
+#: tau values to CONSIDER. Not a list of stable values: every one is
+#: certified over the whole production inventory by `certification.py`
+#: before anything is measured, and rejected cells are skipped.
+TAU_CANDIDATES = CERT.TAU_CANDIDATES
 #: |H^C| is what decides whether a chunk size is usable in float32: off
 #: cluster, |H^64| = 2.0 at tau = 5 (block matches sequential to 4x) and
 #: 9.4e2 at tau = 1000 (block fails). The rule below is applied in code.
@@ -210,13 +204,17 @@ def main():
                        "target": DP.PROFESSOR_LINEAR_TARGET},
               "chunks": list(CHUNKS), "results": []}
     for model in ORDERS:
-        for tau_value, radius_zero, radius_critical in CLUSTER_STABLE_CELLS:
+        for tau_value in TAU_CANDIDATES:
             if args.taus and tau_value not in args.taus:
                 continue
             order = ORDERS[model]
             eps = 0.0 if order == 2 else 0.25
-            # GATE 1 over EVERY production mode, before anything is measured
-            certificate = CERT.certify(inventory, tau_value, eps, order)
+            # GATE 1 over EVERY production mode of EVERY seed, before
+            # anything is measured. certification.py is the only authority.
+            certificate = CERT.certify_seeds(tau_value, eps, order)
+            if certificate["passes"]:
+                certificate.update(CERT.certify(inventory, tau_value, eps,
+                                                order))
             if certificate["status"] != "CHUNK_SELECTED":
                 report["results"].append({
                     "model": model, "tau": tau_value,
@@ -230,9 +228,6 @@ def main():
                     "model": model, "tau": tau_value, "length": length,
                     "certificate": certificate,
                     "adaptive_chunk": certificate["chunk_selection"],
-                    "subset_radius_reported_earlier":
-                        (radius_zero if model == "professor_tss"
-                         else radius_critical),
                     "baseline": baseline, "rows": rows})
     # the decision rule, applied by code
     acceptable = []
