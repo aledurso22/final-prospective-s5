@@ -25,230 +25,201 @@ by `scan_companion_sequential`, a rematerialized sequential `lax.scan` over
 16,000 tokens, which is orders of magnitude too slow. Those artifacts stay
 where they are and keep their labels: **they are not WWJ results**.
 
-## 2. The continuous law
+## 2. The mixed-stencil realization was REJECTED
 
-The Euclidean WWJ/Bregman residual equation applies one second-order
-operator to the **complete** residual:
+The first WWJ realization discretized `P(D)(s−f)=0` with **different**
+stencils on the state and the target. It was rejected on the cluster at
+commit `bfe53fe758c40f5217617c5f93f7b3c4c0498f77`, on the actual
+production-initialized S5 modes:
 
-$$P(D)(s-f)=0,\qquad P(D)=1+\tau D+MD^{2},\qquad M=\varepsilon\tau^{2},$$
+```
+status: NO_ADMISSIBLE_INITIALIZATION      (nothing selected)
+critical eps = 0.25:
+  k=0.05  max companion radius 1.7054537181
+  k=0.10  max companion radius 1.7050817610
+  k=0.25  max companion radius 1.7061925973
+  k=0.50  max companion radius 1.7181166321
+  k=1.00  max companion radius 1.8767736156
+float32 production path: NaN. float64 states reached about 1e81.
+```
 
-that is
+Every coefficient was finite; **every declared cell was unstable**, including
+the smallest timescale. This was not a tolerance problem, not an
+initialization search that needed widening, and not something a smaller grid
+value fixes.
 
-$$M\ddot s+\tau\dot s+s \;=\; f+\tau\dot f+M\ddot f .$$
+**Why, mathematically.** `P(D)(s−f)=0` is `P(D)s = P(D)f`, so for matched
+initial conditions the transfer function is
 
-The `M f̈` term on the right is exactly what the older two-compartment
-generalized equation (`s5/generalized_prospective_ssm.py`, an
-(M, γ, T) system) does not have. They are different equations, so they are
-different arms, and neither is a version of the other.
+$$S/F = 1 .$$
 
-## 3. The realization is a mixed-stencil discretization, not that equation
+The exactly matched residual law controls only **homogeneous residual
+transients**; it creates **no persistent prospective transformation of $f$**.
+(And if $f$ depends on the current state, an exact discrete form additionally
+risks becoming an implicit target-manifold constraint.) The mixed-stencil
+construction escaped that cancellation only by applying different discrete
+derivatives to $s$ and to $f$ — so its extra poles were **artefacts of the
+discretization**, and the cluster showed those artefacts are unstable for the
+real S5 modes.
 
-The implemented update is an explicit **causal, mixed-stencil (IMEX-type)**
-discretization, consistent with §2 but **not** the exact finite-step
-identity $P(D_h)(s-f)=0$: the state uses forward stencils and the target
-uses backward ones.
+It is preserved, with this evidence, as a failed diagnostic/ablation:
+`s5/wwj_mixed_stencil.py`, `s5/wwj_mixed_stencil_ssm.py`, arm identifier
+`wwj_mixed_stencil_unstable_diagnostic`, tests in
+`tests/test_wwj_mixed_stencil_algebra.py` (the algebra, which is still
+correct) and `tests/test_wwj_mixed_stencil_rejected.py` (which now **asserts
+the instability** instead of expecting finiteness). It is not a principal
+arm, `experiments/s5_wwj/wwj_model.py` refuses to construct it, and the
+launcher refuses it by name. It is **not production viable** and must never
+be described as such.
 
-$$\dot s_t\approx\frac{s_{t+1}-s_t}{h},\quad
-\ddot s_t\approx\frac{s_{t+1}-2s_t+s_{t-1}}{h^{2}},\quad
-\dot f_t\approx\frac{f_t-f_{t-1}}{h},\quad
-\ddot f_t\approx\frac{f_t-2f_{t-1}+f_{t-2}}{h^{2}}.$$
+## 3. The corrected architecture: Native memory, exact discrete WWJ readout
 
-Multiplying the equation by $h^2$ and collecting terms (rederived, not
-copied — the same derivation is in the module docstring and is verified in
-exact rational arithmetic by `tests/test_wwj_algebra.py`):
+The Native S5 memory is untouched,
 
-$$(M+h\tau)s_{t+1}+(h^{2}-2M-h\tau)s_t+Ms_{t-1}
-=(M+h\tau+h^{2})f_t-(2M+h\tau)f_{t-1}+Mf_{t-2},$$
+$$s_{t+1}=\bar A s_t+\bar B x_t,$$
 
-so with $q=M+h\tau$,
+and the WWJ operator is applied to that trajectory with **one consistent
+backward derivative**,
 
-$$s_{t+1}=a s_t-b s_{t-1}+c_0f_t+c_1f_{t-1}+c_2f_{t-2},$$
-$$a=\frac{2M+h\tau-h^{2}}{q},\quad b=\frac{M}{q},\quad
-c_0=\frac{M+h\tau+h^{2}}{q},\quad c_1=-\frac{2M+h\tau}{q},\quad
-c_2=\frac{M}{q}.$$
+$$D_hs_t=\frac{s_t-s_{t-1}}{h},\qquad
+D_h^2s_t=\frac{s_t-2s_{t-1}+s_{t-2}}{h^2},$$
 
-**Boundary.** $M=0$ gives exactly
-$s_{t+1}=(1-\tfrac h\tau)s_t+(1+\tfrac h\tau)f_t-f_{t-1}$, which is checked
-as an exact rational identity.
+which satisfies $D_h(D_hs)=D_h^2s$ exactly — the property the mixed-stencil
+form lacked. With $k=\tau/h$ and $m=M/h^2=\varepsilon k^2$,
 
-$h=1$ **token**. It is deliberately **not** identified with S5's learned
-continuous-time step $\Delta$, which enters only through $\bar A,\bar B$.
+$$z_t=P(D_h)s_t=(1+k+m)s_t-(k+2m)s_{t-1}+ms_{t-2}.$$
 
-**Passive factorization.** $P(D)=(1+t_+D)(1+t_-D)$ with
-$t_\pm=\tfrac\tau2(1\pm\sqrt{1-4\varepsilon})$ is an exact **continuous**
-identity on $0\le\varepsilon\le\tfrac14$. It is *not* used as an
-implementation shortcut: two discrete first-order factors reproduce the
-update above only if both use the same discrete derivative, and here the
-state and target stencils differ. The factorization is tested as an identity
-about $\tau$ and $M$, and used for nothing else.
+This is the **exact discrete WWJ operator**, not an approximation of one. It
+is FIR: three taps, finite support, **zeros and no poles**.
 
-## 4. Native-matched target and the order-3 recurrence
+**Exact recurrent realization.** With $q_t=[s_t;s_{t-1};s_{t-2}]$,
 
-With $f_t=F_\tau s_t+G_\tau x_t$, $F_\tau=I+\tfrac\tau h(\bar A-I)$,
-$G_\tau=\tfrac\tau h\bar B$, substitution gives
+$$q_{t+1}=\begin{bmatrix}\bar A&0&0\\ I&0&0\\ 0&I&0\end{bmatrix}q_t
++\begin{bmatrix}\bar Bx_t\\0\\0\end{bmatrix},\qquad
+z_t=\begin{bmatrix}(1+k+m)I&-(k+2m)I&mI\end{bmatrix}q_t,$$
 
-$$s_{t+1}=A_0s_t+A_1s_{t-1}+A_2s_{t-2}+C_0x_t+C_1x_{t-1}+C_2x_{t-2},$$
-$$A_0=aI+c_0F_\tau,\quad A_1=-bI+c_1F_\tau,\quad A_2=c_2F_\tau,\quad
-C_i=c_iG_\tau .$$
+so this is a genuine recurrent state-space S5 layer carrying the WWJ
+generalized-prospective coordinate. The transition is block lower triangular
+with diagonal blocks $\bar A,0,0$, so its characteristic polynomial is
+$(z-\lambda)z^2$: **the recurrent poles are exactly the Native poles plus two
+zero history-shift poles.** WWJ cannot destabilize what Native S5 does not
+already do. `tests/test_wwj_operator_algebra.py` computes that determinant
+rather than asserting it in prose.
 
-Both forms are checked coefficient-by-coefficient in exact arithmetic by
-evaluating the (linear) difference on a basis of
-$(s_t,s_{t-1},s_{t-2},x_t,x_{t-1},x_{t-2})$.
+**Implementation.** The augmented matrix is never scanned. The ordinary,
+optimized Native S5 parallel scan runs first — literally
+`jax.lax.associative_scan(s5.ssm.binary_operator, …)`, the same primitive
+`apply_ssm` uses — and the three-tap is applied to its states, an $O(LP)$
+elementwise pass with no loop, no scan and no rematerialization. Equality
+with the augmented realization is proved in exact rational arithmetic and
+checked numerically against a sequential oracle at production width.
 
-**Prehistory** is zero: $s_{-1}=s_{-2}=0$, $x_{-1}=x_{-2}=0$, and the tests
-check that an impulse at $t$ influences nothing before $t$ — no wraparound.
-For **bidirectional** layers the same causal recurrence runs on the reversed
-input sequence and is flipped back; no forward-history shift is ever applied
-to a concatenated state.
+**Boundaries.** Zero prehistory, $s_{-1}=s_{-2}=0$, with no wraparound at
+either end. For **bidirectional** layers the Native suffix scan is used and
+the three-tap is applied in that direction's own causal order, then flipped
+back; no forward-history shift touches a concatenated state. $h=1$ **token**,
+never identified with S5's learned $\Delta$.
 
-## 5. The scan: a real parallel prefix, no per-token matrices
+**Passive factorization.** $P(D_h)=(1+t_+D_h)(1+t_-D_h)$ with
+$t_\pm=\tfrac\tau2(1\pm\sqrt{1-4\varepsilon})$ is **exact here** — both
+stages use the same discrete derivative — and applying the two stages
+sequentially with zero prehistory reproduces the three-tap exactly. Proved,
+not assumed.
 
-$F_\tau$ is diagonal in the mode basis, so $A_0,A_1,A_2$ are diagonal and
-each mode carries a scalar order-3 recurrence whose companion matrix
+**$\tau\to0$ recovers Native S5 exactly**: $k=m=0$ makes the operator the
+identity.
 
-$$H=\begin{bmatrix}A_0&A_1&A_2\\1&0&0\\0&1&0\end{bmatrix}$$
-
-is **constant in time**. The associative composition
-$(H_2,d_2)\circ(H_1,d_1)=(H_2H_1,H_2d_1+d_2)$ then collapses: a
-Hillis–Steele doubling
-
-$$v\leftarrow v+H^{(2^{k})}\,\mathrm{shift}(v,2^{k}),\qquad
-H^{(2^{k+1})}=\big(H^{(2^{k})}\big)^{2}$$
-
-computes every prefix in $\lceil\log_2 L\rceil$ levels while carrying **one
-3×3 matrix per mode per level** — never an $L\times P\times3\times3$ tensor.
-The invariant
-$v^{(k)}_t=\sum_{j=t-2^{k}+1}^{t}H^{t-j}d_j$ is proved in the module
-docstring and verified exactly, in rational arithmetic, against a sequential
-rollout for lengths 1…100 including non-powers of two.
-
-The production path calls neither `scan_companion` nor
-`scan_companion_sequential`, contains no loop over tokens, and does not
-rematerialize the rollout per step.
-
-**Memory: three different quantities, only one of them established.**
-
-| quantity | status |
-|---|---|
-| forward live storage | $O(LP\cdot 3)$: the lifted state and one shifted copy. Established by construction. |
-| backward (autodiff residual) storage | **not** $O(LP)$. With `remat="level"` (the default) each level recomputes its internals, but reverse mode still needs every level **boundary**, so residuals are bounded by about $\lceil\log_2L\rceil$ arrays of size $LP\cdot3$, i.e. $O(LP\log L)$, unless XLA elides some. Per-level checkpointing improves the constant, not the log factor. |
-| measured peak device memory | **unknown until the GPU benchmark runs.** It is the authority. |
-
-An earlier version of this document claimed the $(L,P,3)$ state was the only
-large array under per-level checkpointing. That was wrong and is withdrawn.
-
-`remat="whole"` is available and keeps only the scan's inputs, giving
-$O(LP\cdot3)$ residuals at roughly twice the forward flops. If the benchmark
-shows the residuals are too large, the response is that switch, a coarser
-rematerialization region, or a custom VJP for the structured recurrence —
-**never** a change to the mathematics.
-
-**No eigendecomposition** is used anywhere in the forward or backward path.
-The companion spectral radius, a diagnostic, is computed as
-$\lVert H^{n}\rVert_F^{1/n}$ with $n=1024$ by repeated squaring with the
-magnitude carried in the log: submultiplicativity means it never
-*understates* the radius, it needs no branch choice, it cannot overflow for
-unstable modes, and `jnp.linalg.eigvals` (unavailable on the GPU backend) is
-avoided entirely.
-
-## 6. The arms
+## 4. The arms
 
 | code identifier | what it is |
 |---|---|
-| `native_matched_s5` | Native S5. Control. **Unchanged, byte for byte, including its code path.** |
-| `generalized_prospective_s5` | the OLD two-compartment (M, γ, T) arm. Frozen, kept for comparison, keeps its own partial results. Not a WWJ arm. |
-| `wwj_critical_s5` | new. $M=\tau^{2}/4$, $\varepsilon$ fixed at the critical value. |
-| `wwj_passive_s5` | new. $M=\varepsilon\tau^{2}$, $\varepsilon=\tfrac14\sigma(\cdot)\in(0,\tfrac14)$ learned. |
-| `wwj_unconstrained_s5_diagnostic` | **diagnostic only**, $\varepsilon$ unbounded above, possibly underdamped. Not the biological model; any result from it is reported as a diagnostic. |
+| `native_matched_s5` | Native S5. Control. **Byte-identical, untouched.** |
+| `generalized_prospective_s5` | the OLD two-compartment (M, γ, T) arm. Frozen, keeps its own partial results. Not a WWJ arm. |
+| `wwj_critical_s5` | **principal.** $M=\tau^2/4$, $\varepsilon=1/4$ fixed. |
+| `wwj_passive_s5` | **principal.** $M=\varepsilon\tau^2$, $\varepsilon=\tfrac14\sigma(\cdot)\in(0,\tfrac14)$ learned. |
+| `wwj_gated_recoverable_s5_diagnostic` | **diagnostic.** $\tilde s_t=s_t+g[k(s_t-s_{t-1})+m(s_t-2s_{t-1}+s_{t-2})]$, i.e. $s+g(z-s)$. A **separate intervention**: the direct arm only at $g=1$, Native only at $g=0$. Never described as identical to the direct arm. |
+| `wwj_mixed_stencil_unstable_diagnostic` | **REJECTED**, §2. Failed ablation, never in a launcher. |
 
-Parameterization: $\tau=\mathrm{TAU\_MIN}+\mathrm{softplus}(\cdot)>0$, so
-$q=M+h\tau\ge h\cdot 10^{-3}$ and can never approach zero.
-**Granularity is declared**: one $\tau$ (and one $\varepsilon$) per S5
-**layer**, broadcast across that layer's modes — deliberately different from
-the older per-mode arms, and stated rather than silently changed.
+Readout for the principal arms: $y_t=Cz_t+Dx_t$ (with the conjugate-symmetry
+factor `apply_ssm` uses).
 
-Recurrence eigenvalues are **never** clipped or projected after an update.
-If a projection is ever needed it will be defined mathematically and run as
-its own declared intervention.
+Parameterization: $\tau=\text{TAU\_MIN}+\text{softplus}(\cdot)>0$,
+$\varepsilon=\tfrac14\sigma(\cdot)$, **one $\tau$ and one $\varepsilon$ per
+layer**, declared. No eigenvalue is projected after an update — with an FIR
+operator there is nothing to project. The WWJ parameters keep their own
+optimizer group at **0.1×** `ssm_lr` with **no weight decay**; the rest is
+the production `noBCdecay` configuration.
 
-Optimizer safeguards for $\tau,\varepsilon$ (in
-`experiments/s5_wwj/wwj_model.py`, WWJ-only): their own optimizer group at
-**0.1×** `ssm_lr`, **no weight decay** (decay pulls the *raw* value toward an
-arbitrary timescale, not toward zero), everything else exactly the
-production `noBCdecay` configuration, including the absence of global
-gradient clipping.
+## 5. Initialization: FIR gain and gradients, not companion radii
 
-## 7. Initialization is chosen before any performance is seen
+Because the operator adds no poles, `experiments/s5_wwj/init_grid.py` no
+longer selects on companion radii. It sweeps $k\in\{0.01,0.05,0.1,0.25,0.5,1\}$
+and $\varepsilon\in\{0,1/16,1/4\}$ over the actual initialized modes and
+records: the **Native** $|\bar A_j|$ radii (unchanged by WWJ), the maximum
+FIR gain
+$\max_\omega|P_h(e^{i\omega})|$ with
+$P_h(e^{i\omega})=1+k(1-e^{-i\omega})+m(1-e^{-i\omega})^2$ over a dense grid,
+finiteness of the forward pass, and the **finite, non-vanishing** gradients
+of a probe loss with respect to the raw WWJ parameters.
 
-`experiments/s5_wwj/init_grid.py` sweeps $k=\tau/h\in\{0.05,0.1,0.25,0.5,1\}$
-and $\varepsilon\in\{0,1/16,1/4\}$ over the **actual initialized S5 modes**,
-records the companion spectral radius of **every mode of every layer**, and
-applies a rule declared in that file's docstring: admissible = max radius
-≤ 0.98 and all coefficients finite; choose the **largest admissible $k$ at
-the critical $\varepsilon=1/4$**; the passive arm starts at that $k$ with
-$\varepsilon=1/16$. If nothing is admissible it reports
-`NO_ADMISSIBLE_INITIALIZATION` and selects nothing. No validation or test
-number is consulted.
+Declared rule: admissible = finite forward ∧ max FIR gain ≤ **3.0** ∧ finite
+WWJ gradients with relative magnitude > **1e-8**; among admissible cells at
+the critical $\varepsilon=1/4$ take the **smallest** $k$ — start close to
+Native, since $\tau\to0$ *is* Native, with the gradient floor preventing
+"close to Native" from meaning "cannot learn". The passive arm starts at that
+$k$ with $\varepsilon=1/16$. Nothing admissible → `NO_ADMISSIBLE_INITIALIZATION`
+and no selection. No validation or test number enters the rule.
 
-## 8. Gates before any training
+## 6. Gates before any training
 
-**Both principal arms are gated separately.** `wwj_critical_s5` and
-`wwj_passive_s5` each run the JAX correctness suite, the performance gate
-and the developmental gate, into their own artifact directories
-(`<run>/<arm>/benchmark.json`, `<run>/<arm>/dev_gate/dev_gate.json`). A
-critical-arm pass authorizes **nothing** about the passive arm. The
-initialization grid runs once and is shared, because it depends only on the
-initialized S5 modes.
+Both principal arms are gated **separately**, into their own artifact
+directories; a critical pass authorizes nothing about the passive arm. The
+initialization grid runs once and is shared.
 
-**Performance gate** (`experiments/s5_wwj/benchmark.py`), Native vs one WWJ
-arm on
-the same GPU, same batch 16, length 16,000, width 96, depth 6,
-bidirectional, same update and precision. It reports compile time
-separately, steady-state steps/minute, peak GPU memory, forward time,
-backward time, the ratio to Native, and the projected 15-epoch wall clock
-with three seeds concurrent. It authorizes training only if: the
-production-shaped step completes; peak memory ≤ 80% of the device; loss,
-gradients and states finite; the scan matches the sequential oracle; the
-projection fits the allocation with ≥ 25% margin; and WWJ throughput is
-≥ 0.5× Native. **Below that ratio the instruction is to optimize the scan,
-not to start training.**
+**Performance gate** (`experiments/s5_wwj/benchmark.py`): Native vs one WWJ
+arm, same GPU, batch 16, length 16 000, width 96, depth 6, bidirectional,
+same update and precision. Reports compile time separately, steady-state
+steps/minute, peak GPU memory, forward and backward time, the ratio to
+Native, and the projected 15-epoch wall clock. Authorizes training only if
+the production-shaped step completes; peak memory ≤ 80% of the device;
+everything finite; the optimized path matches **both** the sequential oracle
+and the augmented realization; the projection fits with ≥ 25% margin; and
+throughput ≥ **0.80×** Native — raised from 0.50 because the expensive part
+is now the existing optimized Native scan and WWJ adds only an $O(LP)$
+three-tap. Below the floor: optimize, do not train.
+
+**What the projection covers** is stated, not implied:
+`hours_one_arm_wave_three_concurrent_seeds`,
+`hours_both_wwj_arms_sequential`, `waves_planned`, `hours_planned`, `covers`,
+`excludes` (the Native and Zucchet waves are in neither number). `--waves`
+declares the plan and the time gate applies to `hours_planned`.
 
 **Developmental gate** (`experiments/s5_wwj/dev_gate.py`): production-shaped
-initialization and compilation, two genuine optimizer updates, a fixed
-training subset swept three times, checkpoint save and reload, and
-validation — never the test split. It passes only if everything stays
-finite, the subset loss falls by ≥ 2%, the companion radii stay ≤ 1.05, and
-the checkpoint restores. **This is a developmental result and is reported
-separately from any scientific one.**
+initialization and compilation, two genuine optimizer updates, a fixed subset
+swept three times, checkpoint save and reload, validation — never the test
+split. Passes only if everything stays finite, the subset loss falls by ≥ 2%,
+the FIR gain stays ≤ 3.0, the Native radii stay inside the unit disc, and the
+checkpoint restores. Reported as **developmental only**.
 
-Diagnostics recorded per task and checkpoint: $\tau$, $\varepsilon$,
-$M=\varepsilon\tau^2$, the companion spectral radius of every mode, state
-and gradient norms, nonfinite counters, throughput, peak GPU memory,
-validation accuracy and cross-entropy, the recurrence coefficients, the
-continuous $P(\lambda)=1+\tau\lambda+M\lambda^{2}$, and — separately
-labelled — the discrete-time transfer function of the *implemented*
-recurrence,
-$S(z)/U(z)=(c_0+c_1z^{-1}+c_2z^{-2})/(z-A_0-A_1z^{-1}-A_2z^{-2})$.
+Diagnostics per task and checkpoint: $\tau$, $\varepsilon$, $M$, $k$, $m$,
+the max FIR gain and the response on a coarse frequency grid, the **Native**
+per-mode radii, state/output/gradient norms, nonfinite counters, throughput,
+peak GPU memory, validation accuracy and cross-entropy, and the gate value
+for the gated diagnostic arm.
 
 $P(\lambda)=0$ is **not** a target: exact cancellation would delete that
 mode's memory. The hypothesis is partial temporal compensation with useful
 long-delay information preserved.
 
-## 9. Optional continuation diagnostic
+## 7. What has not been measured
 
-If direct WWJ training is unstable, the update may be interpolated from
-Native, $(1-g)\,\text{Native}+g\,\text{WWJ}$ with $g$ scheduled to reach
-exactly 1. It is **not** implemented as a principal arm here, changes the
-training protocol, and would be reported separately.
-
-## 10. What has not been measured yet
-
-No benchmark number exists: producing one needs an RTX 3090, and it is the
-cluster's job, not this commit's. The JAX-level tests
-(`tests/test_wwj_recurrence.py`) likewise need JAX, which the development
-machine does not have; the coefficient algebra and the scan algorithm are
-nevertheless proved here in exact rational arithmetic without JAX
-(`tests/test_wwj_algebra.py`), so what remains to be confirmed on the
-cluster is the JAX implementation of proven algebra, not the algebra.
+No throughput, memory or learning number exists for this architecture: that
+needs the RTX 3090 and is the cluster's job, not this commit's. Peak device
+memory is likewise **unknown until the GPU benchmark runs**; it is the
+authority. The JAX-level tests (`tests/test_wwj_ssm.py`) need JAX, which the
+development machine does not have; the mathematics is nevertheless proved
+here in exact rational arithmetic without JAX
+(`tests/test_wwj_operator_algebra.py`), so what the cluster confirms is the
+implementation of proven algebra.
 
 Nothing in this commit launches anything.

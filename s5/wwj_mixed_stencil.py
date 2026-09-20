@@ -1,5 +1,41 @@
 """WWJ prospective recurrence: coefficients, parallel scan and diagnostics.
 
+REJECTED REALIZATION -- KEPT ONLY AS A FAILED DIAGNOSTIC/ABLATION.
+
+Cluster evidence, commit bfe53fe758c40f5217617c5f93f7b3c4c0498f77, on the
+actual production-initialized S5 modes:
+
+    status: NO_ADMISSIBLE_INITIALIZATION      (no cell selected)
+    critical eps = 0.25:
+      k=0.05  max companion radius 1.7054537181
+      k=0.10  max companion radius 1.7050817610
+      k=0.25  max companion radius 1.7061925973
+      k=0.50  max companion radius 1.7181166321
+      k=1.00  max companion radius 1.8767736156
+    float32 production path: NaN; float64 states reached about 1e81.
+
+All coefficients were finite: this is not a tolerance problem and not an
+initialization search that needs widening. Every declared cell is unstable,
+including the smallest timescale.
+
+WHY, MATHEMATICALLY. P(D)(s - f) = 0 is P(D)s = P(D)f, so with matched
+initial conditions S/F = 1: the exactly matched residual law controls only
+homogeneous residual transients and produces NO persistent prospective
+transformation of f. (If f depends on the current state, an exact discrete
+form additionally risks becoming an implicit target-manifold constraint.)
+This realization escaped that cancellation only by applying DIFFERENT
+discrete derivatives to s and to f, so its extra poles are artefacts of the
+discretization -- and the cluster showed those poles are unstable for the
+real S5 modes.
+
+The mathematics in this file is still correct as a discretization, and the
+exact-arithmetic tests of it still pass; what failed is its suitability. The
+principal architecture is now `s5/wwj_operator.py` and `s5/wwj_ssm.py`: the
+Native S5 recurrence untouched, with the exact discrete WWJ operator applied
+to its trajectory as an FIR three-tap, adding zeros and no poles.
+
+This file must never be used in a production launcher.
+
 THE CONTINUOUS LAW. The Euclidean WWJ/Bregman residual equation applies one
 second-order operator to the COMPLETE residual,
 

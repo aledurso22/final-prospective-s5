@@ -20,7 +20,11 @@ THE GATE (all of it must hold, or full training is not authorized):
      wall time of the whole WWJ experiment;
   6. WWJ throughput is at least THROUGHPUT_FLOOR of Native throughput.
 
-Failing 6 means the scan needs optimizing, not that training should start.
+The floor is 0.80, not the earlier 0.50, because the architecture changed:
+the expensive part is now the EXISTING optimized Native S5 scan and the WWJ
+addition is an O(L*P) three-tap, so throughput should be near Native.
+Failing 6 means the implementation needs optimizing, not that training
+should start.
 """
 
 import argparse
@@ -38,7 +42,7 @@ from experiments.s5_wwj.wwj_model import (create_wwj_train_state,
 #: gate constants, declared before the measurement
 MEMORY_CEILING_FRACTION = 0.80
 TIME_MARGIN = 0.25
-THROUGHPUT_FLOOR = 0.50
+THROUGHPUT_FLOOR = 0.80
 #: the protocol this benchmark projects
 EPOCHS = 15
 TRAIN_EXAMPLES = 30769
@@ -139,10 +143,13 @@ def measure(label, state, model, eval_model, steps, seed):
     }
 
 
-def scan_matches_oracle(seed=301, length=256):
-    """The production-width scan against the frozen sequential oracle."""
-    from tests import wwj_sequential_reference as ORACLE
-    from s5.wwj_recurrence import mass_from_eps, wwj_states
+def scan_matches_oracle(seed=301, length=256, tau=0.05, eps=0.25):
+    """The optimized path against the frozen sequential oracle, at production
+    width -- and against the AUGMENTED recurrent realization, which is the
+    claim that matters: Native scan plus three-tap is not an approximation of
+    it."""
+    from s5.wwj_operator import k_and_m, wwj_states
+    from tests import wwj_operator_reference as ORACLE
 
     keys = jax.random.split(jax.random.PRNGKey(seed), 3)
     radius = 0.2 + 0.7 * jax.random.uniform(keys[0], (64,))
@@ -151,14 +158,18 @@ def scan_matches_oracle(seed=301, length=256):
     b_bar = jax.random.normal(keys[2], (64, RUNNER.D_MODEL)).astype(
         jnp.complex64)
     inputs = jax.random.normal(keys[0], (length, RUNNER.D_MODEL))
-    tau = jnp.full((64,), 0.25, dtype=jnp.float32)
-    mass = mass_from_eps(tau, jnp.asarray(0.25, dtype=jnp.float32))
-    fast = wwj_states(lambda_bar, b_bar, tau, mass, inputs)
-    slow = ORACLE.sequential_states(lambda_bar, b_bar, tau, mass, inputs)
-    error = float(jnp.max(jnp.abs(fast - slow)))
+    k, m = k_and_m(jnp.asarray(tau, dtype=jnp.float32),
+                   jnp.asarray(eps, dtype=jnp.float32))
+    fast = wwj_states(lambda_bar, b_bar, inputs, k, m)
+    slow = ORACLE.wwj_sequential(lambda_bar, b_bar, inputs, k, m)
+    augmented = ORACLE.augmented_sequential(lambda_bar, b_bar, inputs, k, m)
     scale = float(jnp.maximum(jnp.max(jnp.abs(slow)), 1.0))
-    return {"max_absolute_error": error, "relative_error": error / scale,
-            "tolerance": 2e-4, "matches": error / scale <= 2e-4}
+    oracle_error = float(jnp.max(jnp.abs(fast - slow))) / scale
+    augmented_error = float(jnp.max(jnp.abs(fast - augmented))) / scale
+    return {"relative_error_versus_oracle": oracle_error,
+            "relative_error_versus_augmented_realization": augmented_error,
+            "tolerance": 2e-4,
+            "matches": max(oracle_error, augmented_error) <= 2e-4}
 
 
 def project(steps_per_minute, compile_seconds, waves):
@@ -192,8 +203,11 @@ def gate(native, wwj, oracle, projection, allocation_hours):
     if not wwj["finite"]:
         problems.append("WWJ forward/backward/update produced a nonfinite value")
     if not oracle["matches"]:
-        problems.append("the parallel scan does not match the sequential "
-                        f"oracle: relative error {oracle['relative_error']:.3e}")
+        problems.append(
+            "the optimized path does not match the sequential oracle and "
+            "the augmented realization: relative errors "
+            f"{oracle['relative_error_versus_oracle']:.3e} / "
+            f"{oracle['relative_error_versus_augmented_realization']:.3e}")
     peak, limit = wwj["peak_gpu_bytes"], wwj["device_bytes"]
     if peak is None or limit is None:
         problems.append("GPU memory could not be measured")
@@ -268,7 +282,10 @@ def main():
                            "throughput_floor": THROUGHPUT_FLOOR},
         "historical_reference": {
             "old_generalized_steps_per_minute": 2.98,
-            "old_generalized_projected_hours": 154.73},
+            "old_generalized_projected_hours": 154.73,
+            "rejected_mixed_stencil":
+                "unstable on S5 modes (max companion radius ~1.705, float32 "
+                "NaN, float64 states ~1e81); not benchmarked"},
     }
     with open(args.out, "w") as handle:
         json.dump(report, handle, indent=2)

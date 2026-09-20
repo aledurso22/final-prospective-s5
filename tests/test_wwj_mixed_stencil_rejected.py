@@ -1,4 +1,19 @@
-"""The JAX implementation of the WWJ recurrence: scan, gradients, arms.
+"""The REJECTED mixed-stencil WWJ realization: kept as a failed ablation.
+
+Rejected on the cluster at commit bfe53fe, on production-initialized S5
+modes: NO_ADMISSIBLE_INITIALIZATION, max companion radius 1.7054537181 at
+k=0.05 rising to 1.8767736156 at k=1.00 with eps=1/4, float32 NaNs and
+float64 states to about 1e81. The two tests that asserted production-length
+finiteness and float32-versus-float64 agreement have been REPLACED by a test
+that asserts the instability, so the negative result is preserved as a fact
+rather than as a broken expectation.
+
+The JAX implementation of the PRINCIPAL architecture is tested in
+`test_wwj_ssm.py`.
+
+Original description follows.
+
+The JAX implementation of the WWJ recurrence: scan, gradients, arms.
 
 These tests need JAX and therefore run on the cluster, not on a laptop
 without it. The coefficient ALGEBRA and the scan ALGORITHM are proved
@@ -16,8 +31,8 @@ import subprocess
 import jax
 import jax.numpy as np
 
-from s5 import wwj_prospective_ssm as ARMS
-from s5 import wwj_recurrence as WWJ
+from s5 import wwj_mixed_stencil as WWJ
+from s5 import wwj_mixed_stencil_ssm as ARMS
 from tests import wwj_sequential_reference as ORACLE
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -196,22 +211,6 @@ def test_the_reverse_direction_is_a_flipped_causal_scan():
                                               inputs), 1e-3)
 
 
-def test_float32_production_path_stays_within_tolerance_of_float64():
-    """The float32 path is checked against the float64 reference, not
-    against itself."""
-    if not X64:
-        return
-    lambda_bar, b_bar = _modes(6, dtype=np.complex128)
-    tau, mass = _params(lambda_bar.shape[0])
-    inputs = _inputs(7, 512)
-    exact = WWJ.wwj_states(lambda_bar, b_bar, tau, mass, inputs)
-    single = WWJ.wwj_states(lambda_bar.astype(np.complex64),
-                            b_bar.astype(np.complex64),
-                            tau.astype(np.float32), mass.astype(np.float32),
-                            inputs.astype(np.float32))
-    assert _close(single.astype(np.complex128), exact, TOL32)
-
-
 # ------------------------------------------------------------ gradients ----
 def _loss(lambda_bar, b_bar, tau, mass, inputs, implementation):
     states = implementation(lambda_bar, b_bar, tau, mass, inputs)
@@ -250,19 +249,36 @@ def test_gradients_flow_to_tau_and_eps_and_stay_finite():
     assert any(abs(float(g)) > 0 for g in grads)
 
 
-def test_forward_and_backward_are_finite_at_production_shape():
-    """A production-shaped sequence, forward and backward, all finite."""
-    lambda_bar, b_bar = _modes(12, P=64, H=96)
-    tau, mass = _params(64)
-    inputs = _inputs(13, 4096, H=96)
+def test_the_rejection_is_reproducible_on_production_like_modes():
+    """The recorded failure, asserted as a property rather than hoped away.
 
-    def loss(b):
-        return np.sum(np.abs(
-            WWJ.wwj_states(lambda_bar, b, tau, mass, inputs)) ** 2).real
+    HiPPO modes with the production discretization, the declared grid at the
+    critical eps: every cell has a companion spectral radius above 1, which
+    is why float32 produced NaNs and float64 reached about 1e81 over a
+    16000-token sequence. Nothing here is a tolerance.
+    """
+    import numpy
 
-    value, grad = jax.value_and_grad(loss)(b_bar)
-    assert bool(np.isfinite(value))
-    assert bool(np.all(np.isfinite(grad)))
+    from s5.ssm import discretize_zoh
+    from s5.ssm_init import make_DPLR_HiPPO
+
+    block = 128 // 16
+    Lambda, _, _, _, _ = make_DPLR_HiPPO(block)
+    Lambda = Lambda[:block // 2]
+    Lambda = np.asarray(numpy.tile(numpy.asarray(Lambda), 16))
+    steps = np.exp(np.linspace(np.log(0.001), np.log(0.1), Lambda.shape[0]))
+    b_tilde = np.ones((Lambda.shape[0], 1), dtype=Lambda.dtype)
+    lambda_bar, b_bar = discretize_zoh(Lambda, b_tilde, steps)
+    radii = {}
+    for k in (0.05, 0.1, 0.25, 0.5, 1.0):
+        tau = np.full((lambda_bar.shape[0],), k)
+        mass = WWJ.mass_from_eps(tau, np.asarray(0.25))
+        (A0, A1, A2), _ = WWJ.state_coefficients(lambda_bar, b_bar, tau, mass)
+        radii[k] = float(np.max(WWJ.companion_spectral_radius(A0, A1, A2)))
+        assert bool(np.all(np.isfinite(A0))), k      # finite, yet unstable
+    assert all(value > 1.0 for value in radii.values()), radii
+    # and the growth is explosive over a production-length sequence
+    assert min(radii.values()) ** 1000 > 1e50, radii
 
 
 def test_results_are_deterministic_for_a_fixed_seed():

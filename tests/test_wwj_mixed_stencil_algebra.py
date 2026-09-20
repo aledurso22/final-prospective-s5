@@ -1,4 +1,16 @@
-"""Exact verification of the WWJ recurrence algebra and of the scan algorithm.
+"""Exact verification of the REJECTED mixed-stencil algebra and scan.
+
+The realization these tests describe was rejected on the cluster at commit
+bfe53fe: its discretization-induced poles are unstable for the actual S5
+modes (max companion radius about 1.705 at every declared grid cell, float32
+NaNs, float64 states to about 1e81). The ALGEBRA below is still correct --
+the discretization is a valid discretization -- so these proofs are kept with
+the failed ablation. The principal architecture is tested in
+`test_wwj_operator_algebra.py` and `test_wwj_ssm.py`.
+
+Original description follows.
+
+Exact verification of the WWJ recurrence algebra and of the scan algorithm.
 
 Everything here is exact rational arithmetic in pure Python: no JAX, no
 NumPy, no floating point. The identities are LINEAR in the free variables, so

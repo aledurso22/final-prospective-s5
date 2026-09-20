@@ -16,8 +16,10 @@ import subprocess
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: the commit whose entire existing tree must be untouched by this work
 FROZEN_BASE = "ef004cda025b4e098041cfe5970c217fa0015bba"
-RECURRENCE = os.path.join(REPO, "s5/wwj_recurrence.py")
-ARMS = os.path.join(REPO, "s5/wwj_prospective_ssm.py")
+OPERATOR = os.path.join(REPO, "s5/wwj_operator.py")
+ARMS = os.path.join(REPO, "s5/wwj_ssm.py")
+REJECTED = os.path.join(REPO, "s5/wwj_mixed_stencil.py")
+REJECTED_ARMS = os.path.join(REPO, "s5/wwj_mixed_stencil_ssm.py")
 LAUNCHER = os.path.join(REPO, "bin/run_experiments/allocation_s5_wwj_gates.sh")
 BENCHMARK = os.path.join(REPO, "experiments/s5_wwj/benchmark.py")
 DEV_GATE = os.path.join(REPO, "experiments/s5_wwj/dev_gate.py")
@@ -31,14 +33,21 @@ def _text(path):
 
 #: the files this work is allowed to add, and nothing else
 NEW_WWJ_FILES = (
-    "s5/wwj_recurrence.py", "s5/wwj_prospective_ssm.py",
+    # the principal architecture
+    "s5/wwj_operator.py", "s5/wwj_ssm.py",
+    "tests/wwj_operator_reference.py", "tests/test_wwj_operator_algebra.py",
+    "tests/test_wwj_ssm.py",
+    # the REJECTED mixed-stencil realization, kept as a failed ablation
+    "s5/wwj_mixed_stencil.py", "s5/wwj_mixed_stencil_ssm.py",
+    "tests/wwj_sequential_reference.py",
+    "tests/test_wwj_mixed_stencil_algebra.py",
+    "tests/test_wwj_mixed_stencil_rejected.py",
+    # experiment layer, launcher, documentation, wiring
     "experiments/s5_wwj/__init__.py", "experiments/s5_wwj/wwj_model.py",
     "experiments/s5_wwj/init_grid.py", "experiments/s5_wwj/benchmark.py",
     "experiments/s5_wwj/dev_gate.py",
     "bin/run_experiments/allocation_s5_wwj_gates.sh",
-    "docs/S5_WWJ_PROSPECTIVE.md", "tests/wwj_sequential_reference.py",
-    "tests/test_wwj_algebra.py", "tests/test_wwj_wiring.py",
-    "tests/test_wwj_recurrence.py",
+    "docs/S5_WWJ_PROSPECTIVE.md", "tests/test_wwj_wiring.py",
 )
 
 
@@ -140,6 +149,61 @@ def test_the_new_wwj_files_exist_and_are_tracked():
     assert added == set(NEW_WWJ_FILES), sorted(added ^ set(NEW_WWJ_FILES))
 
 
+def test_the_principal_operator_is_fir_and_reuses_the_native_scan():
+    """The architecture: Native scan untouched, WWJ as a three-tap on its
+    trajectory. No new recurrence, so no new poles."""
+    source = _text(OPERATOR)
+    assert "from .ssm import binary_operator" in source
+    assert "associative_scan(binary_operator" in source
+    for forbidden in ("scan_companion", "companion_matrix", "doubling",
+                      "eigvals"):
+        assert forbidden not in source, forbidden
+    assert "(1.0 + k + m) * states" in source       # the three-tap itself
+    assert "- (k + 2.0 * m) * _shift(states, 1)" in source
+    assert "+ m * _shift(states, 2)" in source
+    # and the claim about poles is a function, not a sentence
+    assert "def recurrent_poles(" in source
+
+
+def test_the_rejected_realization_is_quarantined():
+    """It is preserved with its evidence, labelled, and unreachable from the
+    principal arms or any launcher."""
+    for path in (REJECTED, REJECTED_ARMS):
+        text = _text(path)
+        assert "REJECTED REALIZATION" in text
+        assert "1.7054537181" in text or "1.705" in text
+        assert "bfe53fe" in text
+    names = _text(REJECTED_ARMS)
+    assert "wwj_mixed_stencil_unstable_diagnostic" in names
+    assert "WWJ_REJECTED_ARMS" in names
+    # the principal modules never IMPORT it; naming it in a docstring, to
+    # say what was rejected and why, is exactly what they should do
+    for path in (OPERATOR, ARMS):
+        imports = [line for line in _text(path).splitlines()
+                   if line.startswith(("import ", "from "))]
+        assert not any("mixed_stencil" in line for line in imports), path
+    # and the launcher refuses it by name
+    launcher = _text(LAUNCHER)
+    assert "*mixed_stencil*)" in launcher
+    assert "REJECTED mixed-stencil realization" in launcher
+    model = _text(WWJ_MODEL)
+    assert "mixed_stencil" in model and "cannot be constructed here" in model
+
+
+def test_the_selection_criteria_are_fir_not_companion_radii():
+    grid = _text(INIT_GRID)
+    assert "GAIN_CEILING = 3.0" in grid
+    assert "GRADIENT_FLOOR" in grid
+    assert "max_fir_gain" in grid and "probe_gradients" in grid
+    assert "companion_spectral_radius" not in grid
+    assert "NO_ADMISSIBLE_INITIALIZATION" in grid
+    # the rule prefers the SMALLEST admissible k: start close to Native
+    selection = grid[grid.index("def select("):grid.index("def main(")]
+    assert "min(critical" in selection
+    dev = _text(DEV_GATE)
+    assert "FIR_GAIN_CEILING" in dev and "RADIUS_CEILING" not in dev
+
+
 def test_native_s5_cannot_even_see_the_wwj_code():
     for relative in ("s5/ssm.py", "s5/three_arm_factory.py",
                      "s5/discrete_recurrence.py",
@@ -153,72 +217,41 @@ def test_the_old_generalized_arm_keeps_its_own_name():
     names = _text(ARMS)
     assert "generalized_prospective_s5" not in names
     for identifier in ("wwj_critical_s5", "wwj_passive_s5",
-                       "wwj_unconstrained_s5_diagnostic"):
+                       "wwj_gated_recoverable_s5_diagnostic"):
         assert identifier in names
+    rejected = _text(REJECTED_ARMS)
+    assert "wwj_mixed_stencil_unstable_diagnostic" in rejected
     documentation = _text(os.path.join(REPO, "docs/S5_WWJ_PROSPECTIVE.md"))
     assert "old two-compartment" in documentation.lower()
     assert "they are not WWJ results" in documentation
 
 
-def test_the_production_path_never_uses_a_sequential_scan():
-    """The failure being fixed was operational: a rematerialized sequential
-    rollout. Neither it nor any token loop may appear in the new path."""
-    source = _text(RECURRENCE)
-    for forbidden in ("scan_companion", "scan_companion_sequential",
-                      "lax.scan", "for token", "for t in range"):
-        assert forbidden not in source, forbidden
-    assert "jax.checkpoint" in source            # levels, not the rollout
-    tree = ast.parse(source)
-    scan = next(node for node in ast.walk(tree)
-                if isinstance(node, ast.FunctionDef) and node.name == "wwj_scan")
-    # exactly one loop, over the O(log L) doubling levels
-    loops = [node for node in ast.walk(scan)
-             if isinstance(node, (ast.For, ast.While))]
-    assert len(loops) == 1 and isinstance(loops[0], ast.While)
-    assert "distance *= 2" in source
-    # the oracle is a reference for tests and for the pre-training gate; the
-    # MODEL never sees it, and neither does any launcher
-    # source files only: a __pycache__ entry is a build artifact, not an
-    # import path, and matching one made this assertion depend on whether
-    # anything had been byte-compiled
-    reachable = subprocess.run(
-        ["grep", "-rl", "--include=*.py", "wwj_sequential_reference", "s5",
-         "bin"], capture_output=True, text=True, cwd=REPO)
-    assert reachable.stdout.strip() == ""
-    users = subprocess.run(
-        ["grep", "-rl", "--include=*.py", "wwj_sequential_reference",
-         "experiments"], capture_output=True, text=True, cwd=REPO).stdout.split()
-    assert users == ["experiments/s5_wwj/benchmark.py"], users
-
-
-def test_no_eigendecomposition_in_the_recurrence():
-    # no eigendecomposition CALL; the docstring may explain why not
-    code = [line for line in _text(RECURRENCE).splitlines()
+def test_no_eigendecomposition_in_the_principal_path():
+    code = [line for line in _text(OPERATOR).splitlines()
             if not line.strip().startswith("#")]
     for forbidden in ("eigvals(", "eigh(", "linalg.eig"):
-        assert not any(forbidden in line and '"""' not in line
-                       and "`" not in line for line in code), forbidden
-    assert "Frobenius" in _text(RECURRENCE)
+        assert not any(forbidden in line for line in code), forbidden
 
 
 def test_the_parameterization_is_stable_and_declared():
     source = _text(ARMS)
     assert "TAU_MIN + jax.nn.softplus(raw)" in source
     assert "EPS_MAX * jax.nn.sigmoid(raw)" in source
-    recurrence = _text(RECURRENCE)
-    assert "EPS_MAX = 0.25" in recurrence
-    assert "TAU_MIN = 1e-3" in recurrence
+    operator = _text(OPERATOR)
+    assert "EPS_MAX = 0.25" in operator
+    assert "TAU_MIN = 1e-3" in operator
+    assert "H_TOKEN = 1.0" in operator and "learned Delta" in operator
     # one scalar per layer, and said so
-    assert "per S5 LAYER" in source or "per layer" in source.lower()
+    assert "per LAYER" in source or "per layer" in source.lower()
     # no post-update eigenvalue projection anywhere
-    for path in (ARMS, RECURRENCE, WWJ_MODEL):
+    for path in (ARMS, OPERATOR, WWJ_MODEL):
         assert "clip_eigs=True" not in _text(path)
 
 
 def test_the_gates_are_declared_with_numbers():
     benchmark = _text(BENCHMARK)
     for constant in ("MEMORY_CEILING_FRACTION = 0.80", "TIME_MARGIN = 0.25",
-                     "THROUGHPUT_FLOOR = 0.50"):
+                     "THROUGHPUT_FLOOR = 0.80"):
         assert constant in benchmark, constant
     assert "2.98" in benchmark and "154.73" in benchmark   # the old number
     for metric in ("compile_seconds", "steps_per_minute", "peak_gpu_bytes",
@@ -226,15 +259,15 @@ def test_the_gates_are_declared_with_numbers():
                    "throughput_ratio_to_native", "projection"):
         assert metric in benchmark, metric
     dev = _text(DEV_GATE)
-    assert "REQUIRED_LOSS_REDUCTION" in dev and "RADIUS_CEILING" in dev
+    assert "REQUIRED_LOSS_REDUCTION" in dev and "FIR_GAIN_CEILING" in dev
     assert "DEV_GATE_PASS" in dev and "developmental_only" in dev
 
 
 def test_the_initialization_rule_is_declared_before_the_grid_is_read():
     source = _text(INIT_GRID)
-    assert "GRID_K = (0.05, 0.1, 0.25, 0.5, 1.0)" in source
+    assert "GRID_K = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0)" in source
     assert "GRID_EPS = (0.0, 0.0625, 0.25)" in source
-    assert "RADIUS_CEILING = 0.98" in source
+    assert "GAIN_CEILING = 3.0" in source
     assert "NO_ADMISSIBLE_INITIALIZATION" in source
     # the rule is applied by code, and validation is never consulted
     tree = ast.parse(source)
@@ -282,7 +315,8 @@ def test_the_gate_launcher_starts_no_slurm_job_and_no_training():
 
 
 def test_every_new_python_file_parses_and_declares_an_entry_point():
-    for path in (RECURRENCE, ARMS, WWJ_MODEL, BENCHMARK, DEV_GATE, INIT_GRID):
+    for path in (OPERATOR, ARMS, REJECTED, REJECTED_ARMS, WWJ_MODEL,
+                 BENCHMARK, DEV_GATE, INIT_GRID):
         source = _text(path)
         ast.parse(source)
         if path in (BENCHMARK, DEV_GATE, INIT_GRID):
@@ -326,13 +360,17 @@ def test_the_projection_states_what_it_covers():
 
 
 def test_the_memory_claim_is_qualified():
-    """The earlier O(L*P) backward-memory claim was wrong; the document and
-    the module must distinguish forward, residual and measured memory."""
-    recurrence = _text(RECURRENCE)
-    assert "FORWARD LIVE STORAGE" in recurrence
-    assert "BACKWARD (AUTODIFF RESIDUAL) STORAGE IS NOT O(L*P*3)" in recurrence
-    assert "MEASURED PEAK DEVICE MEMORY" in recurrence
-    assert 'remat="whole"' in recurrence
+    """The rejected path's memory discussion is kept honest, and the
+    principal path adds no scan to argue about."""
+    rejected = _text(REJECTED)
+    assert "FORWARD LIVE STORAGE" in rejected
+    assert "BACKWARD (AUTODIFF RESIDUAL) STORAGE IS NOT O(L*P*3)" in rejected
+    assert "MEASURED PEAK DEVICE MEMORY" in rejected
     documentation = _text(os.path.join(REPO, "docs/S5_WWJ_PROSPECTIVE.md"))
-    assert "withdrawn" in documentation
     assert "unknown until the GPU benchmark runs" in documentation
+
+
+def test_the_throughput_floor_reflects_the_new_architecture():
+    benchmark = _text(BENCHMARK)
+    assert "THROUGHPUT_FLOOR = 0.80" in benchmark
+    assert "O(L*P) three-tap" in benchmark

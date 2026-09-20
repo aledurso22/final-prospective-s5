@@ -6,8 +6,10 @@
 # runs, which is the condition diagnosed in S5_EXECUTION_TOPOLOGY_DIAGNOSIS.md:
 #
 #   1. initialization grid: sweep k = tau/h and eps over the ACTUAL
-#      initialized S5 modes and select tau by the declared rule in
-#      experiments/s5_wwj/init_grid.py. No validation result is consulted.
+#      initialized S5 modes and select tau by the declared FIR rule in
+#      experiments/s5_wwj/init_grid.py -- maximum FIR gain and non-vanishing
+#      WWJ gradients, NOT companion radii, because the principal operator is
+#      FIR and adds no recurrent poles. No validation result is consulted.
 #   2. performance gate: Native S5 versus each WWJ arm, production-shaped,
 #      on one GPU. Authorizes nothing unless every declared condition holds,
 #      including WWJ throughput at least half of Native's.
@@ -34,6 +36,21 @@ export PROSPECTIVE_REPO="$REPO_ROOT"
 # critical-arm pass authorizes nothing about the passive arm. Override with
 # S5_WWJ_ARMS="wwj_critical_s5" to gate one of them alone.
 read -r -a WWJ_ARMS <<< "${S5_WWJ_ARMS:-wwj_critical_s5 wwj_passive_s5}"
+# The REJECTED mixed-stencil realization is unstable on the real S5 modes
+# (max companion radius ~1.705, float32 NaN, float64 states ~1e81) and is a
+# failed ablation: it can never be gated or trained from here.
+for arm in "${WWJ_ARMS[@]}"; do
+  case "$arm" in
+    wwj_critical_s5|wwj_passive_s5|wwj_gated_recoverable_s5_diagnostic) ;;
+    *mixed_stencil*)
+      echo "FAIL: $arm is the REJECTED mixed-stencil realization; it is a" >&2
+      echo "      failed ablation and must not be gated or trained." >&2
+      exit 1 ;;
+    *)
+      echo "FAIL: $arm is not a WWJ arm this launcher will run" >&2
+      exit 1 ;;
+  esac
+done
 #: how many 15-epoch waves the projection must cover: one per gated arm
 WAVES="${S5_WWJ_WAVES:-${#WWJ_ARMS[@]}}"
 SEED="${S5_WWJ_SEED:-301}"

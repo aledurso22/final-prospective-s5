@@ -8,9 +8,10 @@ one. Its output is written to `dev_gate.json` and must be reported
 separately from any 15-epoch comparison.
 
 It passes only when loss, gradients, states and parameters stay finite, the
-loss on the fixed subset actually falls, the per-mode companion radii stay
-inside the declared ceiling, the checkpoint restores to a finite state, and
-the process reaches the end by itself.
+loss on the fixed subset actually falls, the FIR gain stays inside the
+declared ceiling and the NATIVE mode radii stay inside the unit disc, the
+checkpoint restores to a finite state, and the process reaches the end by
+itself.
 """
 
 import argparse
@@ -25,7 +26,7 @@ from flax import serialization
 from dataloaders import speech_commands10 as SC
 from experiments.s5_three_arm_full import data as EXPERIMENT_DATA
 from experiments.s5_three_arm_full import runner as RUNNER
-from s5.wwj_prospective_ssm import WWJ_SCIENTIFIC_NAMES
+from s5.wwj_ssm import WWJ_SCIENTIFIC_NAMES
 from experiments.s5_wwj.wwj_model import (create_wwj_train_state,
                                           set_wwj_learning_rates,
                                           wwj_diagnostics, wwj_model)
@@ -33,8 +34,8 @@ from experiments.s5_wwj.wwj_model import (create_wwj_train_state,
 EPOCHS = 15
 #: the loss on the fixed subset must fall by at least this fraction
 REQUIRED_LOSS_REDUCTION = 0.02
-#: companion radii above this are reported as a failure of the gate
-RADIUS_CEILING = 1.05
+#: the FIR operator has no poles; what is bounded is how much it amplifies
+FIR_GAIN_CEILING = 3.0
 
 
 def _finite(tree):
@@ -166,10 +167,14 @@ def main():
         problems.append(
             f"subset loss fell by {record['loss_reduction']:.3%}, below the "
             f"required {REQUIRED_LOSS_REDUCTION:.1%}")
-    radius = diagnostics["max_companion_spectral_radius"]
-    if not (radius == radius) or radius > RADIUS_CEILING:
-        problems.append(f"max companion spectral radius {radius} exceeds "
-                        f"{RADIUS_CEILING}")
+    gain = diagnostics["max_fir_gain"]
+    if not (gain == gain) or gain > FIR_GAIN_CEILING:
+        problems.append(f"max FIR gain {gain} exceeds {FIR_GAIN_CEILING}")
+    native_radius = diagnostics["max_native_radius"]
+    if not (native_radius == native_radius) or native_radius > 1.0:
+        problems.append(f"a NATIVE mode radius is {native_radius} > 1; that "
+                        "is a Native S5 property, not a WWJ one, and it must "
+                        "be understood before training")
     record["status"] = "DEV_GATE_PASS" if not problems else "DEV_GATE_FAIL"
     record["problems"] = problems
     record["developmental_only"] = True
@@ -179,7 +184,8 @@ def main():
     print(json.dumps({"status": record["status"], "problems": problems,
                       "loss_reduction": record.get("loss_reduction"),
                       "validation": record["validation"],
-                      "max_companion_spectral_radius": radius}, indent=2))
+                      "max_fir_gain": gain,
+                      "max_native_radius": native_radius}, indent=2))
     if problems:
         raise SystemExit(1)
 
