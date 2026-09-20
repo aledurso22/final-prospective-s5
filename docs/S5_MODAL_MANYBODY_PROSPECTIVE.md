@@ -186,6 +186,19 @@ minutes of GPU time. Fixed, and a **local** AST test now asserts the
 benchmark supplies every argument `init_S5SSM` requires, so this class of
 mistake fails on a laptop instead.
 
+**Layer-level cost, measured:** native layer 0.000273 s, modal layer
+0.000460 s at 16 000 tokens — **0.593× Native, i.e. about 1.69× slower per
+layer**. That is better than the scan-level 0.46×, because the layer also
+does the readout, the norm and the GLU, but only modestly: the scan is a
+large share of the layer, so there is less amortization than predicted.
+Memory remains free (~1 KB per stage) and everything stays finite.
+
+Whether 1.69× per layer is affordable is an arithmetic question about the
+allocation, not a judgement: it needs Native's own measured 15-epoch wall
+time, which the completed Native wave already recorded in its
+`task_result.json` (`training_seconds`, `examples_per_second`). No GPU is
+needed to answer it.
+
 **Synthetic, second run: still `NOT_DEMONSTRATED`, and the trade is
 unchanged.**
 
