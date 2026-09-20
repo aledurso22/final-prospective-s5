@@ -378,14 +378,45 @@ $C=16$ and 2.9e3 at $C=256$ while the states are $O(1)$
 application injects about $\epsilon_{32}|H^C|$, and those errors are then
 amplified by later boundary applications.
 
-**Provisional conclusion, to be confirmed on the GPU**: chunking fixes the
-catastrophe but not the marginality. At this cell even the plain sequential
-float32 recurrence carries ~1e-3 relative error — the recurrence is
-ill-conditioned in production precision, independently of the scan. The chunk
-study is built to measure exactly this on real modes and applies its decision
-rule in code (float32 forward *and* gradient error within 10× the sequential
-float32 error, finite, deterministic); if nothing qualifies it reports
-`BLOCK_SCAN_NOT_USABLE_IN_FLOAT32`.
+**That provisional conclusion was too pessimistic, and is corrected below.**
+It was drawn from τ = 1000 alone, which is the *weak, nearly marginal* limit.
+
+## 6c-bis. Corrected: the block scan works at the well-conditioned cells
+
+The cluster found stable cells at τ = 2, 5, 10, 50, 100 and 1000 for
+`professor_linear_target` — not only τ = 1000. Re-running the float32
+emulation across all of them
+(`docs/analysis/direct_prospective_stable_cells.txt`), relative to float64
+sequential, L = 4000, $\bar A=0.9$:
+
+| τ | ε | ρ | \|H^64\| | block C=64 | block C=16 | sequential | doubling |
+|---|---|---|---|---|---|---|---|
+| 2 | 0 | 0.949 | 0.17 | **8.2e-07** | 7.7e-07 | 8.2e-07 | 1.7e-06 |
+| **5** | 0 | 0.949 | 0.23 | **1.1e-06** | 6.4e-06 | 9.5e-07 | 6.1e-06 |
+| **5** | 1/4 | 0.962 | **2.0** | **1.3e-05** | 3.2e-05 | 3.4e-06 | 1.7e-04 |
+| **10** | 1/4 | 0.963 | **4.6** | **5.7e-05** | 2.6e-04 | 1.1e-05 | 4.9e-04 |
+| 50 | 1/4 | 0.973 | 1.4e+02 | 3.7e-03 | 4.6e-03 | 5.7e-05 | 1.6e-01 |
+| 100 | 1/4 | 0.983 | 3.7e+02 | 5.7e-02 | 2.7e-02 | 1.5e-04 | **8.7e+07** |
+| 1000 | 1/4 | 0.998 | 9.4e+02 | 1.2e+03 | 2.1e-01 | 3.1e-03 | **2.2e+21** |
+| 1000 | 0 | 0.999 | 9.6 | **9.8e-05** | 6.4e-05 | 8.2e-06 | 2.1e-04 |
+
+**At τ = 2, 5 and 10 the block scan matches the ordinary sequential
+recurrence to within 2–5× in float32, and every value is at the 1e-5 level
+or below.** The Professor/TSS arm (ε = 0, order two) is computable at *every*
+τ including 1000, because its |H^C| stays ≤ 9.6.
+
+The predictor is **|H^C|**: when it is O(1) the block scan is as accurate as
+sequential; when it reaches 1e2–1e3 it is not. The chunk study now records
+|H^C| for every row and applies, in code, the rule |H^C| ≤ 10 **and** float32
+forward *and* gradient error within 10× the sequential float32 error, finite
+and deterministic — never chosen by speed. It sweeps **all** the
+cluster-measured cells, not only τ = 1000.
+
+So the position is: the full-sequence doubling scan stays rejected
+(4.18e7 relative error measured on the cluster, 2.2e21 here at τ = 1000), the
+block scan is the production candidate and is expected to pass gate 2 at
+τ = 2, 5 and 10, and τ = 100–1000 with ε = 1/4 remain out of reach for any of
+these scans in float32.
 
 ## 6d. Three gates, never conflated
 

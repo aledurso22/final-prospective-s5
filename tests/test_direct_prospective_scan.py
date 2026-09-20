@@ -39,6 +39,27 @@ TOL64, TOL32 = 1e-10, 2e-4
 #: lengths exercised everywhere, including non-powers of two and > 1000
 LENGTHS = (1, 2, 3, 5, 7, 8, 9, 15, 17, 100, 257, 1000, 1023, 1500)
 
+#: Cells the CLUSTER measured as stable on the real-builder fixture with
+#: professor_linear_target (commit 94455c5): (tau, eps, measured radius).
+#: tau = 5 and tau = 10 are the well-conditioned ones and must be exercised;
+#: tau = 1000 is the weak, nearly marginal limit and must not be the only
+#: cell studied.
+CLUSTER_STABLE_CELLS = (
+    (2.0, 0.0, 0.9512748075), (5.0, 0.0, 0.8294413371),
+    (10.0, 0.0, 0.8990310402), (50.0, 0.0, 0.9799557162),
+    (100.0, 0.0, 0.9899888330), (1000.0, 0.0, 0.9989998876),
+    (2.0, 0.25, 0.9923729495), (5.0, 0.25, 0.8776972719),
+    (10.0, 0.25, 0.8851554058), (50.0, 0.25, 0.9662813133),
+    (100.0, 0.25, 0.9819794261), (1000.0, 0.25, 0.9980477225),
+)
+#: the well-conditioned subset, where float32 is expected to be usable
+WELL_CONDITIONED_TAU = (2.0, 5.0, 10.0)
+
+
+def _context(**fields):
+    """Every sequence assertion carries its cell: tau, target, length..."""
+    return ", ".join(f"{key}={value!r}" for key, value in fields.items())
+
 
 def _complex(dtype=None):
     return dtype or (np.complex128 if X64 else np.complex64)
@@ -205,6 +226,54 @@ def test_a_stable_real_builder_cell_exists():
         assert cell["radius"] < 1.0, cell
 
 
+def test_the_cluster_stable_cells_are_reproduced():
+    """The cells the cluster measured are stable here too, and the
+    well-conditioned ones are exercised, not just the tau = 1000 limit."""
+    lambda_bar, b_bar = _model_modes(14)
+    real = np.float64 if X64 else np.float32
+    for tau_value, eps, expected in CLUSTER_STABLE_CELLS:
+        tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+        mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=real))
+        A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass,
+                                             DP.PROFESSOR_LINEAR_TARGET)
+        radius = float(np.max(ORACLE.exact_companion_radius(A)))
+        where = _context(tau=tau_value, eps=eps,
+                         target_construction=DP.PROFESSOR_LINEAR_TARGET,
+                         radius=radius, cluster_radius=expected)
+        assert radius < 1.0, where
+    assert any(tau in WELL_CONDITIONED_TAU
+               for tau, _, _ in CLUSTER_STABLE_CELLS)
+
+
+def test_the_block_scan_matches_sequential_in_float32_at_well_conditioned_cells():
+    """GATE 2 where it can be passed. At tau = 2, 5 and 10 the transition
+    norm |H^C| is O(1), so the block scan's float32 error is within a small
+    factor of the ordinary sequential recurrence's -- unlike tau = 1000,
+    where |H^64| = 9.4e2 and it is not
+    (docs/analysis/direct_prospective_stable_cells.txt)."""
+    lambda_bar, b_bar = _model_modes(14, P=16, H=4)
+    single = lambda_bar.astype(np.complex64), b_bar.astype(np.complex64)
+    inputs = jax.random.normal(jax.random.PRNGKey(40),
+                               (4000, 4)).astype(np.float32)
+    for tau_value in WELL_CONDITIONED_TAU:
+        for eps in (0.0, 0.25):
+            tau = np.full(lambda_bar.shape, tau_value, dtype=np.float32)
+            mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=np.float32))
+            A, C = DP.matched_state_coefficients(
+                single[0], single[1], tau, mass, DP.PROFESSOR_LINEAR_TARGET)
+            drive = DP.input_drive(C, inputs)
+            block = DP.block_scan(A, drive, 64)
+            sequential = DP.sequential_scan_jax(A, drive)
+            scale = float(np.max(np.abs(sequential)))
+            error = float(np.max(np.abs(block - sequential))) / scale
+            where = _context(tau=tau_value, eps=eps, chunk=64, length=4000,
+                             target_construction=DP.PROFESSOR_LINEAR_TARGET,
+                             block_vs_sequential_float32=error)
+            print(where)
+            assert bool(np.all(np.isfinite(block))), where
+            assert error < 1e-2, where
+
+
 def test_the_stable_cell_scan_matches_the_oracle_within_measured_conditioning():
     """The stable real-builder cell, held to a tolerance DERIVED from the
     operator's measured conditioning rather than a round number.
@@ -225,15 +294,20 @@ def test_the_stable_cell_scan_matches_the_oracle_within_measured_conditioning():
         A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, mass,
                                              cell["target"])
         for length in (3, 17, 257, 1000):
-            inputs = _inputs(length, length)
-            fast = DP.matched_states(lambda_bar, b_bar, inputs, tau, mass,
-                                     cell["target"])
-            slow = ORACLE.matched_sequential(lambda_bar, b_bar, inputs, tau,
+            # the BLOCK path is the production candidate; the doubling path
+            # is exercised only by its own labelled diagnostic below
+            fast = DP.matched_states(lambda_bar, b_bar, _inputs(length, length),
+                                     tau, mass, cell["target"],
+                                     scan_kind="block", chunk=64)
+            slow = ORACLE.matched_sequential(lambda_bar, b_bar,
+                                             _inputs(length, length), tau,
                                              mass, cell["target"])
             report = ORACLE.compare_finite_prefix(fast, slow)
             tolerance = ORACLE.doubling_scan_tolerance(A, length, epsilon)
-            report.update(cell=cell, length=length, tolerance=tolerance,
-                          peak_norm=ORACLE.doubling_scan_peak_norm(A, length))
+            report.update(context=_context(
+                tau=cell["tau"], eps=cell["eps"],
+                target_construction=cell["target"], length=length,
+                scan="block"), tolerance=tolerance)
             print(report)                     # always visible with pytest -s
             assert report["finite_masks_identical"], report
             assert report["common_finite_prefix"] == length, report
@@ -332,39 +406,114 @@ def test_the_unstable_cell_can_never_be_classified_as_admissible():
 
 
 # ------------------------------------------------ the two scientific arms --
-def test_the_generalized_model_reduces_to_the_professor_model_at_M_zero():
-    """WWJ_GENERALIZED_TSS with M = 0 IS PROFESSOR_TSS: the three-state
-    recurrence and the two-state one produce the same sequence, and the
-    model label follows the mass."""
+def test_the_M_zero_coefficient_identities_hold_for_every_target_construction():
+    """COEFFICIENT-LEVEL M = 0 reduction: A0 = P0, A1 = P1, A2 = 0,
+    C0 = Q0, C1 = Q1, C2 = 0, for BOTH target constructions and every tau.
+
+    This is the identity itself and is independent of any scan, any length
+    and any stability question -- which is why it is tested on its own.
+    """
     lambda_bar, b_bar = _model_modes(15)
     real = np.float64 if X64 else np.float32
     zero = np.zeros(lambda_bar.shape, dtype=real)
-    for tau_value in (2.0, 10.0, 100.0):
+    tolerance = TOL64 if X64 else TOL32
+    for tau_value in (0.05, 2.0, 5.0, 10.0, 100.0, 1000.0):
         tau = np.full(lambda_bar.shape, tau_value, dtype=real)
         assert DP.model_of(zero) == DP.PROFESSOR_TSS
         assert DP.model_of(DP.mass_from_eps(tau, np.asarray(0.25, real))) == \
             DP.WWJ_GENERALIZED_TSS
         for target in DP.TARGET_CONSTRUCTIONS:
+            where = _context(tau=tau_value, target_construction=target)
             (A0, A1, A2), (C0, C1, C2) = DP.matched_state_coefficients(
                 lambda_bar, b_bar, tau, zero, target)
             (P0, P1), (Q0, Q1) = DP.professor_tss_state_coefficients(
                 lambda_bar, b_bar, tau, target)
-            assert _close(A0, P0, TOL64 if X64 else TOL32)
-            assert _close(A1, P1, TOL64 if X64 else TOL32)
-            assert float(np.max(np.abs(A2))) == 0.0        # no third state
-            assert _close(C0, Q0, TOL64 if X64 else TOL32)
-            assert _close(C1, Q1, TOL64 if X64 else TOL32)
-            assert float(np.max(np.abs(C2))) == 0.0
-            for length in (5, 64, 257):
-                inputs = _inputs(length, length)
-                three = DP.matched_states(lambda_bar, b_bar, inputs, tau,
-                                          zero, target)
-                two = DP.professor_tss_states(lambda_bar, b_bar, inputs, tau,
-                                              target)
+            assert _close(A0, P0, tolerance), where
+            assert _close(A1, P1, tolerance), where
+            assert float(np.max(np.abs(A2))) == 0.0, where
+            assert _close(C0, Q0, tolerance), where
+            assert _close(C1, Q1, tolerance), where
+            assert float(np.max(np.abs(C2))) == 0.0, where
+
+
+def test_the_M_zero_sequence_identity_on_stable_cells_with_the_block_scan():
+    """SEQUENCE-LEVEL M = 0 reduction, on ANALYTICALLY STABLE cells only,
+    through the BLOCK implementation -- never the rejected full-doubling
+    path:
+
+        order-three WWJ at M = 0  ==  order-two Professor  ==  oracle
+
+    at lengths up to 16000.
+    """
+    lambda_bar, b_bar = _model_modes(15)
+    real = np.float64 if X64 else np.float32
+    zero = np.zeros(lambda_bar.shape, dtype=real)
+    target = DP.PROFESSOR_LINEAR_TARGET
+    tolerance = TOL64 if X64 else TOL32
+    for tau_value in (5.0, 10.0, 50.0):
+        tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+        A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, zero,
+                                             target)
+        radius = float(np.max(ORACLE.exact_companion_radius(A)))
+        assert radius < 1.0, _context(tau=tau_value,
+                                      target_construction=target,
+                                      radius=radius)
+        for length in (17, 257, 4096, 16000):
+            where = _context(tau=tau_value, target_construction=target,
+                             length=length, scan="block", radius=radius)
+            inputs = _inputs(length, length)
+            three = DP.matched_states(lambda_bar, b_bar, inputs, tau, zero,
+                                      target, scan_kind="block", chunk=64)
+            two = DP.professor_tss_states(lambda_bar, b_bar, inputs, tau,
+                                          target, scan_kind="block",
+                                          chunk=64)
+            assert bool(np.all(np.isfinite(three))), where
+            assert _close(three, two, tolerance), where
+            if length <= 4096:          # the oracle is a Python-level loop
                 oracle = ORACLE.professor_tss_sequential(lambda_bar, b_bar,
                                                          inputs, tau, target)
-                assert _close(three, two, TOL64 if X64 else TOL32), length
-                assert _close(two, oracle, TOL64 if X64 else TOL32), length
+                assert _close(two, oracle, tolerance), where
+
+
+def test_unstable_cells_are_rejected_by_the_gate_not_compared_as_arrays():
+    """For an UNSTABLE cell the right assertion is that the stability gate
+    rejects it, plus a finite-prefix diagnostic on the SEQUENTIAL path.
+    Comparing two all-NaN arrays proves nothing and is never done.
+    """
+    from experiments.s5_direct_prospective.stability_grid import RADIUS_BOUND
+
+    lambda_bar, b_bar = _model_modes(15)
+    real = np.float64 if X64 else np.float32
+    zero = np.zeros(lambda_bar.shape, dtype=real)
+    target = DP.NATIVE_MATCHED_TARGET
+    rejected = 0
+    for tau_value in (2.0, 10.0, 100.0):
+        tau = np.full(lambda_bar.shape, tau_value, dtype=real)
+        A, _ = DP.matched_state_coefficients(lambda_bar, b_bar, tau, zero,
+                                             target)
+        radius = float(np.max(ORACLE.exact_companion_radius(A)))
+        where = _context(tau=tau_value, target_construction=target,
+                         radius=radius)
+        if radius <= RADIUS_BOUND:
+            continue                                   # stable: nothing to do
+        rejected += 1
+        # gate 1 rejects it, and that is the assertion
+        assert radius > RADIUS_BOUND, where
+        # and the two implementations still agree wherever the MODEL is
+        # finite, checked on the sequential path with a prefix diagnostic
+        inputs = _inputs(40, 128)
+        fast = DP.matched_states(lambda_bar, b_bar, inputs, tau, zero,
+                                 target, scan_kind="sequential")
+        slow = ORACLE.matched_sequential(lambda_bar, b_bar, inputs, tau,
+                                         zero, target)
+        report = ORACLE.compare_finite_prefix(fast, slow)
+        report["context"] = where
+        print(report)
+        assert report["finite_masks_identical"], report
+        assert report["same_first_nonfinite"], report
+        if report["common_finite_prefix"] > 0:
+            assert report["max_relative_error_on_prefix"] < 1.0, report
+    assert rejected > 0, "expected the native-matched target to be unstable"
 
 
 def test_the_legacy_zucchet_coefficients_are_not_this_recurrence():
