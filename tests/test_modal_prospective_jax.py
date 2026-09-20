@@ -180,6 +180,49 @@ def test_every_added_pole_is_inside_the_unit_circle_in_jax():
                 float(np.max(pole))
 
 
+def test_complex64_inputs_survive_x64_being_enabled():
+    """REGRESSION for the dtype mismatch the cluster found.
+
+    With JAX_ENABLE_X64=1 an unqualified `np.ones(...)` is float64, so a
+    complex64 lambda_bar promoted to complex128 while the complex64 drive
+    did not, and `associative_scan` failed with
+
+        lax.concatenate requires arguments to have the same dtypes,
+        got complex64, complex128
+
+    Every stage of the pipeline is checked here to stay in complex64 while
+    x64 is on -- which is exactly the production mix, since the model runs
+    in float32 and the tests enable x64.
+    """
+    lambda_bar = np.asarray([0.5 + 0.2j, -0.3 + 0.4j, 0.7 - 0.1j],
+                            dtype=np.complex64)
+    b_bar = np.ones((3, 2), dtype=np.complex64)
+    inputs = np.ones((32, 2), dtype=np.float32)
+    native = MP.native_states(lambda_bar, b_bar, inputs)
+    assert native.dtype == np.complex64, native.dtype
+    stages = [(np.full((3,), value, dtype=np.complex64),
+               np.full((3,), other, dtype=np.complex64))
+              for value, other in ((1.0, 3.0), (0.5, 2.0))]
+    one = MP.apply_stage(native, *stages[0])
+    assert one.dtype == np.complex64, one.dtype
+    cascaded = MP.apply_cascade(native, stages)
+    assert cascaded.dtype == np.complex64, cascaded.dtype
+    assert bool(np.all(np.isfinite(cascaded)))
+    # and the reverse orientation takes the same path
+    assert MP.native_states(lambda_bar, b_bar, inputs,
+                            reverse=True).dtype == np.complex64
+    assert MP.apply_cascade(native, stages,
+                            reverse=True).dtype == np.complex64
+    # float64 inputs stay float64: the fix pins dtypes, it does not force
+    # everything down to single precision
+    if X64:
+        wide = lambda_bar.astype(np.complex128)
+        wide_b = b_bar.astype(np.complex128)
+        assert MP.native_states(wide, wide_b,
+                                inputs.astype(np.float64)
+                                ).dtype == np.complex128
+
+
 def test_production_length_float32_values_and_gradients_are_finite():
     """REQUIREMENT 8, at the production shape."""
     lambda_bar, b_bar = _modes(9, P=64, H=96)

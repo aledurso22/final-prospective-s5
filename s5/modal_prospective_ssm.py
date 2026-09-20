@@ -62,21 +62,25 @@ class ModalProspectiveS5SSM(S5SSM):
     def setup(self):
         super().setup()
         shape = (self.P,)
+        # parameters are float32 explicitly, as the other arms' are: an
+        # unqualified np.full is float64 whenever x64 is enabled, which
+        # would promote the whole cascade and break the scan's dtypes
         raw_d = float(np.log(np.expm1(self.d_init)))
         raw_delta = float(np.log(np.expm1(self.delta_init)))
         self.stage_d_raw = [
             self.param(f"stage{index}_d_raw",
-                       lambda rng, s, value=raw_d: np.full(s, value), shape)
+                       lambda rng, s, value=raw_d:
+                       np.full(s, value, dtype=np.float32), shape)
             for index in range(self.stages)]
         self.stage_delta_raw = [
             self.param(f"stage{index}_delta_raw",
-                       lambda rng, s, value=raw_delta: np.full(s, value),
-                       shape)
+                       lambda rng, s, value=raw_delta:
+                       np.full(s, value, dtype=np.float32), shape)
             for index in range(self.stages)]
         self.stage_gate_raw = [
             self.param(f"stage{index}_gate_raw",
                        lambda rng, s, value=self.gate_init:
-                       np.full(s, value), shape)
+                       np.full(s, value, dtype=np.float32), shape)
             for index in range(self.stages)]
         b_tilde = self.B[..., 0] + 1j * self.B[..., 1]
         step = self.step_rescale * np.exp(self.log_step[:, 0])

@@ -133,9 +133,11 @@ def apply_stage(values, d, n, h=H_TOKEN, reverse=False):
     """
     sequence = values[::-1] if reverse else values
     pole, alpha, beta = stage_coefficients(d, n, h)
+    # every operand is pinned to the sequence's dtype: see `native_states`
     pole = pole.astype(sequence.dtype)
-    drive = alpha.astype(sequence.dtype) * sequence \
-        + beta.astype(sequence.dtype) * _shift(sequence)
+    drive = (alpha.astype(sequence.dtype) * sequence
+             + beta.astype(sequence.dtype) * _shift(sequence)
+             ).astype(sequence.dtype)
     poles = pole * np.ones((sequence.shape[0], pole.shape[0]),
                            dtype=sequence.dtype)
     _, states = jax.lax.associative_scan(binary_operator, (poles, drive))
@@ -156,10 +158,19 @@ def apply_cascade(values, stages, h=H_TOKEN, reverse=False):
 
 
 def native_states(lambda_bar, b_bar, input_sequence, reverse=False):
-    """q_{j,t+1} = lambda_bar_j q_{j,t} + b_bar_j x_t, from the S5 scan."""
+    """q_{j,t+1} = lambda_bar_j q_{j,t} + b_bar_j x_t, from the S5 scan.
+
+    DTYPE DISCIPLINE. The broadcast array carries lambda_bar's dtype
+    explicitly. Without it, `np.ones(...)` is float64 whenever x64 is
+    enabled, so a complex64 lambda_bar promotes to complex128 while the
+    complex64 drive does not, and the scan's concatenate fails with a dtype
+    mismatch. Both operands of the scan are pinned to the SAME dtype here.
+    """
     elements = lambda_bar * np.ones((input_sequence.shape[0],
-                                     lambda_bar.shape[0]))
-    drive = jax.vmap(lambda u: b_bar @ u)(input_sequence)
+                                     lambda_bar.shape[0]),
+                                    dtype=lambda_bar.dtype)
+    drive = jax.vmap(lambda u: b_bar @ u)(input_sequence).astype(
+        lambda_bar.dtype)
     _, states = jax.lax.associative_scan(binary_operator, (elements, drive),
                                          reverse=reverse)
     return states
@@ -192,5 +203,6 @@ def native_mode_gain(lambda_bar, stages, h=H_TOKEN):
 
 def added_poles(stages, h=H_TOKEN):
     """Every pole the cascade adds: d/(h+d) per stage. Nothing else."""
-    return np.stack([stage_pole(d, h) for d, _ in stages], axis=0) \
-        if stages else np.zeros((0,))
+    if not stages:
+        return np.zeros((0,), dtype=np.float32)
+    return np.stack([stage_pole(d, h) for d, _ in stages], axis=0)
