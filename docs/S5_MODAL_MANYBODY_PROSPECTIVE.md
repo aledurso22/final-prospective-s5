@@ -126,6 +126,54 @@ production-length **float32** values and gradients finite; the cancellation
 report; the layer starting at Native with its penalty increasing in the
 gates; and Native S5 byte-identity against `ef004cd`.
 
+## 6a. First cluster results, and what they corrected
+
+**Correctness: 24 passed** (10 exact + 14 JAX) at `5550f9d`, including the
+production-shape float32 case (`max|state| = 686.7`, finite gradients) and
+the layer starting Native — `regime_per_mode {native: 8}`, every added pole
+`0.50025`, `native_mode_gain_min = 0.99967`, zero modes below the floor.
+
+**Throughput, measured:** one stage `0.58×` Native, two stages `0.46×`, at
+16 000 tokens. Each stage costs about one more scan of the same size, which
+is what three scans against one should cost. **My "near-Native throughput"
+prediction was wrong and is withdrawn.** Two caveats that made the first
+numbers less useful than they looked, now fixed:
+
+* peak memory was **identical for all three arms** because
+  `peak_bytes_in_use` is a process-wide high-water mark — the `1.0` memory
+  ratio was an artifact, not a measurement. Each arm now runs in its own
+  process (`--arm`), and a layer-level comparison is measured too, since
+  the scan-level ratio overstates the model-level cost.
+
+**Synthetic gate check: `NOT_DEMONSTRATED`.** The numbers, and why:
+
+| component | all-Native | gated | change |
+|---|---|---|---|
+| total MSE | 0.003024 | 0.002989 | −1.2% |
+| long-delay memory | 0.002155 | 0.002240 | **+3.9% (degraded)** |
+| lead | 0.000869 | 0.000749 | −13.8% |
+
+So the gated model **traded memory for lead** rather than getting both. The
+old criterion asked for heterogeneous gates and a lower *total*, and would
+have called that a win; the criterion now requires **reduced lead error AND
+long-delay memory not degraded**, because the scientific claim needs both.
+
+Two structural findings from the same run:
+
+* **the two stages were tied to six decimals** (`|n₁ − n₂| = 6.4e-7`).
+  Identical initialization gives identical gradients, so `n₁ = n₂` for ever,
+  which pins `Mⁿ = (Γⁿ/2)²` — the cascade was locked to the **critical**
+  branch and could never reach the general passive branch it claims to
+  span. Initialization is now asymmetric across stages and modes, and
+  `n₁ − n₂` is reported so the tie cannot recur unnoticed;
+* the gates **did** differentiate across modes in relative terms (24.7×
+  between the largest and smallest) but stayed small in absolute terms
+  (spread 0.075 against a 0.1 threshold), so they neither passed the
+  heterogeneity test nor changed the model much.
+
+None of this is tuned toward a positive result: the measurement defects are
+fixed and the criterion is made stricter, which is the opposite direction.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

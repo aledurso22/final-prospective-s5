@@ -1,15 +1,28 @@
 """Native versus one-stage versus two-stage, at the production shape.
 
-Measures what the cascade costs: the S5 scan is unchanged and each stage
-adds one scalar associative scan of the same shape, so the expectation is
-near-Native throughput and a small constant memory increase. The expectation
-is not assumed -- it is measured, with compilation timed separately.
+MEASURED, and it corrected the expectation. A first run gave 0.58x Native
+for one stage and 0.46x for two -- each stage costs about one more scan of
+the same size, which is what three scans against one should cost. The
+earlier "near-Native throughput" prediction was wrong and is withdrawn.
+
+Two things that first run got wrong, fixed here:
+
+  * PEAK MEMORY WAS NOT ISOLATED. `peak_bytes_in_use` is a process-wide
+    high-water mark, so all three arms reported the identical figure and
+    the memory ratio of 1.0 was an artifact, not a measurement. Each arm is
+    now measured in its OWN process, and `--arm` runs exactly one.
+  * THE SCAN WAS MEASURED IN ISOLATION. The layer also does the readout,
+    the norm and the GLU, so a scan-level ratio overstates the model-level
+    cost. A layer-level comparison is measured too, and it is the one that
+    decides feasibility.
 
 Runs no training and submits nothing.
 """
 
 import argparse
 import json
+import subprocess
+import sys
 import time
 
 import jax
@@ -91,15 +104,86 @@ def measure(label, stages, lambda_bar, b_bar, inputs):
                             jnp.ravel(MP.added_poles(stages).real)][:4]}
 
 
+ARMS = {"native": 0, "one_stage": 1, "two_stage": 2}
+
+
+def layer_comparison(seed):
+    """The LAYER, not the scan alone: readout, norm and GLU included.
+
+    This is the ratio that decides feasibility; the scan-level ratio
+    overstates the cost because the scan is only part of the layer.
+    """
+    import numpy
+
+    from s5.modal_prospective_ssm import init_modal_prospective_S5SSM
+    from s5.ssm import init_S5SSM
+
+    kwargs = dict(Lambda_re_init=-0.5 * numpy.ones(MODES),
+                  Lambda_im_init=numpy.linspace(0.1, 30.0, MODES),
+                  V=numpy.eye(MODES, dtype=numpy.complex64),
+                  Vinv=numpy.eye(MODES, dtype=numpy.complex64),
+                  H=FEATURES, P=MODES, C_init="lecun_normal",
+                  discretization="zoh", dt_min=0.001, dt_max=0.1,
+                  conj_sym=False, clip_eigs=True)
+    inputs = jax.random.normal(jax.random.PRNGKey(seed),
+                               (LENGTH, FEATURES)).astype(jnp.float32)
+    out = {}
+    for label, constructor in (("native_layer", init_S5SSM(**kwargs)),
+                               ("modal_layer",
+                                init_modal_prospective_S5SSM(**kwargs))):
+        model = constructor()
+        variables = model.init(jax.random.PRNGKey(0), inputs)
+        forward = jax.jit(lambda params, m=model: m.apply(params, inputs))
+        jax.block_until_ready(forward(variables))
+        started = time.perf_counter()
+        for _ in range(REPEATS):
+            values = forward(variables)
+        jax.block_until_ready(values)
+        out[label] = {"seconds": (time.perf_counter() - started) / REPEATS,
+                      "finite": bool(jnp.all(jnp.isfinite(values)))}
+    out["modal_ratio_to_native"] = (out["native_layer"]["seconds"]
+                                    / out["modal_layer"]["seconds"])
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True)
     parser.add_argument("--seed", type=int, default=301)
+    parser.add_argument("--arm", choices=sorted(ARMS),
+                        help="measure ONE arm, so peak memory is this "
+                             "process's alone; the orchestrator uses it")
+    parser.add_argument("--layer-only", action="store_true")
     args = parser.parse_args()
-    lambda_bar, b_bar, inputs = fixture(args.seed)
-    rows = [measure(label, stages_for(count), lambda_bar, b_bar, inputs)
-            for label, count in (("native", 0), ("one_stage", 1),
-                                 ("two_stage", 2))]
+
+    if args.arm:
+        lambda_bar, b_bar, inputs = fixture(args.seed)
+        row = measure(args.arm, stages_for(ARMS[args.arm]), lambda_bar,
+                      b_bar, inputs)
+        with open(args.out, "w") as handle:
+            json.dump(row, handle, indent=2)
+        print(json.dumps(row, indent=2))
+        return
+
+    if args.layer_only:
+        report = {"schema": "s5-modal/benchmark-layer-v1",
+                  "layer": layer_comparison(args.seed)}
+        with open(args.out, "w") as handle:
+            json.dump(report, handle, indent=2)
+        print(json.dumps(report, indent=2))
+        return
+
+    # each arm in its OWN process, so peak_bytes_in_use is not a shared
+    # high-water mark across arms
+    rows = []
+    for label in ("native", "one_stage", "two_stage"):
+        path = f"{args.out}.{label}.json"
+        subprocess.run([sys.executable, "-m",
+                        "experiments.s5_modal.benchmark", "--out", path,
+                        "--seed", str(args.seed), "--arm", label],
+                       check=True)
+        with open(path) as handle:
+            rows.append(json.load(handle))
     native = rows[0]
     for row in rows:
         row["forward_ratio_to_native"] = (
@@ -107,12 +191,19 @@ def main():
         row["memory_ratio_to_native"] = (
             row["peak_gpu_bytes"] / native["peak_gpu_bytes"]
             if row["peak_gpu_bytes"] and native["peak_gpu_bytes"] else None)
-    report = {"schema": "s5-modal/benchmark-v1",
+    report = {"schema": "s5-modal/benchmark-v2",
               "shape": {"length": LENGTH, "modes": MODES,
                         "features": FEATURES, "precision": "float32/complex64"},
               "rows": rows,
-              "note": "every added pole is d/(h+d) < 1 by construction; the "
-                      "S5 scan itself is unchanged"}
+              "layer": layer_comparison(args.seed),
+              "measurement_notes": [
+                  "each arm ran in its own process, so peak_bytes_in_use is "
+                  "not shared between arms",
+                  "the row ratios compare the SCAN alone; the layer entry "
+                  "compares the whole layer, which is the feasibility "
+                  "number",
+                  "every added pole is d/(h+d) < 1 by construction; the S5 "
+                  "scan itself is unchanged"]}
     with open(args.out, "w") as handle:
         json.dump(report, handle, indent=2)
     print(json.dumps(report, indent=2))

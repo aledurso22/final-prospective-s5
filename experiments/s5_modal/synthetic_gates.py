@@ -14,11 +14,19 @@ modes and leaving others Native. That is the ONLY claim this experiment
 makes: that the construction can DIFFERENTIATE. It is not evidence of
 benefit on Speech Commands, and the report says so.
 
-Success is declared only if BOTH hold: the fitted gates are heterogeneous
-across modes, and the loss with learnable gates beats the all-Native
-baseline on the same data and the same budget. Retained long-delay memory
-and reduced response lag are reported separately, since the scientific claim
-requires both and neither is assumed.
+SUCCESS CRITERION, corrected after the first run. The scientific claim needs
+BOTH retained long-delay memory AND reduced response lag, so the criterion
+tests both components, not the total. The first run improved the total by
+1.2% while the long-delay component DEGRADED by 3.9% and the lead component
+improved by 13.8% -- a trade, not a win -- and the old criterion would have
+called that "beats the baseline". It no longer can.
+
+STAGE SYMMETRY, fixed after the first run. Both stages were initialized
+identically, so they received identical gradients and stayed tied to six
+decimal places: n1 = n2 for ever, which locks the cascade to the CRITICAL
+branch M = (Gamma/2)^2 and makes the general passive branch unreachable.
+The stages are now initialized asymmetrically, and n1 versus n2 is reported
+so the tie cannot recur unnoticed.
 
 Runs on CPU in seconds. Trains nothing that touches Speech Commands.
 """
@@ -90,16 +98,27 @@ def loss_fn(params, inputs, target, use_gates, gate_penalty):
 
 
 def initial_params(key, stages=2):
+    """Asymmetric across stages AND across modes.
+
+    Identical stages receive identical gradients and stay tied for ever,
+    which pins n1 = n2 and so M = (Gamma/2)^2 -- the critical branch only.
+    Identical modes cannot differentiate either. Both symmetries are broken
+    here, by initialization rather than by any change to the mathematics.
+    """
     keys = jax.random.split(key, 8)
+    stage_offset = jnp.linspace(-0.5, 0.5, stages)[:, None]
+    mode_offset = jnp.linspace(-0.3, 0.3, MODES)[None, :]
     return {
         "lambda_re": -0.05 - 0.4 * jax.random.uniform(keys[0], (MODES,)),
         "lambda_im": jax.random.uniform(keys[1], (MODES,), minval=-2.0,
                                         maxval=2.0),
         "b_re": jax.random.normal(keys[2], (MODES, 2)) * 0.5,
         "b_im": jax.random.normal(keys[3], (MODES, 2)) * 0.5,
-        "d_raw": jnp.zeros((stages, MODES)),
-        "delta_raw": jnp.zeros((stages, MODES)) + 0.5,
-        "gate_raw": jnp.zeros((stages, MODES)) - 2.0,
+        "d_raw": stage_offset + mode_offset,
+        "delta_raw": 0.5 + stage_offset
+                     + 0.1 * jax.random.normal(keys[5], (stages, MODES)),
+        "gate_raw": -2.0 + stage_offset
+                    + 0.5 * jax.random.normal(keys[6], (stages, MODES)),
         "readout": jax.random.normal(keys[4], (2 * MODES,)) * 0.1,
     }
 
@@ -135,6 +154,9 @@ def evaluate(params, use_gates, seed=99):
     memory_error = float(jnp.mean(((prediction - target) * (delayed_part > 0)) ** 2))
     lead_error = float(jnp.mean(((prediction - target) * (delayed_part == 0)) ** 2))
     gate_values = [jnp.asarray(gate) for gate in gates]
+    numerators = [jnp.asarray(n.real) for _, n in stages]
+    stage_tie = (float(jnp.max(jnp.abs(numerators[0] - numerators[1])))
+                 if len(numerators) > 1 else float("nan"))
     return {
         "mean_squared_error": error,
         "long_delay_component_error": memory_error,
@@ -143,6 +165,15 @@ def evaluate(params, use_gates, seed=99):
                            for gate in gate_values],
         "gate_spread": [float(jnp.max(gate) - jnp.min(gate))
                         for gate in gate_values],
+        "gate_ratio_across_modes": [
+            float(jnp.max(gate) / jnp.maximum(jnp.min(gate), 1e-12))
+            for gate in gate_values],
+        "numerator_n1_minus_n2_max_abs": stage_tie,
+        "stages_are_tied": bool(stage_tie < 1e-4),
+        "gamma_numerator_mean": (float(jnp.mean(numerators[0] + numerators[1]))
+                                 if len(numerators) > 1 else float("nan")),
+        "mass_numerator_mean": (float(jnp.mean(numerators[0] * numerators[1]))
+                                if len(numerators) > 1 else float("nan")),
         "max_stage_pole": float(jnp.max(jnp.stack(
             [MP.stage_pole(d.real) for d, _ in stages]))),
     }
@@ -155,6 +186,9 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gate-penalty", type=float, default=1e-3)
     parser.add_argument("--spread-threshold", type=float, default=0.1)
+    parser.add_argument("--component-margin", type=float, default=0.02,
+                        help="relative change counted as real, per "
+                             "component")
     args = parser.parse_args()
 
     gated_params, gated_errors = train(True, args.steps, args.seed,
@@ -165,6 +199,16 @@ def main():
     native = evaluate(native_params, False)
     differentiated = any(spread > args.spread_threshold
                          for spread in gated["gate_spread"])
+    # BOTH components, not the total: the claim is retained long-delay
+    # memory AND reduced lag, so a trade between them is not a success
+    lead_change = ((gated["lead_component_error"]
+                    - native["lead_component_error"])
+                   / max(native["lead_component_error"], 1e-12))
+    memory_change = ((gated["long_delay_component_error"]
+                      - native["long_delay_component_error"])
+                     / max(native["long_delay_component_error"], 1e-12))
+    lead_improved = lead_change < -args.component_margin
+    memory_retained = memory_change < args.component_margin
     better = gated["mean_squared_error"] < native["mean_squared_error"]
     report = {
         "schema": "s5-modal/synthetic-gates-v1",
@@ -175,9 +219,18 @@ def main():
         "final_training_error": {"gated": gated_errors[-1],
                                  "native": native_errors[-1]},
         "gates_are_heterogeneous": bool(differentiated),
-        "beats_all_native_baseline": bool(better),
-        "status": ("DIFFERENTIATION_DEMONSTRATED" if differentiated and better
+        "beats_all_native_baseline_on_total": bool(better),
+        "component_changes": {"lead_relative": lead_change,
+                              "long_delay_relative": memory_change,
+                              "margin": args.component_margin},
+        "lead_improved": bool(lead_improved),
+        "long_delay_memory_retained": bool(memory_retained),
+        "status": ("DIFFERENTIATION_DEMONSTRATED"
+                   if differentiated and lead_improved and memory_retained
                    else "NOT_DEMONSTRATED"),
+        "criterion": ("heterogeneous gates AND reduced lead error AND "
+                      "long-delay memory not degraded; a trade between the "
+                      "two components is not a success"),
         "scope": ("a synthetic demonstration that per-mode gates can "
                   "differentiate; NOT evidence of benefit on Speech "
                   "Commands, and no scientific claim follows from it alone"),
@@ -185,8 +238,9 @@ def main():
     with open(args.out, "w") as handle:
         json.dump(report, handle, indent=2)
     print(json.dumps({key: report[key] for key in
-                      ("status", "gates_are_heterogeneous",
-                       "beats_all_native_baseline", "gated",
+                      ("status", "criterion", "gates_are_heterogeneous",
+                       "lead_improved", "long_delay_memory_retained",
+                       "component_changes", "gated",
                        "all_native_baseline")}, indent=2))
 
 
