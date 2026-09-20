@@ -136,7 +136,8 @@ echo "STAGE 1: initialization grid (declared rule, no validation consulted)"
 run_child init_grid "$PY" -u -m experiments.s5_wwj.init_grid \
   --out "$RUN_ROOT/init_grid.json" --seed "$SEED"
 
-TAU_INIT="0.25"
+# placeholders for DRY_RUN only; the real path reads both from the grid
+TAU_INIT="0.05"
 EPS_INIT="0.0625"
 if [[ "$DRY_RUN" != "1" ]]; then
   TAU_INIT="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["selected"]["tau_init"])' "$RUN_ROOT/init_grid.json")"
