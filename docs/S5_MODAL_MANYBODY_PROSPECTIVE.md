@@ -216,6 +216,48 @@ the **task** may genuinely not reward prospectivity without a memory cost.
 A `--gate-penalty 0` run separates them, and is a diagnostic rather than a
 tuning step, because its outcome is reported either way.
 
+## 6c. The gate-penalty diagnostic settles the question
+
+Running the synthetic task with `--gate-penalty 0` separated the two
+explanations, and the answer is unambiguous:
+
+| | penalty 1e-3 | **penalty 0** |
+|---|---|---|
+| gates heterogeneous | false | **true** |
+| max gate spread | 0.085 | **0.502** |
+| lead error | −13.2% | **−17.2%** |
+| long-delay memory | +3.6% | **+6.1% (worse)** |
+| total MSE | 0.002989 | 0.003001 |
+
+The penalty **was** suppressing the gates — with it removed they open wide
+(up to 0.59, spreads 0.24 and 0.50, ratios 15× and 6.7× across modes) and
+the heterogeneity criterion passes. But opening them buys **more** lead and
+costs **more** memory, monotonically. The penalty was never what stopped the
+model getting both.
+
+**On this probe the trade is intrinsic**, and that is the honest reading:
+engaging the prospective mechanics reduces lag and degrades long-delay
+memory, in proportion. `NOT_DEMONSTRATED` stands, and no tuning of the
+penalty will change it.
+
+**What IS demonstrated**, and was a stated deliverable: *different modes
+learn different gates*. With the penalty off, gates range from 0.017 to
+0.591 across the eight modes, a 15× ratio within a stage, and the two
+stages are genuinely independent (`|n₁ − n₂| = 2.30`, `Γⁿ = 1.913`,
+`Mⁿ = 0.930`, so `Mⁿ ≠ (Γⁿ/2)² = 0.915` — the general passive branch, not
+the critical one). Every added pole stayed inside the disc
+(`max_stage_pole = 0.687`).
+
+**What is not demonstrated** is scientific benefit, and one structural
+reason is visible in the probe itself: both demands are summed into a
+**single scalar target**, so the shared linear readout must serve memory and
+lead at once and per-mode specialization cannot be exploited. A two-channel
+target — long-delay memory on one output, the switch edge on the other —
+would let different modes serve different channels and is the minimal
+honest redesign. If that *also* trades, the construction does not deliver
+both on synthetic data, and that conclusion should be recorded rather than
+engineered away.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

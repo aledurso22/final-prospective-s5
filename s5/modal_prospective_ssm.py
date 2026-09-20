@@ -22,6 +22,7 @@ model from switching mechanics on everywhere for free, and
 cancelled native mode cannot pass silently.
 """
 
+import math
 from functools import partial
 
 import jax
@@ -65,8 +66,14 @@ class ModalProspectiveS5SSM(S5SSM):
         # parameters are float32 explicitly, as the other arms' are: an
         # unqualified np.full is float64 whenever x64 is enabled, which
         # would promote the whole cascade and break the scan's dtypes
-        raw_d = float(np.log(np.expm1(self.d_init)))
-        raw_delta = float(np.log(np.expm1(self.delta_init)))
+        # PURE PYTHON, deliberately. These are initialization constants, so
+        # computing them with jnp and forcing the result through `float()`
+        # fails the moment `apply` is traced under jit: setup() then runs
+        # inside the trace and float() of a tracer raises
+        # ConcretizationTypeError. math has no such problem and the values
+        # are identical.
+        raw_d = math.log(math.expm1(self.d_init))
+        raw_delta = math.log(math.expm1(self.delta_init))
         self.stage_d_raw = [
             self.param(f"stage{index}_d_raw",
                        lambda rng, s, value=raw_d:

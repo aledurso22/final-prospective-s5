@@ -289,6 +289,27 @@ def test_the_layer_runs_and_starts_at_native():
     assert diagnostics["native_mode_gain_min"] > 0.0
 
 
+def test_the_layer_survives_being_jitted():
+    """REGRESSION. `model.init` is not traced, so a `float(jnp...)` in
+    setup() passes there and fails only when `apply` is jitted -- which is
+    how the benchmark calls it, and how training would. Both paths are
+    exercised here."""
+    model = ARMS.init_modal_prospective_S5SSM(**_arm_kwargs())()
+    inputs = _inputs(14, 128, H=4)
+    variables = model.init(jax.random.PRNGKey(0), inputs)      # untraced
+    jitted = jax.jit(lambda params: model.apply(params, inputs))
+    out = jitted(variables)                                    # traced
+    assert bool(np.all(np.isfinite(out)))
+    assert _close(out, model.apply(variables, inputs),
+                  TOL64 if X64 else TOL32)
+    # and the gradient path, which traces setup() as well
+    def loss(params):
+        return np.sum(model.apply(params, inputs) ** 2)
+    grads = jax.jit(jax.grad(loss))(variables)
+    assert bool(np.all(np.isfinite(
+        jax.tree_util.tree_leaves(grads)[0])))
+
+
 def test_the_penalty_grows_with_the_gates():
     kwargs = _arm_kwargs()
     inputs = _inputs(12, 32, H=4)

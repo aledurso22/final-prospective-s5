@@ -92,3 +92,44 @@ def test_the_layer_reports_the_diagnostics_the_construction_promises():
                 "modes_below_cancellation_floor", "regime_per_mode"):
         assert key in source, key
     assert SI.defines_function(tree, "penalty")
+
+
+def test_setup_never_forces_a_jnp_value_to_a_python_float():
+    """REGRESSION. `setup()` runs inside the trace whenever `apply` is
+    jitted, so `float(jnp.something)` raises ConcretizationTypeError there
+    while working fine under an unjitted `init`. Initialization constants
+    must therefore be computed with `math`, not with `jnp`.
+
+    Checked by parsing, so it fails on a laptop rather than after a GPU run.
+    """
+    tree = SI.parse(LAYER)
+    setup = SI.function_node(tree, "setup")
+    offenders = []
+    for node in ast.walk(setup):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "float"):
+            continue
+        for argument in node.args:
+            if isinstance(argument, ast.Call):
+                dotted = SI._dotted(argument.func) or ""
+                if dotted.startswith(("np.", "jnp.", "jax.")):
+                    offenders.append(dotted)
+    assert offenders == [], offenders
+    # and the constants really are computed with math
+    source = ast.get_source_segment(io.open(LAYER).read(), setup) or ""
+    assert "math.log(math.expm1(" in source
+    assert ("math", "math") in SI.imported_names(tree)
+
+
+def test_only_reporting_methods_convert_arrays_to_python_floats():
+    """`diagnostics()` may call float() -- it builds a JSON report and is
+    never jitted -- but the forward path may not."""
+    tree = SI.parse(LAYER)
+    for name in ("setup", "__call__", "_one_direction", "penalty"):
+        node = SI.function_node(tree, name)
+        if node is None:
+            continue
+        calls = [n for n in ast.walk(node)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "float"]
+        assert calls == [], (name, len(calls))
