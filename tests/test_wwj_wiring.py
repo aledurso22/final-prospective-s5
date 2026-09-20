@@ -13,6 +13,8 @@ import os
 import re
 import subprocess
 
+from tests import source_introspection as SI
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: the commit whose entire existing tree must be untouched by this work
 FROZEN_BASE = "ef004cda025b4e098041cfe5970c217fa0015bba"
@@ -163,17 +165,24 @@ def test_the_new_wwj_files_exist_and_are_tracked():
 def test_the_principal_operator_is_fir_and_reuses_the_native_scan():
     """The architecture: Native scan untouched, WWJ as a three-tap on its
     trajectory. No new recurrence, so no new poles."""
+    tree = SI.parse(OPERATOR)
+    # structural: the import and the call, not their spelling
+    assert ("s5.ssm", "binary_operator") in SI.imported_names(tree) or \
+        (".ssm", "binary_operator") in SI.imported_names(tree) or \
+        any(name == "binary_operator"
+            for _, name in SI.imported_names(tree))
+    assert SI.calls(tree, "jax.lax.associative_scan")
+    called = SI.called_names(tree)
+    for forbidden in ("scan_companion", "companion_matrix",
+                      "companion_doubling_scan"):
+        assert forbidden not in called, forbidden
+    assert not any(name.endswith("eigvals") for name in called)
     source = _text(OPERATOR)
-    assert "from .ssm import binary_operator" in source
-    assert "associative_scan(binary_operator" in source
-    for forbidden in ("scan_companion", "companion_matrix", "doubling",
-                      "eigvals"):
-        assert forbidden not in source, forbidden
     assert "(1.0 + k + m) * states" in source       # the three-tap itself
     assert "- (k + 2.0 * m) * _shift(states, 1)" in source
     assert "+ m * _shift(states, 2)" in source
     # and the claim about poles is a function, not a sentence
-    assert "def recurrent_poles(" in source
+    assert SI.defines_function(tree, "recurrent_poles")
 
 
 def test_the_rejected_realization_is_quarantined():
@@ -238,10 +247,11 @@ def test_the_old_generalized_arm_keeps_its_own_name():
 
 
 def test_no_eigendecomposition_in_the_principal_path():
-    code = [line for line in _text(OPERATOR).splitlines()
-            if not line.strip().startswith("#")]
-    for forbidden in ("eigvals(", "eigh(", "linalg.eig"):
-        assert not any(forbidden in line for line in code), forbidden
+    """Structural: no eigendecomposition is CALLED. A docstring may say so."""
+    called = SI.called_names(SI.parse(OPERATOR))
+    for forbidden in ("eigvals", "eigh", "eig"):
+        assert not any(name.split(".")[-1] == forbidden for name in called), \
+            forbidden
 
 
 def test_the_parameterization_is_stable_and_declared():
@@ -331,8 +341,14 @@ def test_every_new_python_file_parses_and_declares_an_entry_point():
         source = _text(path)
         ast.parse(source)
         if path in (BENCHMARK, DEV_GATE, INIT_GRID):
-            assert 'if __name__ == "__main__":' in source, path
-            assert "def main(" in source, path
+            # structural: a main() DEFINITION and a __main__ guard, checked
+            # by parsing rather than by searching for their spelling
+            tree = SI.parse(path)
+            assert SI.defines_function(tree, "main"), path
+            guards = [node for node in tree.body
+                      if isinstance(node, ast.If)
+                      and "__main__" in ast.dump(node.test)]
+            assert guards, path
 
 
 def test_both_principal_arms_are_gated_separately():

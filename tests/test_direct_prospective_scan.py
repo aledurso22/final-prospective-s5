@@ -227,13 +227,9 @@ def test_subset_stability_is_recorded_as_a_subset_result_only():
     assert observations
     for row in observations:
         assert row["scope"] == "THESE MODES ONLY, not production", row
+        # a subset observation carries no verdict and no eligibility field
         assert "verdict" not in row and "passes" not in row, row
-    source = open(os.path.join(REPO,
-                               "tests/test_direct_prospective_scan.py")).read()
-    body = source[source.index("def test_subset_stability_is_recorded"):
-                  source.index("def test_certification_is_the_only_source")]
-    assert "eligible" not in body and "PASS" not in body, \
-        "a subset observation must never be phrased as eligibility"
+        assert "eligible" not in row and "PASS" not in row.values(), row
 
 
 def test_a_stable_subset_can_still_miss_an_unstable_mode():
@@ -279,15 +275,13 @@ def test_certification_is_the_only_source_of_production_eligibility():
     """
     from experiments.s5_direct_prospective import certification as CERT
 
+    # The STRUCTURAL half of this claim -- that no module defines or binds a
+    # stable-tau list, and that the chunk study consumes certification --
+    # is asserted by AST in tests/test_direct_prospective_source.py, which
+    # needs no JAX. A substring search cannot answer it: the literal being
+    # searched for occurs in the assertion itself.
     for name in ("WELL_CONDITIONED_TAU", "CLUSTER_STABLE_CELLS"):
         assert name not in globals(), name
-    source = open(os.path.join(REPO,
-                               "tests/test_direct_prospective_scan.py")).read()
-    assert "def _stable_model_cells" not in source
-    study = open(os.path.join(
-        REPO, "experiments/s5_direct_prospective/chunk_study.py")).read()
-    assert "CLUSTER_STABLE_CELLS" not in study
-    assert "certification" in study
     # the single source of truth, with the tightened bound
     assert CERT.RADIUS_BOUND == 1.0
     for attribute in ("production_mode_inventory", "gate_1_stability",
