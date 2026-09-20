@@ -118,13 +118,16 @@ def layer_comparison(seed):
     from s5.modal_prospective_ssm import init_modal_prospective_S5SSM
     from s5.ssm import init_S5SSM
 
+    # `init_S5SSM` takes `bidirectional` as a REQUIRED argument, which the
+    # first version omitted; both constructors are given the same kwargs so
+    # the comparison is like for like
     kwargs = dict(Lambda_re_init=-0.5 * numpy.ones(MODES),
                   Lambda_im_init=numpy.linspace(0.1, 30.0, MODES),
                   V=numpy.eye(MODES, dtype=numpy.complex64),
                   Vinv=numpy.eye(MODES, dtype=numpy.complex64),
                   H=FEATURES, P=MODES, C_init="lecun_normal",
                   discretization="zoh", dt_min=0.001, dt_max=0.1,
-                  conj_sym=False, clip_eigs=True)
+                  conj_sym=False, clip_eigs=True, bidirectional=False)
     inputs = jax.random.normal(jax.random.PRNGKey(seed),
                                (LENGTH, FEATURES)).astype(jnp.float32)
     out = {}
@@ -132,6 +135,7 @@ def layer_comparison(seed):
                                ("modal_layer",
                                 init_modal_prospective_S5SSM(**kwargs))):
         model = constructor()
+        # both layers are the real production classes, not stand-ins
         variables = model.init(jax.random.PRNGKey(0), inputs)
         forward = jax.jit(lambda params, m=model: m.apply(params, inputs))
         jax.block_until_ready(forward(variables))

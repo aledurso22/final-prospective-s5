@@ -174,6 +174,48 @@ Two structural findings from the same run:
 None of this is tuned toward a positive result: the measurement defects are
 fixed and the criterion is made stricter, which is the opposite direction.
 
+## 6b. Second cluster run: memory is free, the trade is not
+
+**Peak memory, now isolated per process:** native 72 663 808 B, one stage
+72 664 832 B, two stages 72 665 856 B — **about 1 KB per stage**, the
+parameter arrays and nothing else. The cascade is free in memory. Throughput
+is unchanged at the scan level: **0.58× / 0.46×**. The layer-level number is
+still missing because `layer_comparison` omitted `bidirectional`, which
+`init_S5SSM` requires and which has no default — a TypeError after four
+minutes of GPU time. Fixed, and a **local** AST test now asserts the
+benchmark supplies every argument `init_S5SSM` requires, so this class of
+mistake fails on a laptop instead.
+
+**Synthetic, second run: still `NOT_DEMONSTRATED`, and the trade is
+unchanged.**
+
+| | first run | second run |
+|---|---|---|
+| lead error | −13.8% | **−13.2%** |
+| long-delay memory | +3.9% | **+3.6% (degraded)** |
+| `stages_are_tied` | **true** (6.4e-7) | **false** (\|n₁−n₂\| = 0.745) |
+| gate ratio across modes | 24.7× | **39.1× / 16.0×** |
+| gate spread (threshold 0.1) | 0.075 | 0.066 / 0.085 |
+
+The asymmetric initialization did what it was meant to: the stages are no
+longer tied, so `Γⁿ = 1.204` and `Mⁿ = 0.473` are now independent rather
+than locked to `Mⁿ = (Γⁿ/2)²`, and the general passive branch is reachable.
+**It did not change the result**, exactly as predicted before the run: the
+gated model still buys ~13% on lead by giving up ~3.6% on long-delay
+memory.
+
+What this is evidence for, stated carefully: the gates **do** specialize
+across modes — a 39× ratio between the most and least open mode is not
+noise — but they stay small in absolute terms (0.02–0.09), so the
+prospective mechanics are only weakly engaged, and where they are engaged
+they cost memory. On this probe the construction trades rather than wins.
+
+Two honest possibilities, not yet distinguished: the **gate penalty**
+(1e-3 × mean gate, against an MSE of 3e-3) may be suppressing the gates, or
+the **task** may genuinely not reward prospectivity without a memory cost.
+A `--gate-penalty 0` run separates them, and is a diagnostic rather than a
+tuning step, because its outcome is reported either way.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a
