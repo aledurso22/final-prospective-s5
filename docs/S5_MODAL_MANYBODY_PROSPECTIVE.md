@@ -176,9 +176,12 @@ fixed and the criterion is made stricter, which is the opposite direction.
 
 ## 6b. Second cluster run: memory is free, the trade is not
 
-**Peak memory, now isolated per process:** native 72 663 808 B, one stage
-72 664 832 B, two stages 72 665 856 B — **about 1 KB per stage**, the
-parameter arrays and nothing else. The cascade is free in memory. Throughput
+**Peak memory in the scan-only benchmark:** native 72 663 808 B, one stage
+72 664 832 B, two stages 72 665 856 B — about 1 KB per stage. **That "the
+cascade is free in memory" reading was wrong**, and §6d corrects it: the
+measurement was forward-only, batch 1, one layer, so the 1 KB is just the
+parameters. Under real training the stages' intermediates are retained for
+the backward pass, and the true cost is +4.59 GiB. Throughput
 is unchanged at the scan level: **0.58× / 0.46×**. The layer-level number is
 still missing because `layer_comparison` omitted `bidirectional`, which
 `init_S5SSM` requires and which has no default — a TypeError after four
@@ -270,6 +273,48 @@ would let different modes serve different channels and is the minimal
 honest redesign. If that *also* trades, the construction does not deliver
 both on synthetic data, and that conclusion should be recorded rather than
 engineered away.
+
+## 6d. The production-shaped measurement, and a correction
+
+The real model — `BatchClassificationModel`, batch 16, 16 000 tokens, width
+96, six bidirectional layers, genuine optimizer updates:
+
+| | Native | modal | ratio |
+|---|---|---|---|
+| seconds per step | 0.1894 | 0.2957 | **1.56× slower** |
+| steps per minute | 317 | 203 | 0.640× |
+| **peak GPU memory** | 6.91 GiB | **11.49 GiB** | **1.66× (+4.59 GiB)** |
+| parameters | 281 098 | 283 402 | +2 304 |
+| loss at init | 1.855573 | 1.855557 | — |
+| gradient norm at init | 1.13601 | 1.13519 | — |
+
+**The memory claim in §6b was wrong and is corrected here.** "About 1 KB per
+stage" came from a forward-only, batch-1, single-layer measurement, where
+1 KB is simply the parameter arrays. Under real training the cascade's
+intermediates are retained for the backward pass across six layers and a
+batch of sixteen, and the actual cost is **+4.59 GiB, a 1.66× increase**.
+This is the third time a toy measurement has misled; the production-shaped
+number is the one that counts, and 11.49 GiB is 48% of a 24 GiB RTX 3090,
+so it fits with headroom.
+
+Two sanity checks that the construction behaves as designed: the parameter
+count rises by exactly 6 layers × 2 stages × 64 modes × 3 arrays = 2 304,
+and the loss and gradient norm at initialization match Native to five
+decimals — because the gates start closed, so the layer *is* Native there.
+
+**Wall-clock projection.** Native's recorded 15-epoch wave is 5.51 h, of
+which only 1.52 h is training steps; the other 3.99 h is validation,
+checkpointing, data handling and the per-step host synchronizations in the
+runner, none of which is arm-specific. So:
+
+* if those overheads are arm-independent: **6.36 h**;
+* if everything scaled by 1.56×: **8.60 h**.
+
+The truth is between. Both ends **fit a 12 h allocation with a 25% margin**
+(budget 9.0 h) and fit 18 h comfortably. **The cost question is closed: the
+cascade is affordable.**
+
+What remains open is the science, and it is not a speed problem.
 
 ## 7. First deliverables, and what is deliberately absent
 
