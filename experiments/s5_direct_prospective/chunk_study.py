@@ -35,11 +35,12 @@ import jax.numpy as jnp
 import numpy
 from flax.traverse_util import flatten_dict
 
+from experiments.s5_direct_prospective import certification as CERT
 from experiments.s5_three_arm_full import runner as RUNNER
 from s5 import direct_prospective as DP
 from s5.ssm import discretize_zoh
 
-CHUNKS = (16, 32, 64, 128, 256)
+CHUNKS = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 ORDERS = {"professor_tss": 2, "wwj_generalized_tss": 3}
 #: every cell the cluster measured as stable, NOT only the weak tau = 1000
 #: limit: (tau, measured radius at eps = 0, measured radius at eps = 1/4)
@@ -58,6 +59,8 @@ TRANSITION_NORM_CEILING = 10.0
 
 
 def production_modes(seed=301, layer=0):
+    """One layer, for the timing rows. GATE 1 uses the WHOLE inventory via
+    `certification.production_mode_inventory`, never this."""
     state = RUNNER.init_state("native_matched_s5", seed)
     flat = flatten_dict(state.params)
     keys = [key for key in flat if key[-1] == "Lambda_re"]
@@ -196,8 +199,13 @@ def main():
                         help="restrict to these tau values; default is every "
                              "cluster-measured stable cell")
     args = parser.parse_args()
+    inventory = CERT.production_mode_inventory(args.seed)
     lambda_bar, b_bar = production_modes(args.seed)
-    report = {"schema": "s5-direct-prospective/chunk-study-v1",
+    report = {"schema": "s5-direct-prospective/chunk-study-v2",
+              "inventory": {
+                  "layers": len(inventory),
+                  "modes_total": sum(entry["modes"] for entry in inventory),
+                  "directions_share_modes": True},
               "cell": {"tau": TAU, "eps": EPS,
                        "target": DP.PROFESSOR_LINEAR_TARGET},
               "chunks": list(CHUNKS), "results": []}
@@ -205,17 +213,32 @@ def main():
         for tau_value, radius_zero, radius_critical in CLUSTER_STABLE_CELLS:
             if args.taus and tau_value not in args.taus:
                 continue
+            order = ORDERS[model]
+            eps = 0.0 if order == 2 else 0.25
+            # GATE 1 over EVERY production mode, before anything is measured
+            certificate = CERT.certify(inventory, tau_value, eps, order)
+            if certificate["status"] != "CHUNK_SELECTED":
+                report["results"].append({
+                    "model": model, "tau": tau_value,
+                    "certificate": certificate,
+                    "skipped": "cell rejected before measurement"})
+                continue
             for length in args.lengths:
                 baseline, rows = study(model, lambda_bar, b_bar, length,
                                        tau_value)
                 report["results"].append({
                     "model": model, "tau": tau_value, "length": length,
-                    "cluster_radius": (radius_zero if model == "professor_tss"
-                                       else radius_critical),
+                    "certificate": certificate,
+                    "adaptive_chunk": certificate["chunk_selection"],
+                    "subset_radius_reported_earlier":
+                        (radius_zero if model == "professor_tss"
+                         else radius_critical),
                     "baseline": baseline, "rows": rows})
     # the decision rule, applied by code
     acceptable = []
     for block in report["results"]:
+        if "baseline" not in block:
+            continue
         tolerance = 10.0 * block["baseline"]["sequential_float32_vs_float64"]
         for row in block["rows"]:
             if row.get("chunk") is None:

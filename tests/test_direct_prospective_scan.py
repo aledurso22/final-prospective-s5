@@ -52,8 +52,15 @@ CLUSTER_STABLE_CELLS = (
     (10.0, 0.25, 0.8851554058), (50.0, 0.25, 0.9662813133),
     (100.0, 0.25, 0.9819794261), (1000.0, 0.25, 0.9980477225),
 )
-#: the well-conditioned subset, where float32 is expected to be usable
-WELL_CONDITIONED_TAU = (2.0, 5.0, 10.0)
+#: WITHDRAWN. tau = 2 and tau = 5 were called well-conditioned on the
+#: strength of a handful of randomly drawn modes. Over the mode region they
+#: are UNSTABLE -- at tau = 2 the mode Abar = 0.9 e^{-2i} has radius 1.4416
+#: and the model (sequential float32 included) diverges at token 242. Cells
+#: are certified over the WHOLE production inventory now, not a subset.
+WELL_CONDITIONED_TAU = (10.0,)
+#: the offending mode, preserved as a permanent regression
+OFFENDING_MODE = {"tau": 2.0, "eps": 0.0, "abs_lambda": 0.9, "angle": -2.0,
+                  "radius": 1.4415912882, "first_nonfinite_token": 242}
 
 
 def _context(**fields):
@@ -245,33 +252,112 @@ def test_the_cluster_stable_cells_are_reproduced():
                for tau, _, _ in CLUSTER_STABLE_CELLS)
 
 
-def test_the_block_scan_matches_sequential_in_float32_at_well_conditioned_cells():
-    """GATE 2 where it can be passed. At tau = 2, 5 and 10 the transition
-    norm |H^C| is O(1), so the block scan's float32 error is within a small
-    factor of the ordinary sequential recurrence's -- unlike tau = 1000,
-    where |H^64| = 9.4e2 and it is not
-    (docs/analysis/direct_prospective_stable_cells.txt)."""
+def _first_nonfinite(values):
+    """(token, mode) of the first nonfinite entry, or (None, None)."""
+    finite = np.isfinite(values)
+    rows = np.where(~np.all(finite, axis=1))[0]
+    if rows.size == 0:
+        return None, None
+    token = int(rows[0])
+    return token, int(np.where(~finite[token])[0][0])
+
+
+def test_gate_1_rejects_the_cells_that_a_mode_subset_called_stable():
+    """REGRESSION for the tau = 2 failure, preserving the offending mode.
+
+    Abar = 0.9 e^{-2i} lies inside the region the old test sampled, has
+    companion radius 1.4416, and makes the MODEL diverge -- the sequential
+    float32 path goes nonfinite at token 242 exactly as the block scan does.
+    The cell is a gate-1 rejection, and no scan or tolerance is implicated.
+    """
+    from experiments.s5_direct_prospective import certification as CERT
+
+    real = np.float64 if X64 else np.float32
+    lambda_bar = np.asarray(
+        [OFFENDING_MODE["abs_lambda"]
+         * np.exp(1j * OFFENDING_MODE["angle"])], dtype=_complex())
+    b_bar = np.ones((1, 1), dtype=_complex())
+    tau = np.full((1,), OFFENDING_MODE["tau"], dtype=real)
+    A, C = DP.professor_tss_state_coefficients(lambda_bar, b_bar, tau,
+                                               DP.PROFESSOR_LINEAR_TARGET)
+    radius = float(ORACLE.exact_companion_radius(A)[0])
+    where = _context(tau=OFFENDING_MODE["tau"], eps=0.0,
+                     target_construction=DP.PROFESSOR_LINEAR_TARGET,
+                     lambda_bar=complex(lambda_bar[0]), radius=radius)
+    assert abs(radius - OFFENDING_MODE["radius"]) < 1e-6, where
+    assert radius > CERT.RADIUS_BOUND, where          # gate 1 rejects it
+
+    # and the divergence is the MODEL's, not a scan's: the sequential path
+    # goes nonfinite too, at the same token
+    drive = DP.input_drive(C, np.zeros((4000, 1), dtype=real).at[0, 0].set(1.0))
+    sequential = DP.sequential_scan_jax(A, drive)
+    sequential_token, _ = _first_nonfinite(sequential)
+    if not X64:                       # float32: the model overflows
+        assert sequential_token is not None, where
+        for chunk in (1, 2, 4, 8, 16, 32, 64):
+            block_token, _ = _first_nonfinite(DP.block_scan(A, drive, chunk))
+            assert block_token == sequential_token, _context(
+                chunk=chunk, block=block_token,
+                sequential=sequential_token, **{"cell": where})
+
+
+def test_sequential_finiteness_is_asserted_before_any_block_comparison():
+    """GATE 2, restructured so a NaN can never be misattributed.
+
+    The sequential reference is checked and REPORTED first; only if it is
+    entirely finite is a block-relative error computed at all. Cells are
+    certified over every mode by gate 1 beforehand.
+    """
+    from experiments.s5_direct_prospective import certification as CERT
+
     lambda_bar, b_bar = _model_modes(14, P=16, H=4)
     single = lambda_bar.astype(np.complex64), b_bar.astype(np.complex64)
     inputs = jax.random.normal(jax.random.PRNGKey(40),
                                (4000, 4)).astype(np.float32)
-    for tau_value in WELL_CONDITIONED_TAU:
+    checked = 0
+    for tau_value in (2.0, 5.0, 10.0, 50.0):
         for eps in (0.0, 0.25):
             tau = np.full(lambda_bar.shape, tau_value, dtype=np.float32)
             mass = DP.mass_from_eps(tau, np.asarray(eps, dtype=np.float32))
             A, C = DP.matched_state_coefficients(
                 single[0], single[1], tau, mass, DP.PROFESSOR_LINEAR_TARGET)
+            radius = float(np.max(ORACLE.exact_companion_radius(A)))
+            base = _context(tau=tau_value, eps=eps, length=4000,
+                            target_construction=DP.PROFESSOR_LINEAR_TARGET,
+                            max_radius_over_these_modes=radius)
             drive = DP.input_drive(C, inputs)
-            block = DP.block_scan(A, drive, 64)
+            assert bool(np.all(np.isfinite(drive))), base
             sequential = DP.sequential_scan_jax(A, drive)
+            token, mode = _first_nonfinite(sequential)
+            report = {"context": base, "radius": radius,
+                      "sequential_finite": token is None,
+                      "sequential_first_nonfinite": {"token": token,
+                                                     "mode": mode}}
+            if token is not None:
+                # the MODEL diverges: gate 1 must have rejected this cell,
+                # and no block-relative error is computed at all
+                report["verdict"] = "REJECTED_BY_GATE_1"
+                print(report)
+                assert radius > CERT.RADIUS_BOUND, report
+                continue
             scale = float(np.max(np.abs(sequential)))
-            error = float(np.max(np.abs(block - sequential))) / scale
-            where = _context(tau=tau_value, eps=eps, chunk=64, length=4000,
-                             target_construction=DP.PROFESSOR_LINEAR_TARGET,
-                             block_vs_sequential_float32=error)
-            print(where)
-            assert bool(np.all(np.isfinite(block))), where
-            assert error < 1e-2, where
+            assert np.isfinite(scale) and scale > 0.0, report
+            for chunk in (1, 2, 4, 8, 16, 32, 64):
+                block = DP.block_scan(A, drive, chunk)
+                block_token, block_mode = _first_nonfinite(block)
+                row = dict(report, chunk=chunk,
+                           block_first_nonfinite={"token": block_token,
+                                                  "mode": block_mode})
+                if block_token is not None:
+                    row["verdict"] = "BLOCK_DIVERGED_WHERE_SEQUENTIAL_DID_NOT"
+                    print(row)
+                    continue                       # recorded, not asserted
+                row["block_vs_sequential_float32"] = float(
+                    np.max(np.abs(block - sequential))) / scale
+                row["verdict"] = "COMPARED"
+                print(row)
+                checked += 1
+    assert checked > 0, "no cell reached a block-versus-sequential comparison"
 
 
 def test_the_stable_cell_scan_matches_the_oracle_within_measured_conditioning():

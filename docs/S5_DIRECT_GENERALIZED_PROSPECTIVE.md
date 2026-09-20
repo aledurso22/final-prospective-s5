@@ -381,7 +381,51 @@ amplified by later boundary applications.
 **That provisional conclusion was too pessimistic, and is corrected below.**
 It was drawn from τ = 1000 alone, which is the *weak, nearly marginal* limit.
 
-## 6c-bis. Corrected: the block scan works at the well-conditioned cells
+## 6c-ter. WITHDRAWN AGAIN: §6c-bis was subset certification, not certification
+
+**The τ = 2, 5, 10 "well-conditioned" conclusion below is withdrawn.** It was
+measured on two representative modes (angles 0 and 0.46 rad) and the
+"stable cells" it built on came from a handful of randomly drawn modes. Over
+the mode region those cells are **mathematically unstable**:
+
+| τ | ε | max ρ over \|Ā\|≤0.9, \|angle\|≤2 | worst mode | verdict |
+|---|---|---|---|---|
+| **2** | 0 | **1.4415** | 0.9·e^{−2i} | **UNSTABLE** |
+| **2** | 1/4 | **1.2830** | 0.510+0.742i | **UNSTABLE** |
+| **5** | 0 | **1.0977** | 0.9·e^{−2i} | **UNSTABLE** |
+| **5** | 1/4 | **1.0587** | 0.831+0.344i | **UNSTABLE** |
+| 10 | 0 | 0.9947 | 0.9·e^{−2i} | ok |
+| 10 | 1/4 | 0.9935 | 0.885−0.164i | ok |
+| 50–1000 | both | ≤ 0.999 | — | ok |
+
+The cluster's failure at τ = 2, ε = 0, C = 64 was therefore **not a scan
+defect**: the offending mode Ā = 0.9·e^{−2i} has ρ = 1.4416, and the
+**sequential float32 path diverges at token 242 exactly as every block chunk
+size does** (`direct_prospective_tau2_diagnosis.txt`; \|H^C\| there runs
+1.23 → 3.59e40 across C = 1…256, and the drive stays finite at 1.5). It is a
+**gate-1 rejection**.
+
+Consequences, now implemented:
+
+* `experiments/s5_direct_prospective/certification.py` certifies a cell over
+  the **complete production-initialized inventory** for a seed — every layer,
+  every mode, with both directions covered because S5's reverse branch shares
+  a layer's `Lambda_bar` and `B_bar`. No subset, no sampling. A cell is
+  eligible only if **every** production mode passes.
+* chunk selection is **adaptive**: the largest C ∈ {1,2,4,8,16,32,64,128,256}
+  whose \|H^C\| over *every* mode is within the ceiling. If only C = 1
+  qualifies it is reported as **not parallel** and must be benchmarked, never
+  assumed useful.
+* the gate-2 test now **asserts and reports sequential finiteness first**,
+  with the first nonfinite token and mode per path, and computes a
+  block-relative error only when the sequential reference is entirely finite.
+* the offending mode is preserved as a permanent regression.
+
+Only τ ≥ 10 survives gate 1 over the scanned region, and even that awaits
+whole-inventory certification on the cluster. The text below is kept for the
+record of how the earlier (wrong) conclusion was reached.
+
+## 6c-bis. SUPERSEDED: the block scan works at the well-conditioned cells
 
 The cluster found stable cells at τ = 2, 5, 10, 50, 100 and 1000 for
 `professor_linear_target` — not only τ = 1000. Re-running the float32

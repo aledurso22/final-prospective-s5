@@ -1,0 +1,31 @@
+offending mode: Abar = -0.374532153-0.818367684j  |Abar| = 0.900000  Bbar = 1.0
+float64 coefficients: A0 = -0.061798229-1.227551526j  A1 = 0.374532153+0.818367684j
+float32 coefficients: A0 = -0.061798230-1.227551579j  A1 = 0.374532163+0.818367660j
+exact companion roots: ['0.622961+0.041027j', '-0.684759-1.268578j']
+max companion radius : 1.4415912882  -> UNSTABLE
+
+     C          |H^C|
+     1     1.2291e+00
+     2     1.4882e+00
+     4     3.3814e+00
+     8     1.4522e+01
+    16     2.7100e+02
+    32     9.4286e+04
+    64     1.1413e+10
+   128     1.6722e+20
+   256     3.5900e+40
+
+drive finite: True, max |drive| = 1.5000e+00
+SEQUENTIAL float32: first nonfinite token = 242, max |state| before = 2.8689e+38
+SEQUENTIAL float64: first nonfinite token = 1940
+
+     C  first nonfinite   max |state| before
+     1              242           2.8689e+38
+     2              242           2.8689e+38
+     4              242           2.8689e+38
+     8              242           2.8689e+38
+    16              242           2.8689e+38
+    32              242           2.8689e+38
+    64              242           2.8689e+38
+
+CONCLUSION: the model itself diverges at this mode -- the sequential path goes nonfinite too -- so this cell must be rejected by GATE 1 (stability), not measured by GATE 2.
