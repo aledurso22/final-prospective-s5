@@ -292,13 +292,19 @@ def matched_modes(modes, channels=2, stages=2):
 
 
 def run_arm(use_gates, modes, args):
-    """One arm across every seed; returns the per-seed evaluations."""
-    out = []
+    """One arm across every seed.
+
+    Returns the per-seed evaluations and the final training error of each
+    seed, so the report can show both what was learned and how far training
+    got.
+    """
+    out, finals = [], []
     for seed in args.seeds:
-        params, _ = train(use_gates, args.steps, seed, args.gate_penalty,
-                          args.channels, modes)
+        params, errors = train(use_gates, args.steps, seed,
+                               args.gate_penalty, args.channels, modes)
         out.append(evaluate(params, use_gates, channels=args.channels))
-    return out
+        finals.append(errors[-1])
+    return out, finals
 
 
 def summarize(runs, key, sub=None):
@@ -327,11 +333,11 @@ def main():
     args = parser.parse_args()
 
     wide = matched_modes(args.modes, args.channels)
-    arms = {
-        "gated": run_arm(True, args.modes, args),
-        "native": run_arm(False, args.modes, args),
-        "native_capacity_matched": run_arm(False, wide, args),
-    }
+    runs = {"gated": run_arm(True, args.modes, args),
+            "native": run_arm(False, args.modes, args),
+            "native_capacity_matched": run_arm(False, wide, args)}
+    arms = {name: evaluations for name, (evaluations, _) in runs.items()}
+    final_errors = {name: finals for name, (_, finals) in runs.items()}
     gated, native = arms["gated"][0], arms["native"][0]
     differentiated = any(spread > args.spread_threshold
                          for spread in gated["gate_spread"])
@@ -398,8 +404,9 @@ def main():
         "steps": args.steps,
         "gate_penalty": args.gate_penalty,
         "gated": gated, "all_native_baseline": native,
-        "final_training_error": {"gated": gated_errors[-1],
-                                 "native": native_errors[-1]},
+        "final_training_error": {
+            name: sum(values) / len(values)
+            for name, values in final_errors.items()},
         "gates_are_heterogeneous": bool(differentiated),
         "beats_all_native_baseline_on_total": bool(better),
         "component_changes": {"lead_relative": lead_change,

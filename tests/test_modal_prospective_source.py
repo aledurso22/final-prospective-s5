@@ -146,3 +146,52 @@ def test_only_reporting_methods_convert_arrays_to_python_floats():
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                  and n.func.id == "float"]
         assert calls == [], (name, len(calls))
+
+
+#: every file this workstream owns, checked for dangling references
+WORKSTREAM_FILES = (CASCADE, LAYER, BENCHMARK, SYNTHETIC,
+                    os.path.join(REPO, "experiments/s5_modal/production_step.py"))
+
+
+def test_no_file_reads_a_name_nothing_binds():
+    """The guard for the commonest edit accident: replacing the code that
+    produced a value and leaving a reader behind.
+
+    Three of those reached the cluster in three commits -- `bidirectional`
+    missing from a constructor call, `POWER_CEILING` after its definition
+    was removed, and `gated_errors` after the statement that built it was
+    replaced. Each cost a GPU round trip. This finds them in milliseconds.
+    """
+    for path in WORKSTREAM_FILES:
+        assert SI.undefined_names(path) == {}, (path,
+                                               SI.undefined_names(path))
+
+
+def test_the_guard_actually_detects_a_dangling_reference():
+    """The check is worth nothing if it cannot fail."""
+    import tempfile
+
+    broken = ("def main():\n"
+              "    values = compute()\n"
+              "    return summary[-1]\n"
+              "def compute():\n"
+              "    return [1]\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+        handle.write(broken)
+        path = handle.name
+    try:
+        assert SI.undefined_names(path) == {"main": ["summary"]}
+    finally:
+        os.unlink(path)
+    # and a closure over an enclosing function's variable is NOT a defect
+    fine = ("def outer(scale):\n"
+            "    def inner(value):\n"
+            "        return value * scale\n"
+            "    return inner\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+        handle.write(fine)
+        path = handle.name
+    try:
+        assert SI.undefined_names(path) == {}
+    finally:
+        os.unlink(path)

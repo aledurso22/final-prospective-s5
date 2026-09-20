@@ -44,11 +44,19 @@ def assigned_names(tree, module_level_only=True):
     """Names bound by assignment; module level only by default."""
     nodes = tree.body if module_level_only else list(ast.walk(tree))
     names = set()
+    def add_target(target):
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                add_target(element)
+        elif isinstance(target, ast.Starred):
+            add_target(target.value)
+
     for node in nodes:
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
+                add_target(target)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target,
                                                             ast.Name):
             names.add(node.target.id)
@@ -165,3 +173,107 @@ def has_loop(node):
 def loop_kinds(node):
     return [type(child).__name__ for child in ast.walk(node)
             if isinstance(child, (ast.For, ast.While, ast.AsyncFor))]
+
+
+def _bound_in(node):
+    """Every name a function binds: arguments, assignments, loops, with,
+    comprehensions, except-handlers, walruses, nested definitions, imports."""
+    bound = set()
+    arguments = node.args
+    for group in (arguments.posonlyargs, arguments.args, arguments.kwonlyargs):
+        bound.update(argument.arg for argument in group)
+    for extra in (arguments.vararg, arguments.kwarg):
+        if extra:
+            bound.add(extra.arg)
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+            bound.add(child.id)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef)):
+            bound.add(child.name)
+            if child is not node:
+                inner = child.args if hasattr(child, "args") else None
+                if inner:
+                    for group in (inner.posonlyargs, inner.args,
+                                  inner.kwonlyargs):
+                        bound.update(argument.arg for argument in group)
+        elif isinstance(child, (ast.Import, ast.ImportFrom)):
+            for alias in child.names:
+                bound.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(child, ast.Lambda):
+            inner = child.args
+            for group in (inner.posonlyargs, inner.args, inner.kwonlyargs):
+                bound.update(argument.arg for argument in group)
+            for extra in (inner.vararg, inner.kwarg):
+                if extra:
+                    bound.add(extra.arg)
+        elif isinstance(child, ast.ExceptHandler) and child.name:
+            bound.add(child.name)
+        elif isinstance(child, ast.Global) or isinstance(child, ast.Nonlocal):
+            bound.update(child.names)
+    return bound
+
+
+def imported_bindings(tree):
+    """The names an import actually BINDS, honouring `as` aliases.
+
+    `imported_names` reports (module, imported name) for describing where
+    something comes from; for scope questions what matters is the local
+    binding, which is the alias when there is one.
+    """
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name)
+    return bound
+
+
+def module_scope(tree):
+    """Names visible to every function in the module."""
+    scope = set(assigned_names(tree, module_level_only=False))
+    scope |= function_names(tree) | class_names(tree) | imported_bindings(tree)
+    return scope
+
+
+def undefined_names(path):
+    """Names a function reads that nothing in reach ever binds.
+
+    A cheap guard against the commonest edit accident: replacing the code
+    that produced a value while leaving a reader of it behind. It has
+    already caught `POWER_CEILING` and `gated_errors` after the statements
+    that defined them were removed.
+    """
+    import builtins
+
+    tree = parse(path)
+    known = module_scope(tree) | set(dir(builtins)) | {"__name__", "__file__",
+                                                       "__doc__"}
+    missing = {}
+
+    def visit(node, inherited):
+        """A nested function sees its enclosing function's names too."""
+        bound = _bound_in(node) | inherited
+        loaded = {child.id for child in ast.walk(node)
+                  if isinstance(child, ast.Name)
+                  and isinstance(child.ctx, ast.Load)}
+        unresolved = sorted(loaded - bound)
+        if unresolved:
+            missing[node.name] = unresolved
+        for child in ast.walk(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and child is not node:
+                visit(child, bound)
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            visit(node, known)
+        elif isinstance(node, ast.ClassDef):
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef,
+                                       ast.AsyncFunctionDef)):
+                    visit(member, known | {"self"})
+    return missing
