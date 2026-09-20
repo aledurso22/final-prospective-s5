@@ -126,26 +126,56 @@ def test_the_scan_matches_the_sequential_oracle_for_many_lengths():
             assert _close(fast, slow, tolerance), (complex_modes, length)
 
 
-def test_the_scan_matches_the_oracle_with_and_without_rematerialization():
+def test_every_rematerialization_region_gives_the_same_answer():
+    """`remat` changes only where the backward pass recomputes; per-level,
+    whole-scan and none must agree, in value and in gradient."""
     lambda_bar, b_bar = _modes(2)
     tau, mass = _params(lambda_bar.shape[0])
     inputs = _inputs(3, 64)
-    remat = WWJ.wwj_states(lambda_bar, b_bar, tau, mass, inputs, remat=True)
-    plain = WWJ.wwj_states(lambda_bar, b_bar, tau, mass, inputs, remat=False)
-    assert _close(remat, plain, TOL64 if X64 else TOL32)
+    tolerance = TOL64 if X64 else TOL32
+    values = {mode: WWJ.wwj_states(lambda_bar, b_bar, tau, mass, inputs,
+                                   remat=mode)
+              for mode in (True, "whole", False)}
+    for mode, value in values.items():
+        assert _close(value, values[False], tolerance), mode
+
+    def loss(b, mode):
+        return np.sum(np.abs(WWJ.wwj_states(lambda_bar, b, tau, mass, inputs,
+                                            remat=mode)) ** 2).real
+
+    grads = {mode: jax.grad(loss)(b_bar, mode)
+             for mode in (True, "whole", False)}
+    for mode, grad in grads.items():
+        assert _close(grad, grads[False], 1e-8 if X64 else 1e-3), mode
 
 
 def test_zero_prehistory_and_no_wraparound_in_jax():
     """The first state sees only the first input, and an impulse never
-    influences anything before it."""
+    influences anything before it.
+
+    `impulse = 0` is a real boundary case -- the impulse is the very first
+    token and there is nothing before it -- so the "nothing before" check
+    must be vacuously true rather than a reduction over an empty slice,
+    which has no identity element.
+    """
     lambda_bar, b_bar = _modes(3)
     tau, mass = _params(lambda_bar.shape[0])
     length, H = 24, b_bar.shape[1]
     for impulse in (0, 1, 2, 11, 23):
         inputs = np.zeros((length, H)).at[impulse].set(1.0)
         states = WWJ.wwj_states(lambda_bar, b_bar, tau, mass, inputs)
-        assert float(np.max(np.abs(states[:impulse]))) == 0.0
+        # nothing before the impulse moves; vacuously true when impulse == 0
+        assert bool(np.all(states[:impulse] == 0)), impulse
+        # and it does reach the state at its own position, and after it
+        assert bool(np.any(states[impulse] != 0)), impulse
         assert float(np.max(np.abs(states[impulse:]))) > 0.0
+    # no wraparound, stated as its own claim: an impulse on the LAST token
+    # leaves every earlier state exactly zero, so the end of the sequence
+    # never feeds the beginning
+    last = np.zeros((length, H)).at[length - 1].set(1.0)
+    states = WWJ.wwj_states(lambda_bar, b_bar, tau, mass, last)
+    assert bool(np.all(states[:length - 1] == 0))
+    assert bool(np.any(states[length - 1] != 0))
 
 
 def test_the_reverse_direction_is_a_flipped_causal_scan():
@@ -250,6 +280,12 @@ def test_the_companion_radius_matches_exactly_known_roots():
     estimate never understates the radius."""
     import numpy
 
+    # ||H^n||_F^(1/n) = rho * (C n^(m-1))^(1/n) for a Jordan block of size m,
+    # so the overshoot is bounded by (3 n^2)^(1/n) for a 3x3 -- about 1.5% at
+    # n = 1024, and it is reached by a defective (triple-root) companion
+    # matrix. The bound is computed here rather than guessed.
+    n = float(2 ** 10)
+    bound = (10.0 * n * n) ** (1.0 / n)   # 10 is a generous basis constant
     for roots in ([0.5, 0.25, 0.1], [0.99, 0.5, 0.5], [1.2, 0.3, 0.2],
                   [0.7, 0.7, 0.7], [0.6 + 0.3j, 0.6 - 0.3j, 0.2]):
         poly = numpy.poly(roots)                  # z^3 + p1 z^2 + p2 z + p3
@@ -257,8 +293,9 @@ def test_the_companion_radius_matches_exactly_known_roots():
                       np.asarray([-poly[3]]))
         estimate = float(WWJ.companion_spectral_radius(A0, A1, A2)[0])
         exact = float(numpy.max(numpy.abs(roots)))
-        assert estimate >= exact - 1e-6
-        assert estimate <= exact * 1.01 + 1e-6, (roots, estimate, exact)
+        # submultiplicativity: the estimate never UNDERSTATES the radius
+        assert estimate >= exact - 1e-6, (roots, estimate, exact)
+        assert estimate <= exact * bound + 1e-6, (roots, estimate, exact)
 
 
 def test_the_response_diagnostics_are_labelled_and_finite():
