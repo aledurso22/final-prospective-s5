@@ -40,10 +40,22 @@ import optax
 
 from s5 import modal_prospective as MP
 
-MODES = 8
+MODES = 16
 LENGTH = 256
 BATCH = 16
 DELAY = 32
+#: the memory channel is an exponential TRACE of timescale DELAY, not a
+#: delayed delta: a bank of exponential modes represents a trace naturally
+#: and cannot represent a delay line, so the old target asked for something
+#: the model class does not have
+MEMORY_TIMESCALE = float(DELAY)
+#: the lead channel's input is BLURRED, so sharpening it needs the
+#: prospective mechanics; the old target was the first difference of an
+#: input channel, which a two-tap readout solves exactly
+BLUR_TIMESCALE = 8.0
+#: the baseline must explain at least this much of a channel, and not more
+#: than this much, for a comparison on that channel to carry information
+POWER_FLOOR, POWER_CEILING = 0.20, 0.99
 
 
 def make_batch(key, batch=BATCH, length=LENGTH, delay=DELAY, channels=2):
@@ -63,17 +75,31 @@ def make_batch(key, batch=BATCH, length=LENGTH, delay=DELAY, channels=2):
     positions = jax.random.randint(impulse_key, (batch,), 0, length - delay - 1)
     impulses = jnp.zeros((batch, length)).at[
         jnp.arange(batch), positions].set(1.0)
+
+    def smooth(signal, timescale):
+        """Causal exponential smoothing, as a scan over the token axis."""
+        decay = jnp.exp(-1.0 / timescale)
+
+        def step(carry, value):
+            carry = decay * carry + (1.0 - decay) * value
+            return carry, carry
+
+        return jax.lax.scan(step, jnp.zeros((signal.shape[0],)),
+                            signal.T)[1].T
     switch_times = jax.random.randint(switch_key, (batch,), length // 4,
                                       3 * length // 4)
     ramp = jnp.arange(length)[None, :]
     switch = (ramp >= switch_times[:, None]).astype(jnp.float32)
-    inputs = jnp.stack((impulses, switch), axis=-1)
-    # the long-delay term: the impulse, `delay` tokens later
-    delayed = jnp.zeros((batch, length)).at[
-        jnp.arange(batch), positions + delay].set(1.0)
-    # the lead term: the switch EDGE, which a lagging filter misses
-    edge = jnp.concatenate(
-        (switch[:, :1] * 0.0, switch[:, 1:] - switch[:, :-1]), axis=1)
+    # the lead channel's INPUT is a blurred switch: the sharp transition has
+    # to be reconstructed, which is what a lead filter is for
+    blurred = smooth(switch, BLUR_TIMESCALE)
+    inputs = jnp.stack((impulses, blurred), axis=-1)
+    # the memory term: an exponential TRACE of the impulse, timescale
+    # MEMORY_TIMESCALE, which a slow mode represents and a lead filter
+    # attenuates
+    delayed = smooth(impulses, MEMORY_TIMESCALE) * MEMORY_TIMESCALE
+    # the lead term: the SHARP switch, against the blurred input
+    edge = switch
     if channels == 1:
         return inputs, (delayed + edge)[..., None]
     return inputs, jnp.stack((delayed, edge), axis=-1)
@@ -123,7 +149,10 @@ def initial_params(key, stages=2, channels=2):
     stage_offset = jnp.linspace(-0.5, 0.5, stages)[:, None]
     mode_offset = jnp.linspace(-0.3, 0.3, MODES)[None, :]
     return {
-        "lambda_re": -0.05 - 0.4 * jax.random.uniform(keys[0], (MODES,)),
+        # the slowest representable mode must outlast the memory timescale:
+        # the previous range topped out at 20 tokens for a 32-token task, so
+        # the probe could not hold what it asked the model to recall
+        "lambda_re": -(0.002 + 0.3 * jax.random.uniform(keys[0], (MODES,))),
         "lambda_im": jax.random.uniform(keys[1], (MODES,), minval=-2.0,
                                         maxval=2.0),
         "b_re": jax.random.normal(keys[2], (MODES, 2)) * 0.5,
@@ -158,6 +187,13 @@ def train(use_gates, steps, seed, gate_penalty, channels=2,
         params, state, error = step(params, state, batch_key)
         errors.append(float(error))
     return params, errors
+
+
+def variance_explained(prediction, target):
+    """R^2 against the target's own variance: the power check."""
+    residual = float(jnp.mean((prediction - target) ** 2))
+    spread = float(jnp.mean((target - jnp.mean(target)) ** 2))
+    return 1.0 - residual / spread if spread > 0 else float("nan")
 
 
 def evaluate(params, use_gates, seed=99, channels=2):
@@ -201,8 +237,15 @@ def evaluate(params, use_gates, seed=99, channels=2):
             "gate_vs_lead_share_correlation":
                 float(jnp.sum(centred_share * centred_gate) / denominator),
         }
+    r_squared = ({"long_delay": variance_explained(prediction[..., 0],
+                                                   target[..., 0]),
+                  "lead": variance_explained(prediction[..., 1],
+                                             target[..., 1])}
+                 if channels == 2 else
+                 {"total": variance_explained(prediction, target)})
     return {
         "mean_squared_error": error,
+        "variance_explained": r_squared,
         "long_delay_component_error": memory_error,
         "lead_component_error": lead_error,
         "gates_per_mode": [[float(value) for value in gate]
@@ -227,7 +270,7 @@ def evaluate(params, use_gates, seed=99, channels=2):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--steps", type=int, default=400)
+    parser.add_argument("--steps", type=int, default=1200)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gate-penalty", type=float, default=1e-3)
     parser.add_argument("--spread-threshold", type=float, default=0.1)
@@ -259,6 +302,14 @@ def main():
     lead_improved = lead_change < -args.component_margin
     memory_retained = memory_change < args.component_margin
     better = gated["mean_squared_error"] < native["mean_squared_error"]
+    # POWER CHECK, before any verdict. A channel the baseline cannot learn
+    # at all, or already solves completely, carries no information about
+    # whether the cascade helps: the first probe compared two models on a
+    # lead channel Native solved to R2 = 0.997 and a memory channel neither
+    # arm learned (R2 0.111 -> -0.000), and no verdict follows from that.
+    baseline_power = native.get("variance_explained", {})
+    underpowered = {name: value for name, value in baseline_power.items()
+                    if not (POWER_FLOOR <= value <= POWER_CEILING)}
     report = {
         "schema": "s5-modal/synthetic-gates-v1",
         "task": ("long-delay memory and switch-edge lead on separate "
@@ -278,7 +329,11 @@ def main():
                               "margin": args.component_margin},
         "lead_improved": bool(lead_improved),
         "long_delay_memory_retained": bool(memory_retained),
-        "status": ("DIFFERENTIATION_DEMONSTRATED"
+        "baseline_variance_explained": baseline_power,
+        "underpowered_channels": underpowered,
+        "power_band": [POWER_FLOOR, POWER_CEILING],
+        "status": ("PROBE_UNDERPOWERED" if underpowered else
+                   "DIFFERENTIATION_DEMONSTRATED"
                    if differentiated and lead_improved and memory_retained
                    else "NOT_DEMONSTRATED"),
         "criterion": ("heterogeneous gates AND reduced lead error AND "
@@ -292,7 +347,8 @@ def main():
         json.dump(report, handle, indent=2)
     print(json.dumps({key: report[key] for key in
                       ("status", "channels", "criterion",
-                       "gates_are_heterogeneous",
+                       "baseline_variance_explained",
+                       "underpowered_channels", "gates_are_heterogeneous",
                        "lead_improved", "long_delay_memory_retained",
                        "component_changes", "gated",
                        "all_native_baseline")}, indent=2))

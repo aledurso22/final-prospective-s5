@@ -316,6 +316,51 @@ cascade is affordable.**
 
 What remains open is the science, and it is not a speed problem.
 
+## 6e. The two-channel probe was degenerate — no verdict was available
+
+Splitting the target into two channels did not rescue the experiment, and
+the reason is that **the probe could not measure the question at all**. Both
+arms, penalty off, against a per-channel target variance of 1/256:
+
+| channel | Native error | gated error | **Native R²** | **gated R²** |
+|---|---|---|---|---|
+| long-delay memory | 0.003472 | 0.003907 | **0.111** | **−0.000** |
+| lead | 1.14e-5 | 3.69e-6 | **0.997** | 0.999 |
+
+**Lead is solved by everyone; memory is learned by nobody.** The reported
+"−67.5% lead, +12.5% memory" is a move from 99.7% to 99.9% variance
+explained on one channel, and from 11% to 0% on the other. That is not
+evidence that the construction trades memory for lead — it is a failed
+measurement, and declaring a negative result from it would have been the
+error.
+
+Two structural faults, both mine:
+
+* **the mode initialization could not span the task.** `lambda_re` was
+  drawn from −(0.05 + 0.4·U), so the slowest representable mode had a
+  timescale of 20 tokens — for a 32-token recall. The probe asked the model
+  to hold something its own parameterization could not hold. The range is
+  now −(0.002 + 0.3·U), i.e. 3.3 to 500 tokens;
+* **the lead target was the first difference of an input channel**, which a
+  two-tap readout solves exactly — hence Native's R² of 0.997. The lead
+  input is now a **blurred** switch (exponential smoothing, timescale 8) and
+  the target is the sharp one, so sharpening it is what a lead filter is
+  for;
+* the memory target was a delayed **delta**, which a bank of exponential
+  modes cannot represent at all. It is now an exponential **trace** of
+  timescale 32 — something a slow mode holds naturally and a lead filter
+  attenuates, which is exactly the retention claim.
+
+A **power check** now runs before any verdict: if the baseline explains less
+than 20% or more than 99% of a channel, the status is `PROBE_UNDERPOWERED`
+and no conclusion is drawn. The first two probes would both have been caught
+by it.
+
+This is the third probe, and the justification is not that the previous
+answer was unwelcome: it is that the previous measurement provably had no
+power. If the powered probe shows a trade, that is the answer and it gets
+written up as the negative result.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a
