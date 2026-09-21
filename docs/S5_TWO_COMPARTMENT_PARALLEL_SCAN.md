@@ -207,61 +207,62 @@ Every production mode is strictly inside the unit disc. **The float64
 column of that run is void** for reason (a) and must be re-measured with
 `JAX_ENABLE_X64=1`.
 
-## 8. Benchmark — first run, and the row that was not what it said
+## 8. Benchmark — result
 
-Batch 16, length 16,000, full forward/backward/optimizer, one process each:
+Batch 16, length 16,000, full forward/backward/optimizer, **one process per
+arm**, with the scan actually in force verified by reading it back off the
+constructed module.
 
-| arm | s/step | steps/min | peak GiB | three seeds, 15 epochs |
-|---|---|---|---|---|
-| `native` | **0.1172** | 511.9 | 6.909 | 0.79 h |
-| `sequential` | **17.525** | 3.42 | 8.342 | **117.4 h** |
-| `companion` | 17.580 | 3.41 | **8.342** | — **VOID** |
+| arm | s/step | steps/min | peak GiB | 3 seeds × 15 epochs | vs sequential |
+|---|---|---|---|---|---|
+| `native` | 0.1172 | 512.0 | 6.909 | 0.79 h | 149.9× |
+| `sequential` | **17.5654** | 3.42 | 8.342 | **117.69 h** | 1.0× |
+| `companion` | 0.2479 | 242.0 | 12.940 | 1.66 h | **70.9×** |
+| `factored` | **0.2181** | **275.1** | **12.885** | **1.46 h** | **80.5×** |
 
-`sequential` reproduces the original problem cleanly: 3.42 steps/min here
-against the ≈2.98 measured before, **149.5× Native's per-step cost**, and
-117 hours for a three-seed wave. That is why the arm never ran.
+`identical_peak_memory_suspicious: {}` — all four arms allocated
+differently, and `implementations_in_force` reads
+`sequential / companion / factored` as requested. The rows are real.
 
-**The `companion` row is void, and so was the `factored` one.**
-`peak_device_bytes` came back as **8957147904 for both `sequential` and
-`companion` — identical to the byte.** Two different scan algorithms cannot
-allocate identically to the byte. They ran the same code.
+**117.7 hours becomes 1.46 hours.** The factored route is 1.14× faster than
+the companion scan and uses marginally less memory, which is what the
+operation count predicts: ~4 complex multiplies per combine against ~12,
+4 complex numbers carried against 6, and no `(L, P, 2, 2)` array at all.
 
-The cause: the benchmark selected the scan by assigning to the class
-attribute. A Flax `nn.Module` is turned into a **dataclass at class
-definition time**, so `__init__` has already captured the field defaults
-and assigning to the class attribute afterwards changes nothing an instance
-sees. Every generalized row ran `scan_companion_sequential`.
+**The trade the original implementation made, now quantified.**
+`scan_companion_sequential` was chosen because it is "memory-safe". It is:
+8.342 GiB against the parallel routes' 12.9. But that 1.54× saving cost
+**80× in time**. The arm was unrunnable for the sake of 4.5 GiB.
 
-Fixed by threading the choice through
-`init_generalized_prospective_S5SSM`, which puts it in the partial, and by
-`verify()` reading it **back off the constructed module** and refusing to
-report a row whose scan is not the one requested. Each row now carries
-`implementation_in_force` as evidence rather than
-`implementation` as an intention, and the parent flags any two arms that
-report identical peak memory.
+Against Native the factored arm costs **1.86× per step and 1.87× peak
+memory**, for twice the recurrent state (256 against 128 real values per
+layer) and two scans in series. That is the honest price of the second
+compartment, and it is affordable.
 
-### Thresholds the parallel rows have to clear
+Both thresholds are cleared with a wide margin: ≥ 9.8× was needed to fit a
+12 h allocation, and 80.5× lands the three-seed wave at 1.46 h.
 
-```
-sequential                      17.525 s/step    117.4 h / three seeds
-≥  4.9× faster  →  ≤ 3.58 s/step   →  fits a 24 h allocation
-≥  9.8× faster  →  ≤ 1.79 s/step   →  fits a 12 h allocation
-```
-
-Native's 0.117 s/step is not a target: this arm carries twice the state
-(256 against 128 real values per layer) and runs two scans in series.
+**One thing to check before any launch:** peak device memory is 12.9 GiB.
+That fits comfortably if the card has 24 GB or more, and not at all on a
+16 GB card at this batch size. The launcher must not be written until the
+device capacity is confirmed against this number.
 
 ## 9. Gates — status
 
 | gate | status |
 |---|---|
-| Algebraic equivalence (laptop, 17 tests) | **passed** |
+| Algebraic equivalence (laptop, 19 tests) | **passed** |
 | Byte identity | **passed** |
-| Whole-inventory certification, seeds 301–303, radius | **passed** — 1152 modes, worst 0.99997 |
-| float64 correctness gate | **not run** — needs `JAX_ENABLE_X64=1`; the first attempt was void |
+| Whole-inventory certification, radius, seeds 301–303 | **passed** — 1152 modes, worst 0.99997 |
+| **Throughput and peak memory** | **passed** — factored 80.5× over sequential, 1.46 h per wave |
+| float64 correctness gate | **NOT RUN** — needs `JAX_ENABLE_X64=1`; the first attempt was void |
 | JAX float32 equivalence and gradients | **re-run pending** after the fixture fixes |
-| Throughput and peak-memory benchmark | **partial** — Native measured, rest pending |
-| Launcher for this arm | **not added**, and must not be until the gates above pass |
+| Device capacity vs 12.9 GiB peak | **unconfirmed** |
+| Launcher for this arm | **not added** |
+
+**Speed is not correctness.** The factored scan is fast; whether it
+computes the same recurrence is decided by the float64 gate, which has not
+run. Until it does, nothing here licenses a launch.
 
 No certification of the parallel routes is claimed yet, no launcher exists,
 nothing has been trained, and no Slurm job has been submitted.
