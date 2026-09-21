@@ -145,21 +145,96 @@ above radius 1 is named with its seed, layer and index.
 `{s5/generalized_prospective_ssm.py}`. Files added by this branch are not
 identity violations and are excluded by that intersection.
 
-## 6. Gates — status
+## 6. What the first cluster run exposed
+
+Job 67223 at `0977072`. Laptop algebra passed (17/17). The JAX suite
+returned **8 failed, 4 passed**, and the certification "passed" for a
+reason that was itself a defect. Three separate causes, none of them in
+`s5/factored_recurrence.py`:
+
+**(a) The certification's float64 column was never float64.** JAX printed
+`Explicitly requested dtype complex128 ... will be truncated to complex64`,
+and the reported f64 and f32 numbers were identical to every digit
+(2.910e-04 against 2.910e-04). `x64` was off, so `astype(complex128)`
+silently did nothing and the float64 gate measured float32. **A gate that
+cannot detect its own absence is worse than no gate.** Requesting float64
+without `JAX_ENABLE_X64=1` is now a hard error, and the correctness gate
+moved into its own file that refuses to run without it.
+
+**(b) The test fixture was unstable, not the code.** `a1, a2` were drawn
+uniformly on `[-0.6, 0.6]²`, which puts **18% of modes at spectral radius
+≥ 1**, reaching 1.368. At length 16,000 that is `1.368^16000 ≈ 10^2180`:
+the companion scan's matrix products overflow to `inf`, `inf·0` gives
+`nan`, and the suite reported a failure that was entirely a property of the
+fixture. Production modes are certified at radius ≤ 0.99998. Coefficients
+are now drawn as **roots inside the unit disc** and mapped through
+`roots_to_coefficients`, and the gradient and production-length tests now
+assert the **oracle** is finite first, so they cannot be vacuous again.
+
+**(c) The repeated-root fixture drove one mode out of four.**
+`np.eye(4, 1)` is `[[1],[0],[0],[0]]`, so modes 1–3 had zero drive and the
+analytic comparison ran against an all-zero oracle. Now `np.ones((4, 1))`.
+
+### Tolerances, separated rather than loosened
+
+The brief forbids concealing failures by loosening tolerances, so the two
+questions are now asked separately:
+
+| gate | precision | tolerance | what it decides |
+|---|---|---|---|
+| algebraic correctness | **float64** | `1e-10` | do the three routes compute the same recurrence? |
+| accumulation | float32 | `1e-3` | how much single-precision round-off builds up? |
+
+The float32 number is **set from measurement, not from convenience**: the
+whole production inventory — 1152 modes, seeds 301–303, length 16,000, on
+modes whose spectral radius is 0.99997 so nothing decays away — came in at
+**2.3e-4 to 3.5e-4** relative against the sequential oracle. A real
+algebraic discrepancy would survive into float64 and be caught by the
+`1e-10` gate; only round-off would not.
+
+## 7. Certification result (first run, float32 only)
+
+`certification.json`, seeds 301, 302, 303, all six layers, 64 modes each:
+
+```
+total_modes_certified   1152
+worst_spectral_radius   0.9999748468399048      (bound 1.0)
+offending_modes         []
+certified               true
+```
+
+Every production mode is strictly inside the unit disc. **The float64
+column of that run is void** for reason (a) and must be re-measured with
+`JAX_ENABLE_X64=1`.
+
+## 8. Benchmark (partial)
+
+Native, one process, batch 16, length 16,000, full forward/backward/optimizer:
+
+```
+seconds_per_step   0.11722
+steps_per_minute   511.9
+peak_device        6.909 GiB
+projection         0.262 h/seed, 0.785 h for three seeds at 15 epochs
+```
+
+The old sequential arm measured ≈2.98 steps/min, i.e. ≈20.1 s/step —
+**≈172× Native's per-step cost**. The remaining rows are pending.
+
+## 9. Gates — status
 
 | gate | status |
 |---|---|
-| Algebraic equivalence (laptop) | **passed**, 17 tests |
+| Algebraic equivalence (laptop, 17 tests) | **passed** |
 | Byte identity | **passed** |
-| JAX equivalence, gradients, float32 | **not run** — needs GPU |
-| Whole-inventory certification, seeds 301–303 | **not run** — needs GPU |
-| Throughput and peak-memory benchmark | **not run** — needs GPU |
-| Launcher for this arm | **not added**, and must not be until the three
-  gates above pass |
+| Whole-inventory certification, seeds 301–303, radius | **passed** — 1152 modes, worst 0.99997 |
+| float64 correctness gate | **not run** — needs `JAX_ENABLE_X64=1`; the first attempt was void |
+| JAX float32 equivalence and gradients | **re-run pending** after the fixture fixes |
+| Throughput and peak-memory benchmark | **partial** — Native measured, rest pending |
+| Launcher for this arm | **not added**, and must not be until the gates above pass |
 
-The gates are explicitly incomplete. No certification is claimed and no
-launcher exists. Nothing has been run on the cluster and no Slurm job has
-been submitted.
+No certification of the parallel routes is claimed yet, no launcher exists,
+nothing has been trained, and no Slurm job has been submitted.
 
 ## 7. Cluster commands for independent verification
 
@@ -171,12 +246,17 @@ source bin/run_experiments/cluster_env.sh && cluster_check_env
 # 1. algebra, on any machine
 "$PY" -m pytest tests/test_two_compartment_algebra.py -q
 
-# 2. JAX/GPU equivalence, gradients, float32
+# 2a. ALGEBRAIC correctness, float64. x64 must really be on; the file
+#     refuses to run otherwise.
+JAX_ENABLE_X64=1 "$PY" -m pytest tests/test_factored_recurrence_float64.py -q \
+      2>&1 | tee float64_tests.log
+
+# 2b. float32 equivalence, gradients, production length
 "$PY" -m pytest tests/test_factored_recurrence_jax.py -q 2>&1 | tee jax_tests.log
 
-# 3. whole-inventory certification, seeds 301-303
-"$PY" -m experiments.s5_two_compartment.certify_inventory \
-      --out certification.json 2>&1 | tee certification.log
+# 3. whole-inventory certification, seeds 301-303, BOTH precisions
+JAX_ENABLE_X64=1 "$PY" -m experiments.s5_two_compartment.certify_inventory \
+      --precision both --out certification.json 2>&1 | tee certification.log
 
 # 4. benchmark, one process per arm
 "$PY" -m experiments.s5_two_compartment.benchmark \

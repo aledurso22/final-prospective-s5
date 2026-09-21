@@ -75,11 +75,28 @@ def _coefficients_for(group, clip_eigs=True):
     return a1, a2, c1, c2
 
 
+def x64_enabled():
+    return bool(jax.config.read("jax_enable_x64"))
+
+
 def _compare(a1, a2, c1, c2, length, key, dtype):
-    """Sequential oracle against both parallel routes, at one precision."""
+    """Sequential oracle against both parallel routes, at one precision.
+
+    REGRESSION. The first run reported a float64 column identical to the
+    float32 one to every digit, because x64 was off and
+    `astype(complex128)` silently truncated back to complex64 -- JAX even
+    said so in a warning that was not read. A precision gate that cannot
+    detect its own absence is worse than none, so requesting float64
+    without x64 is now an error rather than a quiet downgrade.
+    """
+    if dtype == "float64" and not x64_enabled():
+        raise SystemExit(
+            "float64 was requested but JAX x64 is OFF, so complex128 would "
+            "be truncated to complex64 and the column would silently "
+            "measure float32. Re-run with JAX_ENABLE_X64=1.")
     values = jax.random.normal(key, (length, c1.shape[-1]), dtype=np.float32)
     cast = (lambda v: v.astype(np.complex128)) if dtype == "float64" \
-        else (lambda v: v)
+        else (lambda v: v.astype(np.complex64))
     a1c, a2c, c1c, c2c = cast(a1), cast(a2), cast(c1), cast(c2)
     oracle = scan_companion_sequential(a1c, a2c, c1c, c2c, values)
     scale = float(np.max(np.abs(oracle))) or 1.0
@@ -101,13 +118,25 @@ def main():
     parser.add_argument("--length", type=int, default=16000,
                         help="production sequence length")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
+    parser.add_argument("--precision", choices=("float32", "float64", "both"),
+                        default="float32",
+                        help="float64 and both REQUIRE JAX_ENABLE_X64=1 and "
+                             "fail loudly without it")
     arguments = parser.parse_args()
 
     from experiments.s5_three_arm_full import runner
 
-    report = {"schema": "s5-two-compartment/certification-v1",
+    precisions = (("float32",) if arguments.precision == "float32"
+                  else ("float64",) if arguments.precision == "float64"
+                  else ("float64", "float32"))
+    if "float64" in precisions and not x64_enabled():
+        raise SystemExit(
+            "float64 certification requires JAX_ENABLE_X64=1; refusing to "
+            "report a float64 column measured in float32.")
+    report = {"schema": "s5-two-compartment/certification-v2",
               "arm": ARM, "seeds": arguments.seeds,
-              "length": arguments.length,
+              "length": arguments.length, "precisions": list(precisions),
+              "x64_enabled": x64_enabled(),
               "radius_bound": RADIUS_BOUND, "seeds_detail": {}}
     worst_radius, worst_float32, worst_float64 = 0.0, 0.0, 0.0
     total_modes, offending = 0, []
@@ -131,17 +160,19 @@ def main():
                                       "mode": index,
                                       "radius": float(radius[index])})
             key = jax.random.PRNGKey(seed)
-            comparison64 = _compare(a1, a2, c1, c2, arguments.length, key,
-                                    "float64")
-            comparison32 = _compare(a1, a2, c1, c2, arguments.length, key,
-                                    "float32")
+            measured = {name: _compare(a1, a2, c1, c2, arguments.length, key,
+                                       name) for name in precisions}
+            comparison64 = measured.get("float64")
+            comparison32 = measured.get("float32")
             worst_radius = max(worst_radius, float(radius.max()))
-            worst_float64 = max(worst_float64,
-                                max(comparison64[k]["relative_error"]
-                                    for k in ("companion", "factored")))
-            worst_float32 = max(worst_float32,
-                                max(comparison32[k]["relative_error"]
-                                    for k in ("companion", "factored")))
+            if comparison64:
+                worst_float64 = max(worst_float64,
+                                    max(comparison64[k]["relative_error"]
+                                        for k in ("companion", "factored")))
+            if comparison32:
+                worst_float32 = max(worst_float32,
+                                    max(comparison32[k]["relative_error"]
+                                        for k in ("companion", "factored")))
             seed_detail[name] = {
                 "modes": int(radius.size),
                 "max_spectral_radius": float(radius.max()),
@@ -155,25 +186,28 @@ def main():
                 "float64": comparison64,
                 "float32": comparison32,
             }
+            shown = "  ".join(
+                f"{label} {max(row[k]['relative_error'] for k in ('companion', 'factored')):.3e}"
+                for label, row in measured.items())
             print(f"seed {seed} {name:52s} modes {radius.size:4d} "
-                  f"rho_max {radius.max():.6f} "
-                  f"f64 {max(comparison64[k]['relative_error'] for k in ('companion','factored')):.3e} "
-                  f"f32 {max(comparison32[k]['relative_error'] for k in ('companion','factored')):.3e}",
-                  flush=True)
+                  f"rho_max {radius.max():.6f}  {shown}", flush=True)
         report["seeds_detail"][str(seed)] = seed_detail
 
     report.update({
         "total_modes_certified": total_modes,
         "worst_spectral_radius": worst_radius,
-        "worst_float64_relative_error": worst_float64,
-        "worst_float32_relative_error": worst_float32,
+        "worst_float64_relative_error": (worst_float64
+                                         if "float64" in precisions else None),
+        "worst_float32_relative_error": (worst_float32
+                                         if "float32" in precisions else None),
         "offending_modes": offending,
         "certified": bool(not offending),
     })
     with open(arguments.out, "w") as handle:
         json.dump(report, handle, indent=2)
     print(json.dumps({k: report[k] for k in
-                      ("total_modes_certified", "worst_spectral_radius",
+                      ("x64_enabled", "precisions", "total_modes_certified",
+                       "worst_spectral_radius",
                        "worst_float64_relative_error",
                        "worst_float32_relative_error", "offending_modes",
                        "certified")}, indent=2))
