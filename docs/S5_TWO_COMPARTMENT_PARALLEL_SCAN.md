@@ -497,3 +497,68 @@ DRY_RUN=1 bash bin/run_experiments/allocation_s5_two_compartment_factored.sh
 
 `ARMS` defaults to the generalized arm alone, so the existing command is
 unchanged.
+
+
+---
+
+## 12. The comparison set, and the baseline already on disk
+
+All four arms share one protocol: base commit `ef004cda`, the
+`sc10_official_cache` split, 15 epochs, seeds 301/302/303. The three-arm
+run `s5-three-arm-15epoch/20260919-224525` (allocation 66765) supplies the
+first two; this branch supplies the last two.
+
+| arm | spectral radius at init | outcome |
+|---|---|---|
+| **Native S5** | \|λ̄\| < 1 | **96.921% ± 0.097** validation |
+| **Zucchet**, 1st order | **1.10 – 1.71** | **NaN at epoch 0, step 0**, all 3 seeds |
+| generalized (M, γ, T) | ≤ 0.99997 | this branch; lag **+25.3** tokens |
+| matched (M, γ, Γ_k) | **identical, bit for bit** | this branch; lag **−0.36** tokens |
+
+### Native S5, the reference
+
+```
+seed 301   97.110%   CE 0.09217   selected epoch 15
+seed 302   96.786%   CE 0.09645   selected epoch 13
+seed 303   96.867%   CE 0.09481   selected epoch 15
+
+mean 96.921%   sd 0.169   se 0.097   range 0.324 pp
+```
+
+**The seed-to-seed range of a single arm is 0.32 pp.** Any difference
+between the generalized and matched arms has to clear that to mean
+anything, and with three seeds per arm a paired test has very little
+power — expect a direction and an effect size, not significance.
+
+### Zucchet, the negative control
+
+```
+epoch 0, step 0
+failure: "production check nonfinite"
+loss NaN, gradient_norm NaN, gradients_finite false, state_finite false
+```
+
+All three seeds, verified `NumericalTrainingFailure`, `accepted: true`. It
+fails the one-step finite-update gate **before training begins**, which is
+what the spectral radius of 1.10–1.71 at initialization predicts. The
+precise statement is *the first-order prospective recurrence is non-finite
+on the first update*, not "training was unstable".
+
+### VALIDATION, not test
+
+`task_result.json` carries **validation** metrics. The finalizer is the
+only reader of the test split and it never ran for the three-arm wave --
+the generalized arm's 155-hour projection aborted the run before Stage 3.
+All four arms are therefore compared on the same validation split, which
+is sound, but it must be labelled validation and not test.
+
+### Wall clock is NOT comparable across the two runs
+
+Native ran on `pgi15-gpu2`, partition `pgi15-shared`, 30 CPUs per task;
+this branch runs on `pgi15-gpu5`, partition `pgi15`, 10 CPUs, node to
+itself. Native's real throughput was 0.69 s/step against a benchmarked
+0.117 -- a 5.9× overhead -- while the generalized arm runs at ~0.53 s/step
+against a benchmarked 0.218, a 2.4× overhead. The generalized arm
+therefore *appears* faster than Native, which is an artefact of the shared
+partition and not a property of the arms. **Accuracy comparisons across the
+two runs are valid; wall-clock comparisons are not.**
