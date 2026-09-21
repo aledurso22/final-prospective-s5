@@ -66,8 +66,12 @@ import jax.numpy as np
 from .factored_recurrence import DEFAULT_IMPLEMENTATION, drive_scan_for
 from .generalized_prospective_ssm import (GeneralizedProspectiveS5SSM,
                                             response_mass_gamma)
-from .modal_prospective import H_TOKEN
 from .ssm import discretize_zoh
+
+#: the TOKEN step of the finite-difference realization, h = 1. It is the
+#: same h that `generalized_coefficients` and `target_map` default to, and
+#: it is never identified with S5's learned Delta.
+H_TOKEN = 1.0
 
 #: |1 - lambda_bar| is floored so a mode sitting exactly at z = 1 cannot
 #: divide by zero. It is NOT a tuning knob: at this value Gamma_k is

@@ -284,3 +284,32 @@ def test_the_fourth_arm_shares_the_third_s_initialization():
     for expected in ("response_init=T_INIT", "rho_init=RHO_INIT",
                      "gamma_init=1.0"):
         assert expected in matched, expected
+
+
+def test_every_intra_package_import_resolves_on_this_branch():
+    """REGRESSION, and it cost a cluster round trip.
+
+    `matched_lag_ssm` imported H_TOKEN from `s5.modal_prospective`, which
+    exists only on the modal branch. `py_compile` does not resolve imports
+    and `undefined_names` only looks inside one file, so neither caught it;
+    the first thing that did was pytest on the GPU node.
+
+    Every `from .x import ...` in the package must name a module that
+    exists HERE.
+    """
+    package = os.path.join(REPO, "s5")
+    missing = []
+    for entry in sorted(os.listdir(package)):
+        if not entry.endswith(".py"):
+            continue
+        tree = SI.parse(os.path.join(package, entry))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level != 1:
+                continue
+            if node.module is None:
+                continue
+            target = os.path.join(package, node.module.replace(".", os.sep))
+            if not (os.path.exists(target + ".py")
+                    or os.path.isdir(target)):
+                missing.append(f"{entry} -> .{node.module}")
+    assert missing == [], missing
