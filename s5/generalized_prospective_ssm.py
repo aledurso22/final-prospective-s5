@@ -7,6 +7,7 @@ import jax.numpy as np
 from .discrete_recurrence import (_block_operator, companion_radius,
                                   generalized_coefficients,
                                   scan_companion_sequential)
+from .factored_recurrence import DEFAULT_IMPLEMENTATION, scan_for
 from .ssm import S5SSM, discretize_zoh
 
 RHO_MIN = 1e-4
@@ -23,6 +24,12 @@ class GeneralizedProspectiveS5SSM(S5SSM):
     response_init: float = 0.05
     rho_init: float = 0.5
     gamma_init: float = 1.0
+    #: WHICH SCAN evaluates the recurrence. The equation, the
+    #: parameterization and the coefficients are identical for every
+    #: choice; only the evaluation order differs. "sequential" is the
+    #: default and the oracle, so the production path is unchanged unless
+    #: a caller asks for something else by name.
+    implementation: str = DEFAULT_IMPLEMENTATION
 
     def setup(self):
         super().setup()
@@ -45,11 +52,12 @@ class GeneralizedProspectiveS5SSM(S5SSM):
             generalized_coefficients(lambda_bar, b_bar, T, mass, gamma))
 
     def __call__(self, input_sequence):
-        states = scan_companion_sequential(
+        scan = scan_for(self.implementation)
+        states = scan(
             self.generalized_a1, self.generalized_a2,
             self.generalized_c1, self.generalized_c2, input_sequence)
         if self.bidirectional:
-            reverse = scan_companion_sequential(
+            reverse = scan(
                 self.generalized_a1, self.generalized_a2,
                 self.generalized_c1, self.generalized_c2,
                 input_sequence, reverse=True)
@@ -59,12 +67,16 @@ class GeneralizedProspectiveS5SSM(S5SSM):
 
 
 def init_generalized_prospective_S5SSM(response_init=0.05, rho_init=0.5,
-                                       gamma_init=1.0, **s5_kwargs):
+                                       gamma_init=1.0,
+                                       implementation=DEFAULT_IMPLEMENTATION,
+                                       **s5_kwargs):
     return partial(GeneralizedProspectiveS5SSM,
                    response_init=response_init, rho_init=rho_init,
-                   gamma_init=gamma_init, **s5_kwargs)
+                   gamma_init=gamma_init, implementation=implementation,
+                   **s5_kwargs)
 
 
 __all__ = ["RHO_MIN", "_block_operator", "companion_radius",
            "response_mass_gamma", "GeneralizedProspectiveS5SSM",
-           "init_generalized_prospective_S5SSM"]
+           "init_generalized_prospective_S5SSM",
+           "DEFAULT_IMPLEMENTATION", "scan_for"]
