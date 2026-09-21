@@ -58,6 +58,7 @@ favours none of them.
 import argparse
 import json
 import math
+import time
 
 import jax
 import jax.numpy as jnp
@@ -66,8 +67,8 @@ import optax
 from s5 import modal_prospective as MP
 from experiments.s5_modal import paired as PAIRED
 from experiments.s5_modal.frontier_design import (
-    COMPARISONS, POWER_FLOOR, arm_table, decide,
-    effective_parameters, matched_modes)
+    POWER_FLOOR, available_comparisons, decide, effective_parameters,
+    matched_modes, select_arms)
 
 MODES = 16
 BATCH = 16
@@ -346,6 +347,14 @@ def main():
                         help="paired seeds; 10-20 is the declared range")
     parser.add_argument("--delays", type=int, nargs="+", default=list(DELAYS))
     parser.add_argument("--modes", type=int, default=MODES)
+    parser.add_argument("--arms", nargs="+", default=None,
+                        help="run only these arms. The point of a subset is "
+                             "the POWER CHECK: one arm at full steps across "
+                             "every delay answers whether the memory channel "
+                             "is learnable at all, for a fifth of the cost "
+                             "of the sweep. A subset that lacks the arms the "
+                             "decision rule reads yields PARTIAL_ARM_SUBSET "
+                             "rather than a verdict.")
     parser.add_argument("--gate-penalty", type=float, default=1e-3)
     parser.add_argument("--eval-seed", type=int, default=99)
     parser.add_argument("--seed-chunk", type=int, default=0,
@@ -359,17 +368,21 @@ def main():
                         help="PREDECLARED memory non-inferiority margin")
     args = parser.parse_args()
     seeds = list(range(args.seeds))
-    arms = arm_table(args.modes)
+    arms = select_arms(args.arms, args.modes)
+    comparisons = available_comparisons([name for name, _, _, _ in arms])
 
     frontier = []
     for delay in args.delays:
         results = {}
         for name, use_gates, stages, modes in arms:
+            began = time.time()
             results[name] = run_arm(use_gates, stages, modes, delay, seeds,
                                     args)
+            results[name]["wall_seconds"] = time.time() - began
             print(f"delay {delay:4d}  {name:28s} "
                   f"memory {results[name]['median_memory']:.4g}  "
-                  f"lead {results[name]['median_lead']:.4g}", flush=True)
+                  f"lead {results[name]['median_lead']:.4g}  "
+                  f"[{results[name]['wall_seconds']:.0f}s]", flush=True)
         # POWER: a channel the reference arm cannot learn carries no
         # information about whether the cascade helps on it
         reference = results["native_capacity_matched"]
@@ -386,7 +399,7 @@ def main():
                 f"{treatment}_vs_{baseline}":
                     compare(results, treatment, baseline, args.alpha,
                             args.margin)
-                for treatment, baseline in COMPARISONS},
+                for treatment, baseline in comparisons},
         }
         row["verdict"] = decide(row)
         frontier.append(row)
@@ -411,6 +424,8 @@ def main():
                  for name, use_gates, stages, modes in arms},
         "steps": args.steps,
         "length": LENGTH,
+        "wall_seconds_total": sum(row["arms"][name]["wall_seconds"]
+                                  for row in frontier for name in row["arms"]),
         "gate_penalty": args.gate_penalty,
         "frontier": frontier,
         "verdict_per_delay": dict(zip(args.delays, verdicts)),

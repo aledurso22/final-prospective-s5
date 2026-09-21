@@ -56,6 +56,37 @@ COMPARISONS = (
 )
 
 
+def select_arms(names, modes=MODES):
+    """The arm table filtered to `names`, in table order.
+
+    A typo here would silently run four arms instead of five and produce a
+    verdict from the wrong comparison set, so an unknown name is an error
+    rather than an omission.
+    """
+    table = arm_table(modes)
+    if not names:
+        return table
+    known = {name for name, _, _, _ in table}
+    unknown = sorted(set(names) - known)
+    if unknown:
+        raise SystemExit(f"unknown arm(s): {unknown}; known: {sorted(known)}")
+    return tuple(row for row in table if row[0] in set(names))
+
+
+def available_comparisons(names):
+    """Only the comparisons whose BOTH arms were actually run."""
+    present = set(names)
+    return tuple((treatment, baseline) for treatment, baseline in COMPARISONS
+                 if treatment in present and baseline in present)
+
+
+#: the three comparisons `decide` reads; without all of them there is no
+#: verdict to give, and the report says so rather than inventing one
+REQUIRED_FOR_VERDICT = ("two_stage_vs_native_capacity_matched",
+                        "one_stage_capacity_matched_vs_native_capacity_matched",
+                        "two_stage_vs_one_stage")
+
+
 def decide(delay_row):
     """The predeclared decision rule, applied to one delay.
 
@@ -70,6 +101,10 @@ def decide(delay_row):
     The others exist so that a run which answers none of them cannot be
     forced into one that it did not.
     """
+    if not all(name in delay_row["comparisons"]
+               for name in REQUIRED_FOR_VERDICT):
+        # a subset run: a power check or a resumed sweep, not a failure
+        return "PARTIAL_ARM_SUBSET"
     if delay_row["underpowered_channels"]:
         return "UNDERPOWERED"
     two = delay_row["comparisons"]["two_stage_vs_native_capacity_matched"]

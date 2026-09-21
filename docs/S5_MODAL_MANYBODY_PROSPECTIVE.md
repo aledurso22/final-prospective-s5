@@ -527,6 +527,33 @@ recall, and the comparison would have measured nothing. Rates are now drawn
 at every delay. This is identical in all five arms and so favours none of
 them.
 
+### The smoke run, and the power check it made necessary
+
+Job 67211 on pgi15-gpu5 at `5d38a2b`, four seeds and thirty steps over
+delays 16 and 256. The pipeline runs end to end on GPU and the power guard
+fired at both delays, correctly: after thirty steps the **normalized memory
+error is above 1.0 in every arm** — worse than predicting the mean — while
+the lead channel is already near 0.05.
+
+That is what thirty steps should look like, and it is also why the smoke
+cannot license the sweep. Whether the memory channel is learnable *at all*
+at each delay is a precondition for every comparison in this experiment,
+and it is not free to assume: this task is sparser than the §6g probe was.
+A trace of timescale 16 occupies roughly 50 of 1024 tokens, five percent of
+the sequence, where the earlier probe's occupied thirty-seven percent of a
+length-256 sequence.
+
+So a **power check** runs first: `native_capacity_matched` alone, at the
+full step count, across all five delays. One arm instead of five, for a
+fifth of the sweep's cost, answering the one question that could invalidate
+all of it. `--arms` selects the subset, an unknown name is refused rather
+than silently dropped, and a subset that lacks the comparisons the decision
+rule reads returns `PARTIAL_ARM_SUBSET` instead of a verdict assembled from
+tests that were never run.
+
+Per-arm wall time is now printed and recorded, which the smoke should have
+reported and did not.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

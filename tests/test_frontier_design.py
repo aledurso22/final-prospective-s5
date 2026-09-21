@@ -151,6 +151,30 @@ def test_every_comparison_names_arms_that_exist():
         assert pair in D.COMPARISONS, pair
 
 
+def test_an_arm_subset_is_filtered_and_a_typo_is_refused():
+    """A subset is how the power check runs -- one arm at full steps across
+    every delay, for a fifth of the sweep's cost. A misspelt name must not
+    silently drop an arm and change which comparisons exist."""
+    assert D.select_arms(None) == D.arm_table()
+    subset = D.select_arms(["two_stage", "native_capacity_matched"])
+    assert [name for name, _, _, _ in subset] == ["native_capacity_matched",
+                                                  "two_stage"]
+    try:
+        D.select_arms(["natve_capacity_matched"])
+    except SystemExit as error:
+        assert "unknown arm" in str(error)
+    else:
+        raise AssertionError("a misspelt arm name was accepted")
+
+
+def test_comparisons_are_dropped_when_an_arm_was_not_run():
+    assert D.available_comparisons(["native_capacity_matched"]) == ()
+    both = D.available_comparisons(["two_stage", "one_stage"])
+    assert both == (("two_stage", "one_stage"),)
+    assert D.available_comparisons(
+        [name for name, _, _, _ in D.arm_table()]) == D.COMPARISONS
+
+
 # -------------------------------------------------------------- verdicts --
 def _row(two_memory, two_lead, one_memory, one_lead, ablation_lead=False,
          ablation_memory=False, underpowered=None):
@@ -193,6 +217,14 @@ def test_two_stage_working_alone_is_not_called_generalized_support():
     result is named for what it is and not promoted."""
     assert D.decide(_row(True, True, False, False)
                     ) == "TWO_STAGE_WORKS_ONE_STAGE_DOES_NOT"
+
+
+def test_a_subset_run_yields_no_verdict_rather_than_a_wrong_one():
+    """The power check runs one arm. It must not produce a verdict from
+    comparisons that were never computed."""
+    row = _row(True, True, True, True)
+    del row["comparisons"]["two_stage_vs_one_stage"]
+    assert D.decide(row) == "PARTIAL_ARM_SUBSET"
 
 
 def test_an_underpowered_channel_blocks_every_verdict():
