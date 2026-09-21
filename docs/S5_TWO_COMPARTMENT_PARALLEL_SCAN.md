@@ -745,3 +745,94 @@ timescale `T`; WWJ supplies an additional damped dynamical state carrying
 memory. **The added memory state must not itself be prospectively
 cancelled** — doing so is exactly what the matched arm did, and it does not
 learn.
+
+
+---
+
+## 16. Result: the regime is achieved, and it costs 1 pp
+
+Run `20260921-175242`, three seeds, 15 epochs, `sc10_official_cache`,
+commit `d845663`, factored scan. Native from `20260919-224525` on the same
+protocol and the same base commit.
+
+### Validation accuracy at the selected epoch
+
+| seed | Native | WWJ–NLA | difference | Native CE | WWJ CE |
+|---|---|---|---|---|---|
+| 301 | 97.110% | 96.138% | **−0.972** | 0.09217 | 0.12461 |
+| 302 | 96.786% | 95.895% | **−0.891** | 0.09645 | 0.12754 |
+| 303 | 96.867% | 95.733% | **−1.134** | 0.09481 | 0.13464 |
+| **mean** | **96.921%** | **95.922%** | **−0.999** | 0.09448 | 0.12893 |
+
+**Native wins on 3/3 seeds by 1.00 pp, 95% CI [0.69, 1.31].** Paired
+t = −14.0 against a critical 4.303 at df = 2 — significant with three seeds
+because the difference is so consistent (paired sd 0.124 pp). The gap is
+**3.1×** Native's own seed-to-seed spread of 0.324 pp, so it is not noise.
+
+Neither arm is undertrained: both plateau after epoch ~10, Native at 97.11
+and the WWJ–NLA seeds at 95.7–96.1.
+
+### The learned regime is exactly the predicted one
+
+From the epoch-15 checkpoints, per layer, median over modes:
+
+| seed | T | γ | ρ | \|r_slow\| | \|r_fast\| | in-regime |
+|---|---|---|---|---|---|---|
+| 301 | 0.0426 | 1.107 | 0.426 | **0.99950** | **0.0521** | **62/64** |
+| 302 | 0.0444 | 1.080 | 0.447 | 0.99905 | 0.0573 | 61/64 |
+| 303 | 0.0461 | 1.054 | 0.485 | 0.99886 | 0.0580 | 55/64 |
+
+"in-regime" counts modes with slow root > 0.99 **and** fast root < 0.5.
+**One slow pole carrying long memory at 0.999, one fast response pole at
+0.05, in 55–62 of 64 modes, every seed, stable from epoch 3 through 15.**
+
+**The stability risk did not materialise.** γ rose from its initial 1.0 to
+1.05–1.11 — away from the 0.096 cliff, not toward it. Training kept the
+finite-mass correction rather than retreating from it. `T` drifted
+0.050 → 0.043–0.046 and `ρ` 0.50 → 0.43–0.49.
+
+### One seed excursion, fully recovered
+
+Seed 303: `86.42 → 64.95 → 92.06` across epochs 5–7, ending at 95.73%. A
+transient on a marginally-stable recurrence — the step metrics show a
+spectral radius of `1 + 2⁻²³`, one float32 ulp above 1, on *every* seed —
+not a structural failure. Worth reporting, not hiding.
+
+### What this establishes
+
+1. The second-order WWJ–NLA prospective recurrence **trains stably** on a
+   16,000-token task, to 95.92% ± 0.12.
+2. It **achieves the intended separation** of memory from response, on
+   almost every mode, reliably across seeds.
+3. **That separation costs 1.00 pp on Speech Commands.**
+4. It could be run at all only because of this branch: 117.7 h → 4.3 h,
+   the 80.5× from the factored scan.
+
+## 17. The open question
+
+The architecture does what it was designed to do. The task does not reward
+it.
+
+Speech Commands is **pooled classification**: the answer is a global
+property of the whole sequence, read out after mean-pooling. A faster
+response pole has nothing to buy there — nothing depends on *when* the
+model reacts — while the second compartment costs capacity and
+optimization difficulty. That is a coherent explanation for a 1 pp deficit
+in the presence of a textbook-correct learned regime.
+
+**So the question this run raises is: what can the separation buy?** It
+should be tested where reaction latency is part of the objective, not
+averaged away:
+
+- **online or streaming prediction**, where the loss is evaluated at every
+  timestep rather than pooled;
+- **tasks with both long retention and abrupt change**, where a slow mode
+  must hold context while a fast one tracks a switch — the regime the
+  synthetic probe on the modal branch was built around;
+- **anything with an explicit delay or lead requirement**, where the 25.3
+  tokens of low-frequency lag measured on this arm would be a cost rather
+  than an irrelevance.
+
+The measurement to carry forward is that the separation is **achievable and
+stable**, so any future task-level result is about the task, not about
+whether the mechanism works.
