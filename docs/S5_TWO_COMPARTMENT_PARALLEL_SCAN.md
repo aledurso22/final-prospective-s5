@@ -562,3 +562,73 @@ against a benchmarked 0.218, a 2.4× overhead. The generalized arm
 therefore *appears* faster than Native, which is an artefact of the shared
 partition and not a property of the arms. **Accuracy comparisons across the
 two runs are valid; wall-clock comparisons are not.**
+
+
+---
+
+## 13. What the experiment is actually testing
+
+The comparison worth defending is **not** generalized → matched. It is
+
+> **Native S5 → theory-derived prospective second-order S5.**
+
+Native has **one pole doing two jobs**: `s_t = λ̄ s_{t−1} + B̄x_t`, so
+`|λ̄| → 1` buys retention by buying delay. The matched arm gives each mode a
+genuine second dynamical state, `s_t = a1 s_{t−1} + a2 s_{t−2} + d_t`, and
+then derives the prospective correction *from that dynamics*:
+
+```
+d_t = K [ x_t + (Γ_k/h)(x_t − x_{t−1}) ],   Γ_k = T + γh/(T(1 − λ̄))
+```
+
+So the question is: **does separating memory from first-order lag improve
+an SSM?** Not "does a derivative term help" — that is a weaker claim and a
+weaker reason to expect anything.
+
+The generalized arm is therefore **an intermediate construction, not a
+baseline**. It exposed the second-order coefficients `a1, a2`; its
+prospective coefficient `T` does not match the damping of the model it is
+attached to, so there is no theoretical reason to train it as a final
+architecture.
+
+### But it is still the attribution control
+
+`Native → matched` changes **three** things at once: first order becomes
+second order, the drive gains a `Δx` term, and `T` becomes `Γ_k`. If the
+matched arm wins, that alone does not say which of the three did it. The
+generalized arm is the only comparison in which the poles are bit-identical
+and exactly one symbol differs, so it is what separates "the lag
+cancellation helped" from "a second-order recurrence with a derivative
+drive helped". It is worth running **if and only if** the matched arm shows
+something worth attributing.
+
+### The optimization risk, and how it is measured
+
+`Γ_k ∝ 1/(1 − λ̄)`, and the modes Native uses for its longest memory are
+exactly the ones where the exact correction is largest. Gradient descent
+has three ways to weaken it and one way to exploit it:
+
+| training does | reading |
+|---|---|
+| `λ̄` retreats from 1 | gave up the long memory |
+| `γ → 0` | gave up the damping that needed compensating |
+| `T` moves to shrink `Γ_k` | weakened the correction directly |
+| **`\|λ̄\| ≈ 1` kept AND `Γ_k` stays large** | **the intended regime: very slow internal memory, very fast prospective response** |
+
+`prospective_drift.py` measures exactly this from the saved per-epoch
+checkpoints, comparing the trained parameters against their initialization,
+per layer and pooled: the `|λ̄|` distribution and how many modes remain
+above 0.99 and 0.999, the medians of `γ` and `T`, the `Γ_k` distribution,
+and a **concentration ratio** — the median `|Γ_k|` among the slowest decile
+of modes against the median over all modes. A ratio well above one means
+the slow modes are the ones carrying the correction, which is the intended
+regime rather than an accident.
+
+```bash
+"$PY" -m experiments.s5_two_compartment.prospective_drift \
+      --run-root /Users/durso/s5-runs/s5-two-compartment-factored/<stamp> \
+      --arm matched_lag_prospective_s5 --out /Users/durso/s5-runs/drift.json
+```
+
+It reads the last checkpoint present, so it can be run **while training is
+still going** to see the trend early.
