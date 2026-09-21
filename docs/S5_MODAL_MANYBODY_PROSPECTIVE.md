@@ -554,6 +554,42 @@ tests that were never run.
 Per-arm wall time is now printed and recorded, which the smoke should have
 reported and did not.
 
+### The power check, and the optimizer bug it found
+
+`native_capacity_matched` alone, 15 seeds, 1200 steps, all five delays
+(`7df3006`, job 67211). Normalized memory error in the **reference** arm:
+
+| delay | 16 | 32 | 64 | 128 | 256 |
+|---|---|---|---|---|---|
+| memory | 0.008 | 0.004 | **0.77** | **1.11** | **1.44** |
+| lead | 0.002 | 0.002 | 0.004 | 0.007 | 0.010 |
+
+The reference arm fails at exactly the long delays where the construction
+was expected to have its best chance, and it fails *monotonically* in the
+delay. No comparison survives a reference that cannot do the task, so this
+would have wasted the whole sweep — which is what running one arm first
+was for. Cost: ~40 s per arm-delay, so the full sweep is about 17 minutes.
+
+**The cause was my probe's optimizer geometry, not the task.** Adam moves
+every parameter by roughly the learning rate each step, whatever the
+gradient's size. The decay rate was stored ADDITIVELY, so a 3e-2 step means
+something different depending on where the rate already is: at a delay of
+256 the needed rate is 1/256 = 0.0039 and one step is an **eightfold
+overshoot in timescale**, destroying slow modes as fast as they are found;
+at a delay of 16 the rate is 0.0625 and the same step is a survivable 50%.
+That is precisely the observed pattern — clean at 16 and 32, degrading
+through 64, gone by 128.
+
+The rate is now stored and learned in the **log**, which makes a 3e-2 step
+a 3% change in timescale at every scale. Native S5 parameterizes its own
+timescale as `log_step` for this same reason, so this is the established
+practice rather than a thumb on the scale. The initialization
+*distribution* is unchanged — rates were already drawn log-uniformly — so
+only the geometry moves, and it moves identically in all five arms.
+
+The frontier is only worth measuring where the reference arm can do the
+task, so the power check is repeated before the sweep.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

@@ -118,6 +118,30 @@ def smooth(signal, timescale):
 
 
 # ----------------------------------------------------------------- model --
+def decay_rate(params):
+    """The per-mode decay rate, stored and learned in the LOG.
+
+    This is not cosmetic. Adam moves every parameter by about the learning
+    rate each step regardless of the gradient's size, so an ADDITIVE rate
+    parameter takes steps whose meaning depends on where it already is. At
+    a delay of 256 the required rate is 1/256 = 0.0039, and one 3e-2 step
+    is an eightfold overshoot in timescale: the slow modes are destroyed as
+    fast as they are found. At a delay of 16 the rate is 0.0625 and the
+    same step is a survivable 50 percent.
+
+    The power check measured exactly that failure -- normalized memory
+    error 0.008, 0.004, 0.77, 1.11, 1.44 across delays 16 to 256, in the
+    REFERENCE arm, which no comparison can survive. In the log the same
+    step is a three percent change in timescale at every scale.
+
+    Native S5 parameterizes its own timescale this way, as `log_step`, for
+    this reason. The initialization DISTRIBUTION is unchanged -- rates were
+    already drawn log-uniformly -- so only the optimization geometry moves,
+    and it moves identically in all five arms.
+    """
+    return jnp.clip(jnp.exp(params["log_rate"]), 1e-4, 0.9)
+
+
 def model_apply(params, inputs, use_gates):
     """Native scan, per-mode cascade, linear readout.
 
@@ -125,8 +149,7 @@ def model_apply(params, inputs, use_gates):
     exact identity: that arm IS Native S5's recurrence, not an approximation
     of it.
     """
-    lambda_bar = jnp.exp(jnp.clip(params["lambda_re"], -0.9, -1e-4)
-                         + 1j * params["lambda_im"])
+    lambda_bar = jnp.exp(-decay_rate(params) + 1j * params["lambda_im"])
     b_bar = params["b_re"] + 1j * params["b_im"]
     d = MP.D_MIN + jax.nn.softplus(params["d_raw"])
     gates = [jax.nn.sigmoid(raw) if use_gates else jnp.zeros_like(raw)
@@ -167,14 +190,14 @@ def initial_params(key, stages, modes):
     branch would be unreachable.
     """
     keys = jax.random.split(key, 8)
-    rate = jnp.exp(jax.random.uniform(keys[0], (modes,),
-                                      minval=math.log(RATE_MIN),
-                                      maxval=math.log(RATE_MAX)))
+    log_rate = jax.random.uniform(keys[0], (modes,),
+                                  minval=math.log(RATE_MIN),
+                                  maxval=math.log(RATE_MAX))
     offset = (jnp.zeros((1, 1)) if stages == 1
               else jnp.linspace(-0.5, 0.5, stages)[:, None])
     mode_offset = jnp.linspace(-0.3, 0.3, modes)[None, :]
     return {
-        "lambda_re": -rate,
+        "log_rate": log_rate,
         "lambda_im": jax.random.uniform(keys[1], (modes,), minval=-2.0,
                                         maxval=2.0),
         "b_re": jax.random.normal(keys[2], (modes, 2)) * 0.5,
@@ -298,7 +321,7 @@ def gate_report(params, use_gates):
     and a `float()` inside a trace raises ConcretizationTypeError. The
     conversion happens in `main`, which is not traced.
     """
-    rate = jnp.abs(jnp.clip(params["lambda_re"], -0.9, -1e-4))
+    rate = decay_rate(params)
     gates = (jax.nn.sigmoid(params["gate_raw"]) if use_gates
              else jnp.zeros_like(params["gate_raw"]))
     mean_gate = jnp.mean(gates, axis=0)

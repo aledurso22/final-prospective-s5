@@ -286,6 +286,30 @@ def test_the_frontier_sweeps_the_declared_delays_and_reports_normalized_error():
     assert "/ spread" in body
 
 
+def test_the_decay_rate_is_learned_in_the_log_not_additively():
+    """REGRESSION, from the power check at 7df3006. Adam moves every
+    parameter by about the learning rate per step, so an ADDITIVE rate
+    parameter takes a 3e-2 step that is an eightfold overshoot in timescale
+    at a rate of 1/256 and a 50 percent change at 1/16. The reference arm's
+    normalized memory error was 0.008, 0.004, 0.77, 1.11, 1.44 across
+    delays 16 to 256 -- it degraded monotonically with the delay, which is
+    the signature of a step size that does not scale.
+
+    Nothing in the frontier may read an additive `lambda_re` parameter.
+    """
+    source = io.open(FRONTIER).read()
+    tree = SI.parse(FRONTIER)
+    assert SI.defines_function(tree, "decay_rate")
+    assert 'params["log_rate"]' in source
+    assert 'params["lambda_re"]' not in source, (
+        "the additive rate parameter is what the power check falsified")
+    initial = ast.get_source_segment(
+        source, SI.function_node(tree, "initial_params")) or ""
+    assert '"log_rate"' in initial and '"lambda_re"' not in initial
+    # the DISTRIBUTION must be unchanged: only the geometry moves
+    assert "math.log(RATE_MIN)" in initial and "math.log(RATE_MAX)" in initial
+
+
 def test_the_slowest_mode_can_outlast_the_longest_delay():
     """The bug that made the previous probe unable to hold what it asked
     the model to recall: uniform decay rates whose 16-sample minimum was a
@@ -293,6 +317,8 @@ def test_the_slowest_mode_can_outlast_the_longest_delay():
     source = io.open(FRONTIER).read()
     assert "RATE_MIN = 1.0 / (2.0 * max(DELAYS))" in source
     assert "math.log(RATE_MIN)" in source, "rates must be LOG-uniform"
+    # and the clip must not cut off the slow end it just made reachable
+    assert "1e-4" in source and 1e-4 < 1.0 / (2.0 * 256)
 
 
 def test_the_design_and_statistics_modules_import_no_jax():
