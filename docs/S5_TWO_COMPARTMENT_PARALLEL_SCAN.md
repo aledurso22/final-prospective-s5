@@ -632,3 +632,116 @@ regime rather than an accident.
 
 It reads the last checkpoint present, so it can be run **while training is
 still going** to see the trend early.
+
+
+---
+
+## 14. The matched arm does not learn, and why
+
+Run `20260921-172508`, seed 301, epoch 1 (the warm-up epoch), against
+Native at the same step of the same protocol:
+
+| | step | loss | accuracy | grad norm | state norm |
+|---|---|---|---|---|---|
+| Native | 1440 | **0.787** | **0.8125** | 3.87 | 3540 |
+| matched `Γ_k` | 1445 | **2.259** | **0.1250** | 0.64 | 3550 |
+
+`ln 10 = 2.303`, so the matched arm is at chance while Native is at 81%.
+Everything else is healthy — `gradients_finite`, `state_finite`, spectral
+radius 0.99998 — and `state_norm` is the same for both, so it is not a
+state-magnitude problem.
+
+### The mechanism: a pure lead is a differentiator
+
+The drive `K[1 + (Γ_k/h)(1 − z⁻¹)]` evaluated on the unit circle:
+
+| arm | Γ | gain at DC | gain at Nyquist | ratio |
+|---|---|---|---|---|
+| generalized | 0.05 | 1.0 | 1.1 | **1.1×** |
+| matched, median | 571 | 1.0 | 1143 | **1143×** |
+| matched, p90 | 6899 | 1.0 | 13799 | 13799× |
+| matched, max | 29054 | 1.0 | 58109 | 58109× |
+
+`K[x_t + (Γ_k/h)Δx_t]` with `Γ_k/h ≈ 571` is dominated by the difference
+term unless `Δx` is a thousand times smaller than `x`. **The model sees the
+derivative of its input, not its input.** At DC the zero cancels the pole
+exactly — that was the design, and the group-delay measurement confirmed
+it — but the price is a high-frequency gain growing like `Γ_k`, and `Γ_k`
+is largest precisely on the slow modes the construction set out to exploit.
+
+This was predictable from the same transfer function I analysed
+exhaustively at `z → 1` and never evaluated at `z → −1`.
+
+## 15. The generalized arm IS the theory-derived model
+
+The correct reading, and it does not need new code. Writing
+`m = Mh/T`, `c = γh/T`, `k = 1 − λ̄`, the generalized arm is
+
+$$m\ddot s+(c+Tk)\dot s+ks=\bar b\,(x+T\dot x)$$
+
+which decomposes as
+
+| term | what it is |
+|---|---|
+| `Tk ṡ + k s = b̄(x + T ẋ)` | **ordinary NLA prospective dynamics**, horizon `T` |
+| `m s̈ + c ṡ` | **WWJ / retained-biophysics** finite-mass state |
+
+So it is **NLA prospectivity plus a retained damped compartment that carries
+memory** — not an intermediate approximation. The matched arm's extra
+condition `Γ_k = (c + Tk)/k = T + c/k` was our own zero-lag specialization,
+which neither WWJ nor the retained NLA circuit requires. As `k → 0` it sends
+`Γ_k → ∞` and drives the prospective zero onto the slow pole the model is
+trying to preserve. The 1143× Nyquist gain is the same fact seen in the
+frequency domain.
+
+Because `M = ργT`, we have `m = ργh` and `c = γh/T`, so **`γ → 0` sends both
+to zero** and leaves `Tk ṡ + k s = b̄(x + Tẋ)` — first-order NLA. The
+hierarchy is therefore
+
+```
+γ = 0   ordinary NLA
+γ > 0   finite-mass / finite-hidden-state generalized NLA
+```
+
+### But the γ → 0 limit is not available in this discretization
+
+The limit holds for the equation; it does not hold for this
+finite-difference realization. Worst spectral radius over the mode grid:
+
+```
+γ = 1.00   0.99995      ← production init
+γ = 0.10   0.99950
+γ = 0.05   1.12892      ← diverges
+γ = 0.00   1.70899      ← Zucchet's poles
+critical γ ≈ 0.0957, production sits 10.4× above it
+```
+
+**`γ` is a learned parameter and nothing constrains it.** If training drives
+it below ≈0.1 the arm diverges. `prospective_drift.py` reports the `γ`
+median per layer and pooled, which is the number to watch.
+
+### Verification before the long run
+
+| check | result |
+|---|---|
+| `a1, a2` unchanged | ✓ `discrete_recurrence.py` byte-identical |
+| drive uses `T`, not `Γ_k` | ✓ `Γ_k = T` reproduces it to 1.1e-19 |
+| sequential vs two-scan | ✓ **1.83e-13**, float64, all 1152 modes |
+| Nyquist/DC drive gain | ✓ **1.100** = 1 + 2T/h |
+| `γ → 0` → first-order NLA | ✓ continuous; ✗ **this discretization** |
+
+**Naming.** Code identifiers are unchanged — `generalized_prospective_s5`,
+`generalized_coefficients`, `response_mass_gamma` — to preserve provenance.
+In the write-up the arm is the **WWJ–NLA finite-mass model**.
+
+### The comparison
+
+$$\text{Native S5: } s_t=\bar\lambda s_{t-1}+\bar Bx_t$$
+
+$$\text{WWJ–NLA finite mass: } s_t=a_1s_{t-1}+a_2s_{t-2}+K\Big[x_t+\tfrac{T}{h}(x_t-x_{t-1})\Big]$$
+
+**Hypothesis.** NLA supplies the prospective correction at its biological
+timescale `T`; WWJ supplies an additional damped dynamical state carrying
+memory. **The added memory state must not itself be prospectively
+cancelled** — doing so is exactly what the matched arm did, and it does not
+learn.
