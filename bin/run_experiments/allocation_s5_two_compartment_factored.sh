@@ -32,7 +32,11 @@ cd "$PROSPECTIVE_REPO"
 REPO_ROOT="$(pwd -P)"
 export PROSPECTIVE_REPO="$REPO_ROOT"
 
-ARM="generalized_prospective_s5"
+#: the arms to train, in order, as sequential waves. The default is the
+#: generalized arm alone, so an existing command is unchanged. Set
+#: ARMS="generalized_prospective_s5 matched_lag_prospective_s5" for the
+#: zero-lag theory comparison, which differs in ONE coefficient.
+IFS=' ' read -r -a ARMS <<< "${ARMS:-generalized_prospective_s5}"
 IMPLEMENTATION="${IMPLEMENTATION:-factored}"
 EPOCHS="${EPOCHS:-15}"
 RUN_SEEDS=(301 302 303)
@@ -97,7 +101,7 @@ RUN_ROOT="$OUT_ROOT/$STAMP"
 SMOKE_ROOT="$RUN_ROOT/smoke"
 
 echo "two-compartment generalized arm, direct children of allocation $ALLOCATION"
-echo "  arm:            $ARM"
+echo "  arms:           ${ARMS[*]}"
 echo "  scan:           $IMPLEMENTATION"
 echo "  epochs:         $EPOCHS (one warm-up, cosine over the other $((EPOCHS - 1)))"
 echo "  seeds:          ${RUN_SEEDS[*]}"
@@ -117,8 +121,8 @@ validate_official_raw_cache(sys.argv[1], ("train", "val"))
 print(f"validated official raw cache: {sys.argv[1]}")
 PYEOF
   mkdir -p "$RUN_ROOT"
-  printf 'authoritative_commit=%s\nbranch=%s\narm=%s\nscan_implementation=%s\nepochs_requested=%s\nseeds=%s\nallocation=%s\ngpu_tokens=%s\nwave_size=%s\ndata_cache=%s\n' \
-    "$EXPECTED_COMMIT" "$(git rev-parse --abbrev-ref HEAD)" "$ARM" \
+  printf 'authoritative_commit=%s\nbranch=%s\narms=%s\nscan_implementation=%s\nepochs_requested=%s\nseeds=%s\nallocation=%s\ngpu_tokens=%s\nwave_size=%s\ndata_cache=%s\n' \
+    "$EXPECTED_COMMIT" "$(git rev-parse --abbrev-ref HEAD)" "${ARMS[*]}" \
     "$IMPLEMENTATION" "$EPOCHS" "${RUN_SEEDS[*]}" "$ALLOCATION" \
     "${TOKENS[*]}" "$WAVE_SIZE" "$DATA_CACHE" > "$RUN_ROOT/run_metadata.txt"
 fi
@@ -126,12 +130,12 @@ fi
 # ------------------------------------------------------------- children ----
 CHILD_PIDS=(); CHILD_LABELS=(); CHILD_DIRS=(); CHILD_SEEDS=()
 
-start_child() {   # seed gpu_token root [--smoke]
-  local seed="$1" token="$2" root="$3" smoke="${4:-}"
-  local task_root="$root/$seed"
-  local label="$ARM/$seed@gpu$token"
+start_child() {   # arm seed gpu_token root [--smoke]
+  local arm="$1" seed="$2" token="$3" root="$4" smoke="${5:-}"
+  local task_root="$root/$arm/$seed"
+  local label="$arm/$seed@gpu$token"
   local runner_args=(--data-cache "$DATA_CACHE" --out "$task_root"
-                     --arm "$ARM" --seed "$seed" --epochs "$EPOCHS"
+                     --arm "$arm" --seed "$seed" --epochs "$EPOCHS"
                      --implementation "$IMPLEMENTATION")
   [[ -n "$smoke" ]] && runner_args+=("$smoke")
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -170,9 +174,14 @@ reset_wave() { CHILD_PIDS=(); CHILD_LABELS=(); CHILD_DIRS=(); CHILD_SEEDS=(); }
 
 # ------------------------------------------------------ 1. smoke gate ------
 echo
-echo "STAGE 1: smoke on ${TOKENS[0]} (gates training)"
+echo "STAGE 1: smoke on ${TOKENS[*]} for every arm (gates training)"
 reset_wave
-start_child "${RUN_SEEDS[0]}" "${TOKENS[0]}" "$SMOKE_ROOT" --smoke
+smoke_slot=0
+for arm in "${ARMS[@]}"; do
+  start_child "$arm" "${RUN_SEEDS[0]}" "${TOKENS[$((smoke_slot % WAVE_SIZE))]}" \
+              "$SMOKE_ROOT" --smoke
+  smoke_slot=$((smoke_slot + 1))
+done
 if [[ "$DRY_RUN" != "1" ]]; then
   wait_for_wave
   for status in ${WAVE_STATUS[@]+"${WAVE_STATUS[@]}"}; do
@@ -183,28 +192,31 @@ if [[ "$DRY_RUN" != "1" ]]; then
     fi
   done
   # the smoke must have used the scan we asked for, not the default
-  "$PY" - "$SMOKE_ROOT/${RUN_SEEDS[0]}/production_check.json" "$IMPLEMENTATION" <<'PYEOF'
+  for arm in "${ARMS[@]}"; do
+  "$PY" - "$SMOKE_ROOT/$arm/${RUN_SEEDS[0]}/production_check.json" "$IMPLEMENTATION" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as handle:
     record = json.load(handle)
 actual, wanted = record.get("scan_implementation"), sys.argv[2]
 if actual != wanted:
     raise SystemExit(f"FAIL: smoke ran scan {actual!r}, expected {wanted!r}")
-print(f"smoke used the requested scan: {actual}")
+print(f"{sys.argv[1]}: smoke used the requested scan: {actual}")
 PYEOF
-  echo "smoke passed"
+  done
+  echo "smoke passed for every arm"
 fi
 
 # ------------------------------------------------------ 2. the seeds -------
 UNEXPECTED=()
+for arm in "${ARMS[@]}"; do
 index=0
 while [[ "$index" -lt "${#RUN_SEEDS[@]}" ]]; do
   echo
-  echo "STAGE 2: seeds $((index + 1))..$((index + WAVE_SIZE)) of ${#RUN_SEEDS[@]}, one per GPU"
+  echo "STAGE 2 [$arm]: seeds $((index + 1))..$((index + WAVE_SIZE)) of ${#RUN_SEEDS[@]}, one per GPU"
   reset_wave
   slot=0
   while [[ "$slot" -lt "$WAVE_SIZE" && $((index + slot)) -lt "${#RUN_SEEDS[@]}" ]]; do
-    start_child "${RUN_SEEDS[$((index + slot))]}" "${TOKENS[$slot]}" "$RUN_ROOT"
+    start_child "$arm" "${RUN_SEEDS[$((index + slot))]}" "${TOKENS[$slot]}" "$RUN_ROOT"
     slot=$((slot + 1))
   done
   if [[ "$DRY_RUN" != "1" ]]; then
@@ -224,6 +236,7 @@ while [[ "$index" -lt "${#RUN_SEEDS[@]}" ]]; do
   fi
   index=$((index + WAVE_SIZE))
 done
+done
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo
@@ -233,7 +246,7 @@ fi
 
 echo
 echo "run root: $RUN_ROOT"
-echo "per-seed results: $RUN_ROOT/*/task_result.json"
+echo "per-seed results: $RUN_ROOT/*/*/task_result.json"
 echo
 echo "NO FINALIZER WAS RUN. The finalizer is the only reader of the test"
 echo "split and it compares all three arms; running it on a single arm is a"

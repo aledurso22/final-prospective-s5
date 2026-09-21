@@ -427,7 +427,8 @@ def test_the_launcher_pins_the_commit_and_passes_the_scan():
     for required in ('EXPECTED_COMMIT:?', 'git status --porcelain',
                      'SLURM_JOB_ID', '--implementation "$IMPLEMENTATION"',
                      'IMPLEMENTATION="${IMPLEMENTATION:-factored}"',
-                     'EPOCHS="${EPOCHS:-15}"', 'DRY_RUN'):
+                     'EPOCHS="${EPOCHS:-15}"', 'DRY_RUN',
+                     'ARMS:-generalized_prospective_s5'):
         assert required in source, required
     # it must verify the smoke actually used the requested scan
     assert "scan_implementation" in source
@@ -444,6 +445,17 @@ def test_the_launcher_never_co_schedules_two_seeds_on_one_gpu():
     assert "PEAK_GIB_MEASURED=12.885" in source and "CARD_GIB=24.0" in source
     # and it must not silently run the finalizer on a single arm
     assert "NO FINALIZER WAS RUN" in source
+
+
+def test_the_launcher_default_is_the_single_generalized_arm():
+    """Adding the fourth arm must not change what the existing command
+    does: ARMS defaults to the generalized arm alone."""
+    source = io.open(LAUNCHER).read()
+    assert 'ARMS:-generalized_prospective_s5' in source
+    assert 'start_child "$arm"' in source, "every child names its arm"
+    # the smoke gate now runs per arm and still checks the scan
+    assert 'for arm in "${ARMS[@]}"' in source
+    assert source.count('for arm in "${ARMS[@]}"') >= 3
 
 
 def test_the_launcher_is_executable_and_syntactically_valid():

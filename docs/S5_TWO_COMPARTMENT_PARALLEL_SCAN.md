@@ -374,3 +374,111 @@ If any production mode fails certification, it is named and investigated
 (block/chunk scan, or a custom associative operator) rather than hidden by
 a loosened tolerance. **If no correct parallel method is materially faster,
 that is the result and it will be reported as such.**
+
+
+---
+
+## 11. A fourth arm: theory-matched zero first-order lag
+
+Added after the generalized wave, and **not run**. It exists to answer one
+question:
+
+> Does removing the residual lag help, when the memory poles are held
+> fixed?
+
+### What it changes, and what it does not
+
+Writing `k = 1 − λ̄`, `m = Mh/T`, `c = γh/T`, the generalized arm is
+
+```
+m s̈ + (c + Tk) ṡ + k s = b̄ (x + T ẋ)
+```
+
+Normalizing the denominator by `k` gives `1 + (T + c/k)p + (m/k)p²`, so the
+first-order lag cancels exactly when the numerator's derivative coefficient
+matches:
+
+```
+Γ_k = T + c/k = T + γh / (T(1 − λ̄))
+```
+
+and then, normalized by the DC gain `b̄/k`,
+
+```
+Ĥ(p) = (1 + Γ_k p)/(1 + Γ_k p + (m/k)p²) = 1 − (m/k)p² + O(p³)
+```
+
+**`Ĥ′(0) = 0` but `Ĥ ≢ 1`: zero first-order lag with the second-order
+memory retained.** The principle is *compensate friction prospectively, not
+inertia*. Adding `(m/k)p²` to the numerator would make it equal the
+normalized denominator, give `Ĥ ≡ 1`, and destroy the memory completely —
+a test asserts that and forbids it.
+
+`a1` and `a2` are **inherited literally** from
+`GeneralizedProspectiveS5SSM.setup`, never recomputed, so both poles are
+bit-identical and the ablation is exactly one coefficient. `M, γ, T, λ̄, b̄`
+and their initialization are identical; nothing is retuned.
+
+### The drive is regrouped, and that is not cosmetic
+
+The direct coefficients satisfy `c1 + c2 = K` exactly — two numbers of size
+`K·Γ_k/h` cancelling to `K`, losing ≈ `log₁₀Γ_k` digits. Since
+`Γ_k ≈ γh/(T|1−λ̄|)` reaches 2×10⁵ on near-real slow modes, that is five of
+float32's seven. The algebraically identical regrouping
+
+```
+c1 x_t + c2 x_{t−1}  ≡  K x_t + K (Γ_k/h)(x_t − x_{t−1})
+```
+
+has no cancellation: at low frequency the difference vanishes on its own.
+Measured in float32, error **8e-8 flat in Γ_k** against **3e-5** for the
+direct form. The forward path uses only the regrouped form;
+`direct_coefficients` exists solely so a test can prove the two are the
+same recurrence in float64.
+
+### What is verified
+
+| item | where | status |
+|---|---|---|
+| regrouped ≡ direct, float64 | `test_matched_lag_jax.py` | needs GPU |
+| `a1, a2` bit-identical | same, on arrays | needs GPU |
+| `Γ_k = T` reproduces the generalized arm | laptop + GPU | **passed** (1e-18) |
+| zero first-order lag (exact series coefficient) | laptop | **passed** |
+| second-order memory retained (`Ĥ ≢ 1`) | laptop | **passed** |
+| quadratic numerator would destroy it | laptop | **passed** |
+| `Γ_k` conjugate-symmetric, no special handling | laptop + GPU | **passed** |
+| regrouping removes the float32 cancellation | laptop | **passed** |
+| `ARM_ORDER` still three, finalizer unaffected | laptop | **passed** |
+
+### The remaining concern is optimization, not arithmetic
+
+`Γ_k` spans four orders of magnitude across modes, and only **near-real**
+slow modes blow up, because `|1−λ̄| ≥ |Im λ̄|`:
+
+```
+arg      |λ̄|=0.9   0.99    0.999    0.9999
+0.000       200    2000    20000    200000
+0.010       199    1418     1991      2000
+0.050       181     394      400       400
+0.200        93     101      100       100
+```
+
+`matched_lag_report.py` measures, over seeds 301–303 and every mode:
+the `Γ_k` distribution by `|λ̄|` and phase, per-mode gradient magnitudes
+along the prospective pathway for **both** arms with their across-mode
+ratio in decades, and the low-frequency group delay of both arms — the
+direct lag diagnostic.
+
+### Running it
+
+```bash
+JAX_ENABLE_X64=1 "$PY" -m pytest tests/test_matched_lag_jax.py -q
+"$PY" -m experiments.s5_two_compartment.matched_lag_report --out matched.json
+
+export EXPECTED_COMMIT=$(git rev-parse HEAD)
+ARMS="generalized_prospective_s5 matched_lag_prospective_s5" \
+DRY_RUN=1 bash bin/run_experiments/allocation_s5_two_compartment_factored.sh
+```
+
+`ARMS` defaults to the generalized arm alone, so the existing command is
+unchanged.

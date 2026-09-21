@@ -132,6 +132,46 @@ def scan_factored(a1, a2, c1, c2, inputs, reverse=False):
     return states[::-1] if reverse else states
 
 
+# --------------------------------------------- scans over a GIVEN drive ---
+# The scans above build the drive from (c1, c2) internally. The matched-lag
+# arm forms its drive differently -- regrouped, to avoid a cancellation --
+# so it needs the same recurrences over a drive it supplies itself. The
+# LHS is identical in every case: s_t = a1 s_{t-1} + a2 s_{t-2} + d_t.
+
+
+def scan_factored_drive(a1, a2, drive):
+    """The two-scalar-scan form over a precomputed drive."""
+    first, second = companion_roots(a1, a2)
+    return _first_order(second, _first_order(first, drive.astype(a1.dtype)))
+
+
+def scan_sequential_drive(a1, a2, drive):
+    """The oracle over a precomputed drive, rematerialized as before."""
+    def rollout(values):
+        def body(carry, value):
+            state, previous = carry
+            current = a1 * state + a2 * previous + value
+            return (current, state), current
+
+        initial = (np.zeros_like(a1), np.zeros_like(a1))
+        _, states = jax.lax.scan(body, initial, values)
+        return states
+
+    return jax.checkpoint(rollout)(drive.astype(a1.dtype))
+
+
+DRIVE_SCANS = {"sequential": scan_sequential_drive,
+               "factored": scan_factored_drive}
+
+
+def drive_scan_for(implementation):
+    if implementation not in DRIVE_SCANS:
+        raise ValueError(
+            f"unknown drive scan {implementation!r}; "
+            f"known: {sorted(DRIVE_SCANS)}")
+    return DRIVE_SCANS[implementation]
+
+
 #: the sequential implementation stays the DEFAULT and the oracle. The
 #: alternatives are opt-in by name, never by silent substitution.
 SCAN_IMPLEMENTATIONS = {

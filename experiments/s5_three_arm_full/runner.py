@@ -20,6 +20,7 @@ from experiments.s5_three_arm_full import data as EXPERIMENT_DATA
 from experiments.s5_three_arm_full import gpu_telemetry as GPU_TELEMETRY
 from s5.seq_model import BatchClassificationModel
 from s5.ssm_init import make_DPLR_HiPPO
+from s5.matched_lag_ssm import init_matched_lag_prospective_S5SSM
 from s5.three_arm_factory import (init_S5SSM,
                                   init_generalized_prospective_S5SSM,
                                   init_prospective_S5SSM)
@@ -36,8 +37,16 @@ SCIENTIFIC_NAMES = {
     "native_matched_s5": "Native S5",
     "zucchet_prospective_s5": "Zucchet prospective dynamics — finite-difference realization",
     "generalized_prospective_s5": "generalized prospective dynamics (M,γ,T) — finite-difference realization",
+    "matched_lag_prospective_s5": "theory-matched zero-first-order-lag prospective dynamics (M,γ,Γ_k) — finite-difference realization",
 }
-ARM_ORDER = tuple(SCIENTIFIC_NAMES)
+#: PINNED to the original three. The fourth arm is a theory test, not part
+#: of the three-arm comparison, and `finalize.py` and `arm_summary` iterate
+#: ARM_ORDER -- extending it would make the finalizer demand artifacts for
+#: an arm the three-arm protocol never runs.
+ARM_ORDER = ("native_matched_s5", "zucchet_prospective_s5",
+             "generalized_prospective_s5")
+#: everything `--arm` accepts
+RUNNABLE_ARMS = tuple(SCIENTIFIC_NAMES)
 SEEDS = (301, 302, 303)
 #: WHICH SCAN evaluates the generalized arm's recurrence. The equation, the
 #: coefficients and the parameterization are identical for every choice --
@@ -101,6 +110,10 @@ ARM_CONFIGS = {
                                     "recurrence_constructor": "init_generalized_prospective_S5SSM",
                                     "extra_parameters": ("T", "rho", "gamma"),
                                     "state_dimension": 256},
+    "matched_lag_prospective_s5": {"shared": SHARED_CONFIG,
+                                    "recurrence_constructor": "init_matched_lag_prospective_S5SSM",
+                                    "extra_parameters": ("T", "rho", "gamma"),
+                                    "state_dimension": 256},
 }
 
 
@@ -143,6 +156,12 @@ def ssm_factory(arm):
         return init_generalized_prospective_S5SSM(
             response_init=T_INIT, rho_init=RHO_INIT, gamma_init=1.0,
             implementation=GENERALIZED_IMPLEMENTATION, **kw)
+    if arm == "matched_lag_prospective_s5":
+        # IDENTICAL initialization to the generalized arm, deliberately:
+        # the comparison must differ only in the prospective drive.
+        return init_matched_lag_prospective_S5SSM(
+            response_init=T_INIT, rho_init=RHO_INIT, gamma_init=1.0,
+            implementation=GENERALIZED_IMPLEMENTATION, **kw)
     raise ValueError(arm)
 
 
@@ -183,7 +202,9 @@ def parameter_count(params):
 
 
 def recurrent_state_size(arm):
-    per_layer = SSM_SIZE_BASE if arm != "generalized_prospective_s5" else 2 * SSM_SIZE_BASE
+    two_compartment = ("generalized_prospective_s5",
+                       "matched_lag_prospective_s5")
+    per_layer = 2 * SSM_SIZE_BASE if arm in two_compartment else SSM_SIZE_BASE
     return {"complex_modes": SSM_SIZE_BASE // 2,
             "real_values_total": N_LAYERS * per_layer,
             "per_layer_real_values": per_layer}
@@ -477,7 +498,7 @@ def arm_summary(rows):
 
 
 def run_task(args):
-    if args.arm not in ARM_ORDER or args.seed not in SEEDS:
+    if args.arm not in RUNNABLE_ARMS or args.seed not in SEEDS:
         raise ValueError(f"invalid task identity: {args.arm}, {args.seed}")
     # a caller that never heard of --epochs gets the original protocol
     epochs = getattr(args, "epochs", EPOCHS)
@@ -523,7 +544,8 @@ def production_check(arm, seed, out, batch, state, model, epochs=EPOCHS):
               # every run's artifacts so a result can never be read without
               # knowing how it was computed.
               "scan_implementation": (GENERALIZED_IMPLEMENTATION
-                                      if arm == "generalized_prospective_s5"
+                                      if arm in ("generalized_prospective_s5",
+                                                 "matched_lag_prospective_s5")
                                       else None),
               "slurm": _execution_identity(),
               "loss": float(loss), "accuracy": float(accuracy),
@@ -600,7 +622,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-cache", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--arm", choices=ARM_ORDER, required=True)
+    parser.add_argument("--arm", choices=RUNNABLE_ARMS, required=True)
     parser.add_argument("--seed", type=int, choices=SEEDS, required=True)
     parser.add_argument("--smoke", action="store_true")
     # the number of epochs this run trains for. The default is the original
