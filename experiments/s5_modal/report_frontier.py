@@ -70,6 +70,30 @@ def show_comparison(name, comparison):
           f"-> {'IMPROVED' if lead['significant_at_alpha'] else 'NOT SIGNIFICANT'}")
 
 
+def show_per_seed(arms, ablation=("two_stage", "one_stage")):
+    """Every seed, both components, plus the ablation's paired ratios.
+
+    This is what separates a real paired effect from a marginal-median
+    artifact. The two can disagree: a median OF RATIOS and a ratio OF
+    MEDIANS are different statistics, and two outlier seeds are enough to
+    move a 15-value median by two ranks while leaving the paired sign test
+    untouched. The paired view is the correct one here -- the seeds are
+    matched -- but it should be visible rather than asserted.
+    """
+    for component in ("memory", "lead"):
+        for name, arm in arms.items():
+            print(f"      {component:6s} {name:28s} "
+                  + " ".join(f"{value:.4f}" for value in arm[component]))
+        treatment, baseline = ablation
+        if treatment in arms and baseline in arms:
+            pairs = zip(arms[baseline][component], arms[treatment][component])
+            factors = [b / t if t > 0 else float("inf") for b, t in pairs]
+            wins = sum(1 for value in factors if value > 1.0)
+            print(f"      {component:6s} {baseline}/{treatment} per seed  "
+                  + " ".join(f"{value:.2f}" for value in factors)
+                  + f"   ({wins}/{len(factors)} favour {treatment})")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path")
@@ -97,9 +121,7 @@ def main():
         for name, comparison in row["comparisons"].items():
             show_comparison(name, comparison)
         if arguments.per_seed:
-            for name, arm in row["arms"].items():
-                print(f"      {name:28s} memory "
-                      + " ".join(f"{value:.4f}" for value in arm["memory"]))
+            show_per_seed(row["arms"])
         print()
     print("verdicts:", report["verdict_per_delay"])
 
