@@ -230,12 +230,27 @@ Batch 16, length 16,000, full forward/backward/optimizer, **one process per
 arm**, with the scan actually in force verified by reading it back off the
 constructed module.
 
-| arm | s/step | steps/min | peak GiB | 3 seeds × 15 epochs | vs sequential |
-|---|---|---|---|---|---|
-| `native` | 0.1172 | 512.0 | 6.909 | 0.79 h | 149.9× |
-| `sequential` | **17.5654** | 3.42 | 8.342 | **117.69 h** | 1.0× |
-| `companion` | 0.2479 | 242.0 | 12.940 | 1.66 h | **70.9×** |
-| `factored` | **0.2181** | **275.1** | **12.885** | **1.46 h** | **80.5×** |
+| arm | s/step | steps/min | peak GiB | vs sequential |
+|---|---|---|---|---|
+| `native` | 0.1172 | 512.0 | 6.909 | 149.9× |
+| `sequential` | **17.5654** | 3.42 | 8.342 | 1.0× |
+| `companion` | 0.2479 | 242.0 | 12.940 | **70.9×** |
+| `factored` | **0.2181** | **275.1** | **12.885** | **80.5×** |
+
+> **The wall-clock column has been removed, because it was wrong.** It was
+> computed from `--steps-per-epoch 536`, a number I guessed and documented
+> as "Speech Commands batches per epoch at batch 16". The real split gives
+> roughly **2300** at batch 16 — a 4.3× error. The benchmark also measures
+> optimizer steps *only*: synthetic batch, already on the device, one
+> process alone, no data loading and no validation pass. Against a real
+> run those cost about a further **2×**.
+>
+> **Measured, not projected:** the first real wave ran at **≈17 min/epoch**
+> with three seeds concurrently on three RTX 3090s, i.e. **≈4.3 h for 15
+> epochs**, against the 1.46 h this table used to claim. The per-step
+> figures above are sound and the 80.5× speedup is sound; only the hours
+> were wrong. `--steps-per-epoch` now has no default and no hours are
+> reported without it.
 
 `identical_peak_memory_suspicious: {}` — all four arms allocated
 differently, and `implementations_in_force` reads

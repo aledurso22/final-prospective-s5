@@ -154,6 +154,20 @@ def measure(label, warmup, steps):
 def project(row, steps_per_epoch):
     """The full wave, from measured throughput.
 
+    THIS IS A LOWER BOUND, and the first version of this function did not
+    say so. It measures OPTIMIZER STEPS ONLY, on a synthetic batch already
+    resident on the device, in a process running alone. Real training also
+    pays for data loading, a validation pass every epoch, and contention
+    when several seeds share a node's CPUs. Measured against a real run,
+    those together cost about a further 2x.
+
+    `steps_per_epoch` MUST BE THE REAL NUMBER. The first version defaulted
+    it to 536, described in the help text as "Speech Commands batches per
+    epoch at batch 16" -- a guess presented as a fact. The actual training
+    split gives roughly 2300 at batch 16, so the projection was 4.3x
+    optimistic before the lower-bound factor above, and a wave quoted at
+    1.46 h took over four hours. There is no default any more.
+
     STATE CONCURRENCY ASSUMPTION, stated rather than buried: the three
     seeds are assumed to run SEQUENTIALLY on one device, which is what the
     serialized launcher does. Running them concurrently would divide the
@@ -162,10 +176,15 @@ def project(row, steps_per_epoch):
     """
     seconds = row["seconds_per_step"] * steps_per_epoch * EPOCHS_PROJECTED
     return {
-        "steps_per_epoch_assumed": steps_per_epoch,
+        "steps_per_epoch_used": steps_per_epoch,
         "epochs": EPOCHS_PROJECTED, "seeds": SEEDS_PROJECTED,
-        "hours_per_seed": seconds / 3600.0,
-        "hours_three_seeds_sequential": seconds * SEEDS_PROJECTED / 3600.0,
+        "optimizer_only_hours_per_seed": seconds / 3600.0,
+        "optimizer_only_hours_three_seeds_sequential":
+            seconds * SEEDS_PROJECTED / 3600.0,
+        "is_a_lower_bound": True,
+        "excluded_from_the_measurement":
+            "data loading, per-epoch validation, CPU contention between "
+            "concurrent seeds; together about a further 2x in practice",
         "concurrency_assumption": "three seeds sequential on one device",
     }
 
@@ -176,8 +195,13 @@ def main():
     parser.add_argument("--arm", choices=[name for name, _, _ in ARMS])
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--steps", type=int, default=8)
-    parser.add_argument("--steps-per-epoch", type=int, default=536,
-                        help="Speech Commands batches per epoch at batch 16")
+    parser.add_argument("--steps-per-epoch", type=int,
+                        help="REQUIRED for a projection, and it must be the "
+                             "REAL number of training batches per epoch. "
+                             "There is deliberately no default: the first "
+                             "version guessed 536 and was wrong by 4.3x, "
+                             "which turned a four-hour wave into a quoted "
+                             "1.46 h. Omit it and no hours are reported.")
     arguments = parser.parse_args()
 
     if arguments.arm:
@@ -200,7 +224,11 @@ def main():
             print(finished.stderr[-4000:], flush=True)
             continue
         row = json.loads(finished.stdout.strip().splitlines()[-1])
-        row["projection"] = project(row, arguments.steps_per_epoch)
+        if arguments.steps_per_epoch:
+            row["projection"] = project(row, arguments.steps_per_epoch)
+        else:
+            row["projection"] = {
+                "not_computed": "pass --steps-per-epoch with the real value"}
         rows[label] = row
         print(json.dumps(row, indent=2), flush=True)
 
