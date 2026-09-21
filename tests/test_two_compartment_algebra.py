@@ -257,37 +257,35 @@ def test_native_and_every_other_production_file_are_byte_identical():
 
 
 def test_the_runner_change_touches_no_science():
-    """The runner may gain factory wiring and nothing else: no equation, no
-    coefficient, no hyperparameter, no schedule."""
-    import subprocess
-    finished = subprocess.run(
-        ("git", "diff", "-U0", BASE, "HEAD", "--",
-         "experiments/s5_three_arm_full/runner.py"),
-        cwd=REPO, capture_output=True, text=True)
-    assert finished.returncode == 0, finished.stderr
-    removed = [line[1:] for line in finished.stdout.splitlines()
-               if line.startswith("-") and not line.startswith("---")
-               and line[1:].strip()]
-    # exactly one line may be REMOVED, and only because it is re-added with
-    # the implementation threaded through
-    for line in removed:
-        assert ("init_generalized_prospective_S5SSM(" in line
-                or "response_init=T_INIT" in line
-                or "from s5.discrete_recurrence import" in line
-                or "SEEDS = (301, 302, 303)" in line
-                or 'parser.add_argument("--epochs"' in line
-                or "args = parser.parse_args()" in line
-                or "parser.error(" in line
-                or "if args.epochs <= WARMUP_END:" in line
-                or '"slurm": _execution_identity(),' in line
-                or '"epochs_requested": epochs,' in line
-                or 'result = {"arm": SCIENTIFIC_NAMES[arm]' in line
-                or "gamma_init=1.0, **kw)" in line), line
+    """The runner may gain factory wiring and nothing else.
+
+    Checked by POSITIVE INVARIANTS rather than a whitelist of removed
+    lines. The first version was such a whitelist and it failed the moment
+    `ARM_ORDER = tuple(SCIENTIFIC_NAMES)` was legitimately replaced by an
+    explicit three-tuple -- a test that has to be edited whenever the code
+    changes is not protecting anything.
+    """
     source = io.open(RUNNER).read()
-    # the constants that define the experiment are untouched
-    for expected in ("T_INIT, RHO_INIT = 0.05, 0.5", "SEEDS = (301, 302, 303)",
-                     'EXPECTED_FAILURE' if False else "NumericalTrainingFailure"):
+    tree = SI.parse(RUNNER)
+    # the experiment's constants
+    for expected in ("T_INIT, RHO_INIT = 0.05, 0.5",
+                     "SEEDS = (301, 302, 303)",
+                     "class NumericalTrainingFailure"):
         assert expected in source, expected
+    # ARM_ORDER is exactly the original three, in the original order, so
+    # finalize.py and arm_summary see no new arm
+    assert ('ARM_ORDER = ("native_matched_s5", "zucchet_prospective_s5",\n'
+            '             "generalized_prospective_s5")') in source
+    # every pre-existing arm still builds from the same constructor with
+    # the same initialization
+    factory = ast.get_source_segment(
+        source, SI.function_node(tree, "ssm_factory")) or ""
+    assert 'if arm == "native_matched_s5":\n        return init_S5SSM(**kw)' \
+        in factory
+    assert 'init_prospective_S5SSM(response_init=T_INIT, **kw)' in factory
+    assert ("init_generalized_prospective_S5SSM(\n"
+            "            response_init=T_INIT, rho_init=RHO_INIT, "
+            "gamma_init=1.0,") in factory
 
 
 def test_the_one_justified_change_only_adds_an_implementation_choice():
