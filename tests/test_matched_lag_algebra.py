@@ -235,8 +235,14 @@ def test_the_layer_reuses_a1_and_a2_rather_than_recomputing_them():
     assert "self.generalized_a1" in call and "self.generalized_a2" in call
     setup = ast.get_source_segment(source, SI.function_node(tree, "setup"))
     assert "super().setup()" in setup
-    assert "generalized_coefficients" not in source, (
+    # by AST, not substring: the literal appears in a COMMENT explaining
+    # which h this module uses, and a substring search cannot tell a
+    # comment from a call. That trap has now caught me three times.
+    called = SI.called_names(tree)
+    assert "generalized_coefficients" not in called, (
         "a1 and a2 must be inherited, never recomputed here")
+    imported = {name for _, name in SI.imported_names(tree)}
+    assert "generalized_coefficients" not in imported
 
 
 def test_the_forward_path_uses_the_regrouped_drive_not_the_coefficients():
