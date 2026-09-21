@@ -159,25 +159,67 @@ in float64). It is reused rather than rebuilt.
 
 ---
 
-## 5. The decision that makes the ladder implementable now
+## 5. CORRECTED: the recurrent kernel cannot train
 
-**Modify `fused_recurrent` only. Do not touch `chunk.py` in this bridge.**
+**The decision originally recorded here was wrong, and was corrected on
+2026-09-22 by reading the code.**
 
-The six-arm ladder that produced the existing results never had a parallel form
-at all: `rollout` is a sequential scan over 64 tokens. So the equations port
-one-for-one, and the implementation does not. The recurrent Triton kernel is the
-path where the equations port one-for-one AND the implementation is real.
+The original decision was "modify `fused_recurrent` only, leave `chunk.py`
+alone", on the reasoning that the recurrent Triton kernel is where the equations
+port one-for-one and the implementation is still real. That reasoning is sound
+but the premise is false. At the pinned commit
+`c6e77fa261fb0c002fae1a14b6209a5b28d2edc9`,
+`fla/ops/momentum_delta_rule/fused_recurrent.py`:
 
-Consequences, all of them good for a go/no-go:
+    @staticmethod
+    @input_guard
+    def backward(ctx, do, dst, dmt):
+        raise NotImplementedError(
+            "Backward pass is not implemented yet and we do not have plans to "
+            "implement it because we haven't figured out how to compute dg "
+            "without materializing the full hidden states for all time steps."
+        )
 
-* No chunkwise derivation is required **for any arm**, including literal
-  Nesterov, whose only blocker was precisely that derivation. The full six-arm
-  ladder becomes implementable on day one.
-* The expensive derivation work moves AFTER the go/no-go instead of before it.
-* The cost is throughput, and therefore scale. The bridge runs at a small
-  configuration with a modest context, and cannot speak to practicality at 400M.
+`fused_recurrent_mode_rule` is a DECODING path. It has no backward and upstream
+states they do not intend to add one. Nothing can be trained through it.
 
----
+### 5.1 What is actually available
+
+| tier | path | differentiable | speed | work |
+|---|---|---|---|---|
+| A | token-loop PyTorch reference (`prospective/rules.py`) | yes, via autograd | slowest | **done** |
+| B | chunkwise PyTorch reference (`naive.py::chunk_momentum_delta_rule_ref`) | yes, via autograd | middle | filter must be derived into the UT-transform form |
+| C | chunkwise Triton (`chunk.py`) | yes | full | full kernel derivation, fwd and bwd |
+
+Tier A already exists and already trains: the arms in `prospective/rules.py` are
+plain PyTorch, autograd supplies the backward, and the gradient test confirms
+gradients reach M, gamma and T. It is a per-token Python loop, so it is slow and
+memory-hungry (autograd retains every step), which bounds the bridge to a small
+model and a short context.
+
+### 5.2 Revised decision
+
+**Run the bridge on tier A.** It is the only path that is both differentiable
+and already correct, and it is available now. Accept the scale bound: a small
+model and a short context, sized by what fits rather than by what is
+interesting.
+
+Tier B is the next investment if tier A is too slow to reach separation. It
+needs the filter derived into the chunkwise form, where the per-token residual
+is never materialized, which is real derivation work but needs no Triton.
+
+Tier C stays after the go/no-go, as before.
+
+### 5.3 What this costs
+
+The original framing claimed the bridge would need no chunkwise derivation for
+any arm, including literal Nesterov. That claim survives only for tier A. If
+tier A proves too slow, the Nesterov derivation problem returns at tier B, and
+it returns first, because moving the residual evaluation point is what breaks
+the UT transform.
+
+The bridge still answers "is the effect real" and still does not answer "is this
+practical at scale". That division is unchanged.
 
 ## 6. The endpoint, and why the obvious one is wrong
 
@@ -218,7 +260,8 @@ Nothing before step 5 requires a GPU beyond a small development device.
 3. Implement each arm in the **reference path only** (`naive.py` style),
    certified against an independently written float64 reference. Not against
    their code: an independent reference, as on the S5 branch.
-4. Port each arm into `fused_recurrent`, gated against step 3.
+4. SUPERSEDED by section 5: `fused_recurrent` has no backward. Train through
+   the tier-A reference instead.
 5. Calibration run: Gated DeltaNet versus native MDN at the chosen small
    configuration, checked against the published gap.
 6. Six-arm ladder, one arm per GPU, common pretrained native checkpoint.
