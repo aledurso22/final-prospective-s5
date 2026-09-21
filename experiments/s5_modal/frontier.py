@@ -90,6 +90,17 @@ RATE_MAX = 0.3
 #: at the slow end (rate 1/256) it gives |omega| up to 0.031, a period of
 #: at least 200 tokens against a 256-token decay.
 Q_MAX = 8.0
+#: every arm draws its modes from a POOL of this size and keeps the first
+#: `modes` of them, so a wider arm is the narrow arm PLUS extra modes
+#: rather than an unrelated draw. Without this the capacity-matched arms
+#: shared only the data stream with the 16-mode arms, and the frontier run
+#: measured the consequence directly: across seeds, native correlated 0.987
+#: with two_stage (same draw) and 0.187 with the capacity-matched arm
+#: (different draw), with paired ratios spreading 0.60 against 4.10. A
+#: "paired" test against a decoupled arm is an unpaired test at n = 15, and
+#: it has almost no power -- which is why median ratios of 0.72 to 0.90 in
+#: the gated arm's favour still failed to reach significance.
+MODE_POOL = 32
 # ------------------------------------------------------------------ task --
 def make_batch(key, delay, batch=BATCH, length=LENGTH):
     """(inputs, target) for one delay.
@@ -207,41 +218,81 @@ def loss_fn(params, inputs, target, use_gates, gate_penalty):
     return error + gate_penalty * sum(jnp.mean(g) for g in gates), error
 
 
-def initial_params(key, stages, modes):
-    """Identical across arms wherever the shapes allow it.
+def initial_params(key, stages, modes, pool=MODE_POOL):
+    """Nested across arms: a wider arm is a narrower one PLUS extra modes.
 
-    Lambda, B and the readout do not depend on the stage count, so for one
-    seed the one-stage and two-stage arms at the same mode count start from
-    exactly the same recurrence and the same readout. The arms with a
-    different mode count necessarily draw different tensors; that is the
-    price of matching parameters and it is stated in the report.
+    Every tensor is drawn at the POOL size and sliced to `modes`, so the
+    first `modes` entries are identical in every arm no matter how wide it
+    is. Slicing a fixed draw guarantees this; relying on a shorter draw
+    being a prefix of a longer one would depend on the generator's
+    internals.
+
+    This is what makes a capacity-matched comparison genuinely paired. In
+    the first frontier run the wide arms drew independently, so a seed
+    shared only the data stream, and every comparison against them lost its
+    power: the gated arm's memory median ratio was 0.72 to 0.90 -- better
+    than the control -- yet never significant, because the control's own
+    seed-to-seed scatter swamped it.
+
+    Lambda, B and the readout do not depend on the stage count either, so
+    for one seed the one-stage and two-stage arms at the same mode count
+    start from exactly the same recurrence and the same readout: that
+    ablation differs in the second stage and in nothing else.
 
     Stages and modes are both initialized ASYMMETRICALLY. Identical stages
     receive identical gradients and stay tied for ever, pinning n1 = n2 and
     with it the critical branch M = (Gamma/2)^2, so the general passive
     branch would be unreachable.
     """
+    if modes > pool:
+        raise SystemExit(f"{modes} modes exceeds the pool of {pool}")
     keys = jax.random.split(key, 8)
-    log_rate = jax.random.uniform(keys[0], (modes,),
+    log_rate = jax.random.uniform(keys[0], (pool,),
                                   minval=math.log(RATE_MIN),
                                   maxval=math.log(RATE_MAX))
     offset = (jnp.zeros((1, 1)) if stages == 1
               else jnp.linspace(-0.5, 0.5, stages)[:, None])
-    mode_offset = jnp.linspace(-0.3, 0.3, modes)[None, :]
+    mode_offset = jnp.linspace(-0.3, 0.3, pool)[None, :modes]
+    readout = jax.random.normal(keys[4], (2 * pool, CHANNELS)) * 0.1
     return {
-        "log_rate": log_rate,
-        "quality": jax.random.uniform(keys[1], (modes,), minval=-Q_MAX,
-                                      maxval=Q_MAX),
-        "b_re": jax.random.normal(keys[2], (modes, 2)) * 0.5,
-        "b_im": jax.random.normal(keys[3], (modes, 2)) * 0.5,
-        "readout": jax.random.normal(keys[4], (2 * modes, CHANNELS)) * 0.1,
+        "log_rate": log_rate[:modes],
+        "quality": jax.random.uniform(keys[1], (pool,), minval=-Q_MAX,
+                                      maxval=Q_MAX)[:modes],
+        "b_re": (jax.random.normal(keys[2], (pool, 2)) * 0.5)[:modes],
+        "b_im": (jax.random.normal(keys[3], (pool, 2)) * 0.5)[:modes],
+        # the readout's rows are [real parts; imaginary parts], so the two
+        # halves are sliced separately to keep each mode with its own row
+        "readout": jnp.concatenate((readout[:modes],
+                                    readout[pool:pool + modes]), axis=0),
         "readout_bias": jnp.zeros((CHANNELS,)),
         "d_raw": offset + mode_offset,
-        "delta_raw": 0.5 + offset
-                     + 0.1 * jax.random.normal(keys[5], (stages, modes)),
-        "gate_raw": -2.0 + offset
-                    + 0.5 * jax.random.normal(keys[6], (stages, modes)),
+        "delta_raw": (0.5 + offset
+                      + 0.1 * jax.random.normal(keys[5], (stages, pool))
+                      [:, :modes]),
+        "gate_raw": (-2.0 + offset
+                     + 0.5 * jax.random.normal(keys[6], (stages, pool))
+                     [:, :modes]),
     }
+
+
+def verify_nesting(arms, seeds):
+    """Assert that every arm really is the narrowest arm plus extra modes.
+
+    Checked at run time, on the actual draws, because this is the property
+    the whole capacity comparison rests on and the previous run failed it
+    silently.
+    """
+    narrowest = min(modes for _, _, _, modes in arms)
+    key = jax.random.PRNGKey(seeds[0])
+    reference = initial_params(key, 1, narrowest)
+    for name, _, stages, modes in arms:
+        candidate = initial_params(key, stages, modes)
+        for field in ("log_rate", "quality", "b_re", "b_im"):
+            shared = candidate[field][:narrowest]
+            if not bool(jnp.all(shared == reference[field])):
+                raise SystemExit(f"{name}: {field} is not nested")
+    print(f"nesting verified: every arm's first {narrowest} modes are "
+          f"identical", flush=True)
 
 
 def train_all_seeds(use_gates, stages, modes, delay, seeds, steps,
@@ -434,6 +485,7 @@ def main():
     seeds = list(range(args.seeds))
     arms = select_arms(args.arms, args.modes)
     comparisons = available_comparisons([name for name, _, _, _ in arms])
+    verify_nesting(arms, seeds)
 
     frontier = []
     for delay in args.delays:

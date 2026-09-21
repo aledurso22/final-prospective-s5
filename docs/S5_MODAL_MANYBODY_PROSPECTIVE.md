@@ -766,6 +766,43 @@ lead on every seed at every delay, and **two stages beat one** on the
 lead–memory frontier at every delay. The third — that gates specialize by
 timescale — is falsified.
 
+### The ablation, confirmed per seed
+
+The lead arrays resolve the one discrepancy worth chasing. Delay 16,
+sorted:
+
+```
+one_stage  .0008 .0013 .0018 .0019 .0024 .0028 .0029 [.0030] .0035 .0054 .0056 .0067 .0072 .0076 .0082
+two_stage  .0004 .0006 .0009 .0016 .0022 .0027 .0029 [.0030] .0031 .0033 .0034 .0034 .0036 .0036 .0060
+```
+
+Identical medians, yet 13/15 paired wins at a median ratio of 1.63×. The
+second stage **compresses the distribution**: worst case 0.0060 against
+0.0082, with much more mass at the low end and the middle untouched. A
+marginal median is structurally blind to that; the paired test is not,
+which is why it was declared primary.
+
+The effect also **strengthens with delay**. Seed 5 loses at 16, 32 and 64
+(0.52, 0.53, 0.57) and flips at 128 and 256 (1.62, 1.51); by 256 the
+ablation is 15/15 with every ratio ≥ 1.01. A second-order numerator
+mattering more over longer horizons is what `M_n D²` is for.
+
+### Repairing the control: nested arms
+
+The capacity comparison was defective because a wider arm drew an
+independent initialization. Every tensor is now drawn at a fixed pool of 32
+modes and sliced, so **a wider arm is the narrower arm plus extra modes**
+and the first 16 are identical in all five. Slicing a fixed draw guarantees
+that; relying on a short draw being a prefix of a long one would depend on
+the generator's internals. `verify_nesting` asserts the property on the
+real draws at the start of every run, because this is what the whole
+capacity comparison rests on and the previous run failed it silently.
+
+This makes the capacity question answerable for the first time, and it
+applies retrospectively: **§6g's "memory was explained by capacity" was
+measured with the same broken instrument and should be treated as
+withdrawn, not established.**
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

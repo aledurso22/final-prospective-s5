@@ -391,6 +391,52 @@ def test_the_quality_factor_spans_the_right_omega_at_both_ends():
     assert 1.0 / rate_min >= 2 * 256
 
 
+def test_wider_arms_are_nested_in_narrower_ones():
+    """REGRESSION from the first frontier run, and the defect that decided
+    its verdict.
+
+    A capacity-matched arm has 26 modes where the construction has 16, so
+    it drew an INDEPENDENT initialization and a seed shared only the data
+    stream with it. Across seeds, native correlated 0.987 with two_stage
+    (same draw) and 0.187 with the capacity-matched arm, and the paired
+    memory ratios spread 0.60 against 4.10. A paired test against a
+    decoupled arm is an unpaired test at n = 15 with almost no power, which
+    is why memory median ratios of 0.72-0.90 in the gated arm's favour
+    never reached significance and every delay returned
+    GATES_NOT_SELECTIVE.
+
+    Every tensor is now drawn at a fixed pool size and sliced, so a wider
+    arm is the narrower arm PLUS extra modes. Slicing a fixed draw
+    guarantees that; relying on a short draw being a prefix of a long one
+    would depend on the generator's internals.
+    """
+    source = io.open(FRONTIER).read()
+    tree = SI.parse(FRONTIER)
+    assert "MODE_POOL = 32" in source
+    assert SI.defines_function(tree, "verify_nesting")
+    initial = ast.get_source_segment(
+        source, SI.function_node(tree, "initial_params")) or ""
+    assert "pool=MODE_POOL" in initial
+    for field in ("log_rate", "quality", "b_re", "b_im"):
+        assert f'"{field}"' in initial, field
+    # the pool must cover the widest arm the table asks for
+    assert max(modes for _, _, _, modes in D.arm_table()) <= 32
+    # and the check runs on the real draws, not only in a test
+    main = ast.get_source_segment(source, SI.function_node(tree, "main")) or ""
+    assert "verify_nesting(arms, seeds)" in main
+
+
+def test_the_readout_rows_are_sliced_in_two_halves():
+    """The readout's rows are [real parts; imaginary parts], so slicing
+    [:modes] off a pool-sized draw would take real rows only and pair each
+    mode with the wrong row. Both halves must be sliced separately."""
+    initial = ast.get_source_segment(
+        io.open(FRONTIER).read(),
+        SI.function_node(SI.parse(FRONTIER), "initial_params")) or ""
+    assert "readout[pool:pool + modes]" in initial
+    assert "readout[:modes]" in initial
+
+
 def test_the_slowest_mode_can_outlast_the_longest_delay():
     """The bug that made the previous probe unable to hold what it asked
     the model to recall: uniform decay rates whose 16-sample minimum was a
