@@ -276,12 +276,69 @@ not grab the card up front and the measured peak is the real one.
 | **Whole-inventory certification**, seeds 301–303 | **passed** — 1152 modes, worst ρ 0.99997, 0 offenders |
 | **Throughput and peak memory** | **passed** — factored 80.5× over sequential, 1.46 h per wave |
 | Device capacity vs 12.9 GiB peak | **passed** — RTX 3090, 24.0 GiB, peak is 53.7% |
-| Launcher for this arm | **not added** |
+| Launcher for this arm | **added, not run** |
 
-**Every gate in the brief has now passed.** The only outstanding item is
-the launcher, which the brief permits only after these gates and which
-has deliberately not been written. Nothing has been trained and no Slurm
-job has been submitted.
+**Every gate in the brief has passed**, so the launcher is now permitted
+and has been written. It has **not been run**. Nothing has been trained
+and no Slurm job has been submitted.
+
+## 10. The launcher
+
+`bin/run_experiments/allocation_s5_two_compartment_factored.sh` — the
+generalized arm only, three seeds, 15 epochs, the factored scan, as a
+direct child process of an existing interactive allocation.
+
+**One seed per GPU, never two.** The measured peak is 12.885 GiB against
+the RTX 3090's 24.0 GiB, so two concurrent seeds on one card would need
+25.8 GiB and fail. Visible tokens are **de-duplicated** and the wave is
+never wider than the number of distinct ones, so the seeds fall back to
+running sequentially on a single-GPU allocation rather than colliding.
+
+| allocation | schedule | wall clock |
+|---|---|---|
+| `--gres=gpu:1` | three seeds sequentially | **1.46 h** |
+| `--gres=gpu:3` | one seed per GPU, concurrently | **0.49 h** |
+
+**Guards**, all inherited from the three-GPU launcher: the commit is pinned
+by `EXPECTED_COMMIT`, a dirty worktree is refused, the interpreter and data
+cache are checked, it refuses to run outside a numeric `SLURM_JOB_ID`, each
+child gets a private `TMPDIR` and JAX compilation cache, pre-JAX telemetry
+is written before any JAX import, and every child of a wave is awaited
+before the next begins. `DRY_RUN=1` prints the whole plan and starts
+nothing.
+
+**A smoke gates the training, and the gate checks the scan.** The smoke
+child's `production_check.json` must report
+`scan_implementation == "factored"`; if it reports `sequential` the
+launcher aborts rather than quietly training the 117-hour configuration.
+That check exists because the benchmark's first run silently measured the
+wrong scan three times.
+
+**No finalizer.** The finalizer is the only reader of the test split and it
+compares all three arms; running it on a single arm is a separate,
+explicit decision and the launcher says so and stops.
+
+### Running it
+
+```bash
+# inside the allocation
+export EXPECTED_COMMIT=$(git rev-parse HEAD)
+DRY_RUN=1 bash bin/run_experiments/allocation_s5_two_compartment_factored.sh
+# then, to actually train:
+bash bin/run_experiments/allocation_s5_two_compartment_factored.sh
+```
+
+`IMPLEMENTATION=sequential` reproduces the 117-hour run and the launcher
+prints a warning if asked for it.
+
+### The production default has NOT moved
+
+`GENERALIZED_IMPLEMENTATION` in the runner and `implementation` on the
+layer both still default to `"sequential"`. Every pre-existing command
+behaves exactly as it did before this branch; the factored scan is only
+used when a caller asks for it by name. `scan_implementation` is recorded
+in every run's `production_check.json`, so no result can be read without
+knowing how it was computed.
 
 No certification of the parallel routes is claimed yet, no launcher exists,
 nothing has been trained, and no Slurm job has been submitted.

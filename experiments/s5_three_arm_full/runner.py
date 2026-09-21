@@ -24,6 +24,7 @@ from s5.three_arm_factory import (init_S5SSM,
                                   init_generalized_prospective_S5SSM,
                                   init_prospective_S5SSM)
 from s5.discrete_recurrence import companion_radius, generalized_coefficients, zucchet_coefficients
+from s5.factored_recurrence import DEFAULT_IMPLEMENTATION, SCAN_IMPLEMENTATIONS
 from s5.ssm import discretize_zoh
 from s5.train_helpers import (cosine_annealing, create_train_state,
                               linear_warmup, train_step, train_step_observable,
@@ -38,6 +39,12 @@ SCIENTIFIC_NAMES = {
 }
 ARM_ORDER = tuple(SCIENTIFIC_NAMES)
 SEEDS = (301, 302, 303)
+#: WHICH SCAN evaluates the generalized arm's recurrence. The equation, the
+#: coefficients and the parameterization are identical for every choice --
+#: verified to 1.83e-13 in float64 over the whole production inventory -- so
+#: this changes evaluation order and nothing else. It defaults to the
+#: original sequential scan, so an existing command is unchanged.
+GENERALIZED_IMPLEMENTATION = DEFAULT_IMPLEMENTATION
 T_INIT, RHO_INIT = 0.05, 0.5
 
 
@@ -134,7 +141,8 @@ def ssm_factory(arm):
         return init_prospective_S5SSM(response_init=T_INIT, **kw)
     if arm == "generalized_prospective_s5":
         return init_generalized_prospective_S5SSM(
-            response_init=T_INIT, rho_init=RHO_INIT, gamma_init=1.0, **kw)
+            response_init=T_INIT, rho_init=RHO_INIT, gamma_init=1.0,
+            implementation=GENERALIZED_IMPLEMENTATION, **kw)
     raise ValueError(arm)
 
 
@@ -511,6 +519,12 @@ def production_check(arm, seed, out, batch, state, model, epochs=EPOCHS):
         state, jax.random.PRNGKey(seed * 1000), xb, yb, model, 0, 1, epochs)
     result = {"arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm, "seed": seed,
               "epochs_requested": epochs,
+              # provenance: which scan evaluated the recurrence. Recorded in
+              # every run's artifacts so a result can never be read without
+              # knowing how it was computed.
+              "scan_implementation": (GENERALIZED_IMPLEMENTATION
+                                      if arm == "generalized_prospective_s5"
+                                      else None),
               "slurm": _execution_identity(),
               "loss": float(loss), "accuracy": float(accuracy),
               "gradient_norm": float(grad_norm),
@@ -593,9 +607,15 @@ def main():
     # protocol, so an existing command is unchanged; the schedule (one warm-up
     # epoch then cosine decay) is recomputed over whatever is requested.
     parser.add_argument("--epochs", type=int, default=EPOCHS)
+    # the scan used by the generalized arm. Default unchanged, so every
+    # existing command behaves exactly as before.
+    parser.add_argument("--implementation", choices=sorted(SCAN_IMPLEMENTATIONS),
+                        default=DEFAULT_IMPLEMENTATION)
     args = parser.parse_args()
     if args.epochs <= WARMUP_END:
         parser.error(f"--epochs must exceed the {WARMUP_END}-epoch warm-up")
+    global GENERALIZED_IMPLEMENTATION
+    GENERALIZED_IMPLEMENTATION = args.implementation
     try:
         run_task(args)
     except Exception as error:

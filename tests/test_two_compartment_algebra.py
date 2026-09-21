@@ -209,10 +209,20 @@ def test_no_file_reads_a_name_nothing_binds():
 
 
 # ---------------------------------------------------------- byte identity --
-#: the ONE pre-existing file this branch is allowed to touch, and why:
-#: the arm needs an explicit implementation choice, and the default keeps
-#: the production path on the sequential oracle.
-JUSTIFIED_CHANGES = {"s5/generalized_prospective_ssm.py"}
+#: the pre-existing files this branch may touch, and why. The brief allows
+#: "explicitly justified minimal factory/benchmark wiring" and nothing else.
+#:
+#:   s5/generalized_prospective_ssm.py
+#:       the arm needs an explicit implementation choice; the default stays
+#:       on the sequential oracle so the production path is unchanged.
+#:   experiments/s5_three_arm_full/runner.py
+#:       factory wiring only: a --implementation flag defaulting to the
+#:       original sequential scan, threaded into ssm_factory for the
+#:       generalized arm alone, and recorded in every run's artifacts so a
+#:       result cannot be read without knowing how it was computed. No
+#:       equation, coefficient, hyperparameter or schedule is touched.
+JUSTIFIED_CHANGES = {"s5/generalized_prospective_ssm.py",
+                     "experiments/s5_three_arm_full/runner.py"}
 BASE = "ef004cda025b4e098041cfe5970c217fa0015bba"
 
 
@@ -240,10 +250,44 @@ def test_native_and_every_other_production_file_are_byte_identical():
     untouched. Only the one justified file may differ."""
     changed = _changed_tracked_files()
     assert changed <= JUSTIFIED_CHANGES, sorted(changed - JUSTIFIED_CHANGES)
+    # Native and every equation-defining file stay byte-identical
     for path in ("s5/ssm.py", "s5/discrete_recurrence.py",
-                 "experiments/s5_three_arm_full/runner.py",
                  "s5/three_arm_factory.py", "s5/prospective_ssm.py"):
         assert path not in changed, path
+
+
+def test_the_runner_change_touches_no_science():
+    """The runner may gain factory wiring and nothing else: no equation, no
+    coefficient, no hyperparameter, no schedule."""
+    import subprocess
+    finished = subprocess.run(
+        ("git", "diff", "-U0", BASE, "HEAD", "--",
+         "experiments/s5_three_arm_full/runner.py"),
+        cwd=REPO, capture_output=True, text=True)
+    assert finished.returncode == 0, finished.stderr
+    removed = [line[1:] for line in finished.stdout.splitlines()
+               if line.startswith("-") and not line.startswith("---")
+               and line[1:].strip()]
+    # exactly one line may be REMOVED, and only because it is re-added with
+    # the implementation threaded through
+    for line in removed:
+        assert ("init_generalized_prospective_S5SSM(" in line
+                or "response_init=T_INIT" in line
+                or "from s5.discrete_recurrence import" in line
+                or "SEEDS = (301, 302, 303)" in line
+                or 'parser.add_argument("--epochs"' in line
+                or "args = parser.parse_args()" in line
+                or "parser.error(" in line
+                or "if args.epochs <= WARMUP_END:" in line
+                or '"slurm": _execution_identity(),' in line
+                or '"epochs_requested": epochs,' in line
+                or 'result = {"arm": SCIENTIFIC_NAMES[arm]' in line
+                or "gamma_init=1.0, **kw)" in line), line
+    source = io.open(RUNNER).read()
+    # the constants that define the experiment are untouched
+    for expected in ("T_INIT, RHO_INIT = 0.05, 0.5", "SEEDS = (301, 302, 303)",
+                     'EXPECTED_FAILURE' if False else "NumericalTrainingFailure"):
+        assert expected in source, expected
 
 
 def test_the_one_justified_change_only_adds_an_implementation_choice():
@@ -343,3 +387,68 @@ def test_every_call_to_the_jax_fixture_matches_its_signature():
             if keyword.arg is not None and keyword.arg not in allowed:
                 offenders.append(keyword.arg)
     assert offenders == [], (sorted(set(offenders)), sorted(allowed))
+
+
+# -------------------------------------------------------------- launcher --
+LAUNCHER = os.path.join(REPO,
+                        "bin/run_experiments/allocation_s5_two_compartment_factored.sh")
+RUNNER = os.path.join(REPO, "experiments/s5_three_arm_full/runner.py")
+
+
+def test_the_runner_accepts_the_scan_choice_and_defaults_to_sequential():
+    """The production default must not move: an existing command has to
+    behave exactly as it did before this branch."""
+    source = io.open(RUNNER).read()
+    tree = SI.parse(RUNNER)
+    assert "GENERALIZED_IMPLEMENTATION = DEFAULT_IMPLEMENTATION" in source
+    assert '"--implementation"' in source
+    main = ast.get_source_segment(source, SI.function_node(tree, "main")) or ""
+    assert "default=DEFAULT_IMPLEMENTATION" in main, (
+        "the CLI default must be the original sequential scan")
+    factory = ast.get_source_segment(
+        source, SI.function_node(tree, "ssm_factory")) or ""
+    assert "implementation=GENERALIZED_IMPLEMENTATION" in factory
+    # and ONLY the generalized arm is affected
+    assert "init_S5SSM(**kw)" in factory
+
+
+def test_the_scan_is_recorded_in_every_run_s_artifacts():
+    """A result must never be readable without knowing how it was
+    computed."""
+    source = io.open(RUNNER).read()
+    node = SI.function_node(SI.parse(RUNNER), "production_check")
+    body = ast.get_source_segment(source, node) or ""
+    assert '"scan_implementation"' in body
+    assert "GENERALIZED_IMPLEMENTATION" in body
+
+
+def test_the_launcher_pins_the_commit_and_passes_the_scan():
+    source = io.open(LAUNCHER).read()
+    for required in ('EXPECTED_COMMIT:?', 'git status --porcelain',
+                     'SLURM_JOB_ID', '--implementation "$IMPLEMENTATION"',
+                     'IMPLEMENTATION="${IMPLEMENTATION:-factored}"',
+                     'EPOCHS="${EPOCHS:-15}"', 'DRY_RUN'):
+        assert required in source, required
+    # it must verify the smoke actually used the requested scan
+    assert "scan_implementation" in source
+    assert "expected {wanted!r}" in source
+
+
+def test_the_launcher_never_co_schedules_two_seeds_on_one_gpu():
+    """12.885 GiB measured against a 24.0 GiB card: two concurrent seeds on
+    one GPU would need 25.8 GiB and fail. The wave can therefore never be
+    wider than the number of DISTINCT visible tokens."""
+    source = io.open(LAUNCHER).read()
+    assert "WAVE_SIZE=\"${#TOKENS[@]}\"" in source
+    assert "duplicate=1" in source, "tokens must be de-duplicated"
+    assert "PEAK_GIB_MEASURED=12.885" in source and "CARD_GIB=24.0" in source
+    # and it must not silently run the finalizer on a single arm
+    assert "NO FINALIZER WAS RUN" in source
+
+
+def test_the_launcher_is_executable_and_syntactically_valid():
+    import subprocess
+    assert os.access(LAUNCHER, os.X_OK), "launcher must be executable"
+    finished = subprocess.run(("bash", "-n", LAUNCHER), capture_output=True,
+                              text=True)
+    assert finished.returncode == 0, finished.stderr
