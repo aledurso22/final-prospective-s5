@@ -115,8 +115,7 @@ def test_both_controls_have_at_least_as_many_parameters_as_two_stage():
     """The whole point of the controls. The previous run's memory result
     turned out to be capacity, so a control that is even slightly smaller
     would be worthless."""
-    arms = dict((name, (gates, stages, modes))
-                for name, gates, stages, modes in D.arm_table())
+    arms = dict((row[0], row[1:4]) for row in D.arm_table())
     two = D.effective_parameters(*(arms["two_stage"][2],
                                    arms["two_stage"][1]))
     assert two == 258
@@ -128,20 +127,19 @@ def test_both_controls_have_at_least_as_many_parameters_as_two_stage():
 def test_the_two_gated_arms_share_their_mode_count():
     """The pure ablation needs the recurrence to be identical, so
     `one_stage` and `two_stage` must differ in the stage count ONLY."""
-    arms = {name: (gates, stages, modes)
-            for name, gates, stages, modes in D.arm_table()}
+    arms = {row[0]: row[1:4] for row in D.arm_table()}
     assert arms["one_stage"][2] == arms["two_stage"][2] == D.MODES
     assert arms["one_stage"][1] == 1 and arms["two_stage"][1] == 2
 
 
 def test_the_native_arms_carry_no_stage_parameters():
-    for name, gates, stages, modes in D.arm_table():
+    for name, gates, stages, modes, _kind in D.arm_table():
         if not gates:
             assert D.effective_parameters(modes, 0) == 10 * modes + D.CHANNELS
 
 
 def test_every_comparison_names_arms_that_exist():
-    names = {name for name, _, _, _ in D.arm_table()}
+    names = {row[0] for row in D.arm_table()}
     for treatment, baseline in D.COMPARISONS:
         assert treatment in names and baseline in names
     # the three the decision rule reads must be among them
@@ -157,8 +155,8 @@ def test_an_arm_subset_is_filtered_and_a_typo_is_refused():
     silently drop an arm and change which comparisons exist."""
     assert D.select_arms(None) == D.arm_table()
     subset = D.select_arms(["two_stage", "native_capacity_matched"])
-    assert [name for name, _, _, _ in subset] == ["native_capacity_matched",
-                                                  "two_stage"]
+    assert [row[0] for row in subset] == ["native_capacity_matched",
+                                          "two_stage"]
     try:
         D.select_arms(["natve_capacity_matched"])
     except SystemExit as error:
@@ -172,7 +170,7 @@ def test_comparisons_are_dropped_when_an_arm_was_not_run():
     both = D.available_comparisons(["two_stage", "one_stage"])
     assert both == (("two_stage", "one_stage"),)
     assert D.available_comparisons(
-        [name for name, _, _, _ in D.arm_table()]) == D.COMPARISONS
+        [row[0] for row in D.arm_table()]) == D.COMPARISONS
 
 
 # -------------------------------------------------------------- verdicts --
@@ -420,7 +418,7 @@ def test_wider_arms_are_nested_in_narrower_ones():
     for field in ("log_rate", "quality", "b_re", "b_im"):
         assert f'"{field}"' in initial, field
     # the pool must cover the widest arm the table asks for
-    assert max(modes for _, _, _, modes in D.arm_table()) <= 32
+    assert max(row[3] for row in D.arm_table()) <= 32
     # and the check runs on the real draws, not only in a test
     main = ast.get_source_segment(source, SI.function_node(tree, "main")) or ""
     assert "verify_nesting(arms, seeds)" in main
@@ -435,6 +433,38 @@ def test_the_readout_rows_are_sliced_in_two_halves():
         SI.function_node(SI.parse(FRONTIER), "initial_params")) or ""
     assert "readout[pool:pool + modes]" in initial
     assert "readout[:modes]" in initial
+
+
+def test_the_action_arm_replaces_the_recurrence_rather_than_filtering_it():
+    """The point of the arm. `action_apply` must NOT call `native_states`:
+    the two stages ARE the Euler-Lagrange recurrence, with the action's
+    memory times as their poles, and `a` entering only through
+    |1 - a|^2."""
+    tree = SI.parse(FRONTIER)
+    node = SI.function_node(tree, "action_apply")
+    assert node is not None
+    body = ast.get_source_segment(io.open(FRONTIER).read(), node) or ""
+    assert "native_states" not in body, (
+        "the action arm must not run S5's scan and filter it")
+    assert "LAG.apply_action" in body
+    for name in ("gamma_raw", "mass_raw", "tau_state_raw", "mass_state_raw"):
+        assert name in body, name
+    # the gate scales the ERROR branch only: the state branch is what keeps
+    # `a` in the dynamics and must never be gated to zero
+    assert "gate * jax.nn.softplus(params[\"gamma_raw\"])" in body
+    assert "gate *" not in body.split("tau_state = ")[1].split("\n")[0]
+
+
+def test_the_action_arm_is_not_given_extra_parameters():
+    """It carries four action constants per body against the cascade's six,
+    so it is the SMALLER model. That is the conservative direction and it
+    must stay that way."""
+    table = {row[0]: row for row in D.arm_table()}
+    action = table["lagrangian_action"]
+    cascade = table["two_stage"]
+    assert D.effective_parameters(action[3], action[2], action=True) \
+        < D.effective_parameters(cascade[3], cascade[2])
+    assert action[4] == D.ACTION and cascade[4] == D.CASCADE
 
 
 def test_the_slowest_mode_can_outlast_the_longest_delay():

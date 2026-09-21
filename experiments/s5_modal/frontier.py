@@ -67,8 +67,9 @@ import optax
 from s5 import modal_prospective as MP
 from experiments.s5_modal import paired as PAIRED
 from experiments.s5_modal.frontier_design import (
-    POWER_FLOOR, available_comparisons, decide, effective_parameters,
+    ACTION, POWER_FLOOR, available_comparisons, decide, effective_parameters,
     matched_modes, select_arms)
+from s5 import lagrangian_modal as LAG
 
 MODES = 16
 BATCH = 16
@@ -179,13 +180,45 @@ def mode_frequency(params):
                     -math.pi + 1e-6, math.pi - 1e-6)
 
 
-def model_apply(params, inputs, use_gates):
+def action_apply(params, inputs, use_gates):
+    """The per-mode WWJ action AS the recurrence.
+
+    There is no native scan here. The two stages ARE the Euler-Lagrange
+    equation: their denominator times are the action's memory times and
+    their numerator times are its lead times. `a` enters only through
+    |1 - a|^2, so the S5 hierarchy is inherited rather than cancelled, and
+    the poles are inside the disc for every parameter value.
+    """
+    lambda_bar = jnp.exp(-decay_rate(params) + 1j * mode_frequency(params))
+    b_bar = params["b_re"] + 1j * params["b_im"]
+    gate = jax.nn.sigmoid(params["gate_raw"][0]) if use_gates \
+        else jnp.zeros_like(params["gate_raw"][0])
+    # the gate scales the ERROR branch: g = 0 is a body with no prospective
+    # term at all, pure memory, which is the many-body variable itself
+    gamma = gate * jax.nn.softplus(params["gamma_raw"])
+    mass = gate * jax.nn.softplus(params["mass_raw"])
+    tau_state = LAG.TIME_MIN + jax.nn.softplus(params["tau_state_raw"])
+    mass_state = LAG.TIME_MIN + jax.nn.softplus(params["mass_state_raw"])
+
+    def one(sequence):
+        return LAG.apply_action(lambda_bar, b_bar, sequence, gamma, mass,
+                                tau_state, mass_state)
+
+    states = jax.vmap(one)(inputs)
+    features = jnp.concatenate((states.real, states.imag), axis=-1)
+    return (jnp.einsum("blf,fc->blc", features, params["readout"])
+            + params["readout_bias"], [gate])
+
+
+def model_apply(params, inputs, use_gates, kind=None):
     """Native scan, per-mode cascade, linear readout.
 
     `use_gates=False` forces every gate to zero, which makes each stage an
     exact identity: that arm IS Native S5's recurrence, not an approximation
     of it.
     """
+    if kind == ACTION:
+        return action_apply(params, inputs, use_gates)
     lambda_bar = jnp.exp(-decay_rate(params) + 1j * mode_frequency(params))
     b_bar = params["b_re"] + 1j * params["b_im"]
     d = MP.D_MIN + jax.nn.softplus(params["d_raw"])
@@ -212,8 +245,8 @@ def model_apply(params, inputs, use_gates):
             + params["readout_bias"], gates)
 
 
-def loss_fn(params, inputs, target, use_gates, gate_penalty):
-    prediction, gates = model_apply(params, inputs, use_gates)
+def loss_fn(params, inputs, target, use_gates, gate_penalty, kind=None):
+    prediction, gates = model_apply(params, inputs, use_gates, kind)
     error = jnp.mean((prediction - target) ** 2)
     return error + gate_penalty * sum(jnp.mean(g) for g in gates), error
 
@@ -272,6 +305,13 @@ def initial_params(key, stages, modes, pool=MODE_POOL):
         "gate_raw": (-2.0 + offset
                      + 0.5 * jax.random.normal(keys[6], (stages, pool))
                      [:, :modes]),
+        # the action's four constants per body. Gamma and M are the LEAD
+        # times' sum and product; tau_s and m_s are the body's own friction
+        # and inertia, which are what keep `a` in the dynamics at all.
+        "gamma_raw": jnp.full((pool,), 0.5)[:modes],
+        "mass_raw": jnp.full((pool,), -1.0)[:modes],
+        "tau_state_raw": jnp.full((pool,), 0.0)[:modes],
+        "mass_state_raw": jnp.full((pool,), -1.0)[:modes],
     }
 
 
@@ -282,10 +322,10 @@ def verify_nesting(arms, seeds):
     the whole capacity comparison rests on and the previous run failed it
     silently.
     """
-    narrowest = min(modes for _, _, _, modes in arms)
+    narrowest = min(row[3] for row in arms)
     key = jax.random.PRNGKey(seeds[0])
     reference = initial_params(key, 1, narrowest)
-    for name, _, stages, modes in arms:
+    for name, _, stages, modes, _kind in arms:
         candidate = initial_params(key, stages, modes)
         for field in ("log_rate", "quality", "b_re", "b_im"):
             shared = candidate[field][:narrowest]
@@ -296,7 +336,7 @@ def verify_nesting(arms, seeds):
 
 
 def train_all_seeds(use_gates, stages, modes, delay, seeds, steps,
-                    gate_penalty, learning_rate=3e-2):
+                    gate_penalty, kind=None, learning_rate=3e-2):
     """Every seed of one arm at once, under vmap.
 
     Seeds are independent runs, so mapping them is exact rather than an
@@ -313,7 +353,7 @@ def train_all_seeds(use_gates, stages, modes, delay, seeds, steps,
     def one_step(params, state, batch_key):
         inputs, target = make_batch(batch_key, delay)
         (_, error), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-            params, inputs, target, use_gates, gate_penalty)
+            params, inputs, target, use_gates, gate_penalty, kind)
         updates, state = optimizer.update(grads, state)
         return optax.apply_updates(params, updates), state, error
 
@@ -331,7 +371,7 @@ def train_all_seeds(use_gates, stages, modes, delay, seeds, steps,
     return params, [float(value) for value in error]
 
 
-def run_arm(use_gates, stages, modes, delay, seeds, args):
+def run_arm(use_gates, stages, modes, delay, seeds, args, kind=None):
     """One arm, in seed chunks, with the per-seed measurements collected.
 
     Seeds are independent, so chunking is exact rather than an
@@ -345,10 +385,10 @@ def run_arm(use_gates, stages, modes, delay, seeds, args):
         group = seeds[start:start + chunk]
         params, group_finals = train_all_seeds(
             use_gates, stages, modes, delay, group, args.steps,
-            args.gate_penalty)
+            args.gate_penalty, kind)
         group_memory, group_lead = jax.vmap(
-            lambda p: normalized_errors(p, use_gates, delay,
-                                        args.eval_seed))(params)
+            lambda p: normalized_errors(p, use_gates, delay, args.eval_seed,
+                                        kind))(params)
         group_gates = jax.vmap(lambda p: gate_report(p, use_gates))(params)
         memory.extend(float(value) for value in group_memory)
         lead.extend(float(value) for value in group_lead)
@@ -362,8 +402,9 @@ def run_arm(use_gates, stages, modes, delay, seeds, args):
         "median_lead": PAIRED.median(lead),
         "final_training_error": sum(finals) / len(finals),
         "modes": modes, "stages": stages if use_gates else 0,
+        "kind": kind,
         "effective_parameters": effective_parameters(
-            modes, stages if use_gates else 0),
+            modes, stages if use_gates else 0, action=(kind == ACTION)),
         "gates": {key: PAIRED.median([float(v) for v in value])
                   for key, value in merged.items() if value.ndim == 1},
         "gates_seed_zero": {key: [float(v) for v in value[0]]
@@ -373,7 +414,7 @@ def run_arm(use_gates, stages, modes, delay, seeds, args):
 
 
 # -------------------------------------------------------------- measuring --
-def normalized_errors(params, use_gates, delay, eval_seed):
+def normalized_errors(params, use_gates, delay, eval_seed, kind=None):
     """Per-channel MSE divided by that channel's variance.
 
     Absolute MSEs are not comparable across delays -- the memory target's
@@ -381,7 +422,7 @@ def normalized_errors(params, use_gates, delay, eval_seed):
     number the frontier is drawn from is a fraction of the signal.
     """
     inputs, target = make_batch(jax.random.PRNGKey(eval_seed), delay)
-    prediction, _ = model_apply(params, inputs, use_gates)
+    prediction, _ = model_apply(params, inputs, use_gates, kind)
 
     def one(index):
         channel = target[..., index]
@@ -484,16 +525,16 @@ def main():
     args = parser.parse_args()
     seeds = list(range(args.seeds))
     arms = select_arms(args.arms, args.modes)
-    comparisons = available_comparisons([name for name, _, _, _ in arms])
+    comparisons = available_comparisons([row[0] for row in arms])
     verify_nesting(arms, seeds)
 
     frontier = []
     for delay in args.delays:
         results = {}
-        for name, use_gates, stages, modes in arms:
+        for name, use_gates, stages, modes, kind in arms:
             began = time.time()
             results[name] = run_arm(use_gates, stages, modes, delay, seeds,
-                                    args)
+                                    args, kind)
             results[name]["wall_seconds"] = time.time() - began
             print(f"delay {delay:4d}  {name:28s} "
                   f"memory {results[name]['median_memory']:.4g}  "
@@ -535,9 +576,11 @@ def main():
             "power_floor": POWER_FLOOR,
         },
         "arms": {name: {"gates": use_gates, "stages": stages, "modes": modes,
+                        "kind": kind,
                         "effective_parameters": effective_parameters(
-                            modes, stages if use_gates else 0)}
-                 for name, use_gates, stages, modes in arms},
+                            modes, stages if use_gates else 0,
+                            action=(kind == ACTION))}
+                 for name, use_gates, stages, modes, kind in arms},
         "steps": args.steps,
         "length": LENGTH,
         "wall_seconds_total": sum(row["arms"][name]["wall_seconds"]

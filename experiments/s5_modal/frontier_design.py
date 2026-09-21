@@ -15,34 +15,56 @@ CHANNELS = 2
 MODES = 16
 
 
-def effective_parameters(modes, stages, channels=CHANNELS):
+#: the Lagrangian arm's four per-mode action constants: Gamma, M, tau_s, m_s
+ACTION_CONSTANTS = 4
+
+
+def effective_parameters(modes, stages, channels=CHANNELS, action=False):
     """Parameters that actually influence the output.
 
     With the gates off, d_raw, delta_raw and gate_raw are inert, so a Native
     arm at the same mode count has FEWER effective parameters. `stages=0`
     names that arm.
     """
+    extra = ACTION_CONSTANTS if action else 3 * stages
     return (2 * modes + 4 * modes + 2 * modes * channels + channels
-            + 3 * stages * modes)
+            + extra * modes)
 
 
-def matched_modes(target_parameters, stages, channels=CHANNELS):
+def matched_modes(target_parameters, stages, channels=CHANNELS,
+                  action=False):
     """The fewest modes that reach `target_parameters` at `stages`."""
     modes = 1
-    while effective_parameters(modes, stages, channels) < target_parameters:
+    while effective_parameters(modes, stages, channels,
+                               action) < target_parameters:
         modes += 1
     return modes
 
 
+#: arm kinds. "native" and "cascade" keep S5's own recurrence and add a
+#: gated cascade on top; "action" REPLACES it with the Euler-Lagrange
+#: recurrence of the per-mode WWJ action, where `a` enters only through
+#: |1 - a|^2 and the poles are the action's own memory times.
+NATIVE, CASCADE, ACTION = "native", "cascade", "action"
+
+
 def arm_table(modes=MODES):
-    """(name, use_gates, stages, modes) for every arm, with the two
-    capacity-matched arms sized against the two-stage arm."""
+    """(name, use_gates, stages, modes, kind) for every arm.
+
+    The capacity-matched arms are sized against the two-stage arm, and the
+    action arm is deliberately NOT given extra modes: at 14 modes' worth of
+    parameters per mode against the cascade's 16 it is already the smaller
+    model, which is the conservative direction.
+    """
     target = effective_parameters(modes, 2)
-    return (("native", False, 1, modes),
-            ("native_capacity_matched", False, 1, matched_modes(target, 0)),
-            ("one_stage", True, 1, modes),
-            ("one_stage_capacity_matched", True, 1, matched_modes(target, 1)),
-            ("two_stage", True, 2, modes))
+    return (("native", False, 1, modes, NATIVE),
+            ("native_capacity_matched", False, 1, matched_modes(target, 0),
+             NATIVE),
+            ("one_stage", True, 1, modes, CASCADE),
+            ("one_stage_capacity_matched", True, 1, matched_modes(target, 1),
+             CASCADE),
+            ("two_stage", True, 2, modes, CASCADE),
+            ("lagrangian_action", True, 2, modes, ACTION))
 
 
 # ------------------------------------------------------------- verdicts --
@@ -54,6 +76,11 @@ COMPARISONS = (
     # equal modes, identical Lambda/B/readout draw: the pure ablation
     ("two_stage", "one_stage"),
     ("two_stage", "native"),
+    # the action arm against the construction it was derived to replace,
+    # and against the untouched recurrence
+    ("lagrangian_action", "two_stage"),
+    ("lagrangian_action", "native"),
+    ("lagrangian_action", "native_capacity_matched"),
 )
 
 
@@ -67,7 +94,7 @@ def select_arms(names, modes=MODES):
     table = arm_table(modes)
     if not names:
         return table
-    known = {name for name, _, _, _ in table}
+    known = {row[0] for row in table}
     unknown = sorted(set(names) - known)
     if unknown:
         raise SystemExit(f"unknown arm(s): {unknown}; known: {sorted(known)}")
