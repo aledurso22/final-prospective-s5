@@ -590,51 +590,69 @@ only the geometry moves, and it moves identically in all five arms.
 The frontier is only worth measuring where the reference arm can do the
 task, so the power check is repeated before the sweep.
 
-### The second power check, and the two defects behind the last delay
+### Three power checks, and what each one falsified
 
-Learning the rate in the log fixed four of the five points:
+The reference arm's normalized memory error, 15 seeds, 1200 steps:
 
-| delay | 16 | 32 | 64 | 128 | 256 |
-|---|---|---|---|---|---|
-| additive rate | 0.008 | 0.004 | 0.77 | 1.11 | 1.44 |
-| **log rate** | 0.006 | 0.004 | **0.011** | **0.030** | 1.31 |
+| delay | 16 | 32 | 64 | 128 | 256 | lead (all delays) |
+|---|---|---|---|---|---|---|
+| **v1** additive rate, uniform ω, no bias | 0.008 | 0.004 | 0.77 | 1.11 | 1.44 | 0.002–0.010 |
+| **v2** log rate | 0.006 | 0.004 | **0.011** | **0.030** | 1.31 | 0.002–0.006 |
+| **v3** + bias, log-uniform \|ω\| | 0.236 | 0.233 | 0.417 | 0.540 | **0.756** | 0.013 |
 
-64 improved 73×, 128 improved 37×, and the monotone degradation in the
-delay disappeared — which is the diagnosis confirmed. What remained at 256
-was a **cliff**, 0.030 to 1.31 in one doubling, so it had a different
-cause. Training length was ruled out directly: 1200 → 1.31, 4000 → 1.28,
-12000 → **1.42**, worse. Two defects were behind it.
+Five runs each, ~3.5 minutes, instead of twenty-five. Every one of these
+would have silently wasted the sweep.
+
+**v1 → v2: the rate was stored additively.** Adam moves every parameter by
+about the learning rate per step whatever the gradient's size, so a 3e-2
+step meant something different depending on where the rate already was: at
+delay 256 the needed rate is 1/256 = 0.0039 and one step is an eightfold
+overshoot in timescale, destroying slow modes as fast as they are found; at
+delay 16 the rate is 0.0625 and the same step is a survivable 50%. Exactly
+the observed pattern — clean at 16 and 32, degrading through 64, gone by
+128. Learning the rate in the **log** improved 64 by 73× and 128 by 37× and
+removed the monotone degradation. Native S5 parameterizes its own timescale
+as `log_step` for this reason.
 
 **The readout had no bias.** `einsum(features, readout)` cannot emit a
 constant, so "predict the channel mean" — the fallback that *defines* a
-normalized error of 1.0 — was unavailable to the model. That is why scores
-above 1.0 appeared at all, in every arm, right back to the first smoke, and
-why 1.31 could not be read as "captured nothing". The bias is counted in
-the parameter budget, identically in each arm.
+normalized error of 1.0 — was unavailable, and scores above 1.0 carried no
+information about how much of the channel was captured. Counted in the
+parameter budget, identically in every arm.
 
-**Frequencies were drawn uniformly while rates were drawn in the log.** A
-256-token exponential trace needs a mode with ω near zero as well as the
-right rate: one complex mode offers `e^{−rk}cos(ωk+φ)` and its sine, and no
-combination of those is non-oscillatory unless ω is small. Drawn uniformly
-on [−2, 2], the smallest of 26 magnitudes is about 0.077 — a period of 82
-tokens, nine oscillations across a 768-token trace. Longer training made it
-*worse* because the lead channel, which is easy and shares the same modes,
-kept pulling them fast.
+**v3: ω has no absolute scale to be drawn on.** Uniform on [−2, 2], the
+smallest of 26 magnitudes is ≈0.077 — a period of 82 tokens, nine
+oscillations across a 768-token trace — and 256 was unreachable at any
+training length (1200 → 1.31, 4000 → 1.28, 12000 → **1.42**, worse).
+Drawing \|ω\| log-uniformly instead put the median magnitude at 0.045, so
+nearly every mode became near-DC, the basis collapsed into near-duplicates,
+and the short end regressed 39–60× while the lead regressed 8× everywhere.
+Both drawings are wrong in the same way.
 
-Rates are drawn so that every timescale is present. Frequencies are now
-drawn log-uniformly in magnitude so that every frequency scale is, near
-zero included. This is the same principle applied to the part that was left
-uniform, it is identical in all five arms, and it does not favour either
-channel — a near-zero ω is as useful to the lead filter as to the memory
-trace.
+**What matters is ω relative to the mode's own decay rate** — the
+dimensionless **quality factor** `Q = ω/r`, with `λ̄ = exp(r(−1 + iQ))`. A
+mode is slow only if it decays slowly *and* oscillates slowly; otherwise it
+is a fast oscillation inside a slow envelope, useless for a trace. At the
+fast end (`r = 0.3`) `Q_MAX = 8` restores `|ω| ≤ 2.4`, the range that
+worked; at the slow end (`r = 1/256`) it gives a period ≥ 201 tokens
+against a 256-token decay — 2.5× better than the uniform draw's *best*
+case, as its *worst* case.
 
-Both changes make the task easier for *every* arm, which is the property
-that matters: the experiment compares arms, and the power floor exists to
-refuse comparisons where the reference cannot do the task at all.
+It also repairs the same optimizer geometry a second time. An additive ω
+takes a 3e-2 step that is a 100% overshoot at ω = 0.03 and a rounding error
+at ω = 2. `Q` is O(1) at every timescale, so the step means the same thing
+everywhere.
 
-`slowest_timescale`, `omega_of_slowest_mode` and `min_abs_omega` are now
-reported per arm, so the next failure of this kind is read off rather than
-guessed at.
+**The lesson, stated once.** Every one of these three defects is the same
+mistake: a parameter carrying physical units, tuned by an optimizer whose
+step size is unit-free. The fix each time is a dimensionless coordinate —
+`log_rate` for the timescale, `Q` for the frequency. All three changes
+apply identically to all five arms and none favours a channel; they change
+what the mode basis can express, not who gets to express it.
+
+`slowest_timescale`, `omega_of_slowest_mode`, `quality_of_slowest_mode` and
+`min_abs_omega` are now reported per arm, so the next failure of this kind
+is read off rather than guessed at.
 
 ## 7. First deliverables, and what is deliberately absent
 

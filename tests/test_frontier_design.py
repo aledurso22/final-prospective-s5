@@ -330,26 +330,65 @@ def test_the_readout_can_emit_a_constant():
     assert "+ channels" in budget
 
 
-def test_the_frequencies_are_drawn_on_every_scale_as_the_rates_are():
-    """REGRESSION from the 256-token failure. One complex mode offers
-    exp(-rk)cos(wk+phi) and its sine, so no combination is non-oscillatory
-    unless w is near zero. Drawn uniformly on [-2, 2], the smallest of 26
-    magnitudes is about 0.077 -- a period of 82 tokens, nine oscillations
-    across a 768-token trace -- and the reference arm could not represent
-    the target at all: 1.31 at 1200 steps, 1.28 at 4000, 1.42 at 12000,
-    which is not undertraining.
+def test_the_frequency_is_a_quality_factor_times_the_mode_s_own_rate():
+    """REGRESSION, twice over.
 
-    Rates are drawn so that every timescale is present; frequencies must be
-    drawn so that every frequency scale is, near zero included."""
+    Drawn uniformly on [-2, 2], the smallest of 26 magnitudes is about
+    0.077 -- a period of 82 tokens, nine oscillations across a 768-token
+    trace -- and the reference arm could not represent the target at all:
+    1.31 at 1200 steps, 1.28 at 4000, 1.42 at 12000, which is not
+    undertraining.
+
+    Drawing |omega| LOG-uniformly instead put the median magnitude at
+    0.045, so nearly every mode became near-DC and the basis collapsed into
+    near-duplicates: 256 improved to 0.76 while 16 and 32 regressed from
+    0.006 and 0.004 to 0.236 and 0.233, and the lead regressed eightfold at
+    every delay. Omega has no absolute scale to be drawn on.
+
+    What matters is omega RELATIVE to the mode's own decay rate, which is
+    the dimensionless quality factor. It also repairs the same optimizer
+    geometry the log rate did: an additive omega takes a 3e-2 Adam step
+    that is a hundred percent overshoot at omega = 0.03 and a rounding
+    error at omega = 2, while Q is O(1) at every timescale.
+    """
     source = io.open(FRONTIER).read()
-    assert "OMEGA_MIN = 1e-3" in source and "OMEGA_MAX = 2.0" in source
+    tree = SI.parse(FRONTIER)
+    assert SI.defines_function(tree, "mode_frequency")
+    assert "Q_MAX = 8.0" in source
+    assert 'params["lambda_im"]' not in source, "the additive omega failed"
+    assert "OMEGA_MIN" not in source, "the log-uniform omega failed too"
+    frequency = ast.get_source_segment(
+        source, SI.function_node(tree, "mode_frequency")) or ""
+    assert 'params["quality"] * decay_rate(params)' in frequency
+    # and it must be clipped below Nyquist, since arg beyond pi is aliased
+    assert "math.pi" in frequency
     initial = ast.get_source_segment(
-        source, SI.function_node(SI.parse(FRONTIER), "initial_params")) or ""
-    assert "math.log(OMEGA_MIN)" in initial, "frequencies must be LOG-uniform"
-    assert "minval=-2.0" not in initial, "the uniform draw that failed"
-    # the smallest magnitude must be able to hold the longest trace: a
-    # period far longer than the sequence
-    assert 2.0 * math.pi / 1e-3 > 1024
+        source, SI.function_node(tree, "initial_params")) or ""
+    assert '"quality"' in initial and "minval=-Q_MAX" in initial
+
+
+def test_the_quality_factor_spans_the_right_omega_at_both_ends():
+    """The property the whole change rests on, as arithmetic: Q_MAX must
+    preserve the fast end's useful frequency range AND give the slowest
+    mode a period longer than its own decay time."""
+    q_max, rate_max, rate_min = 8.0, 0.3, 1.0 / 512
+    # fast end: Q_MAX must preserve the frequency range that worked
+    assert q_max * rate_max >= 2.0
+    # slow end at delay 256. The claim is NOT that every slow mode is
+    # non-oscillatory -- Q is uniform, so most are far below Q_MAX, and Q
+    # is trainable with a step size that means the same thing at every
+    # timescale. The claim is that even the WORST slow mode now has a
+    # period comparable to its own decay time.
+    slow_rate = 1.0 / 256
+    worst_period = 2.0 * math.pi / (q_max * slow_rate)
+    assert worst_period > 0.7 / slow_rate, worst_period
+    # and that this worst case beats what the uniform draw could manage at
+    # BEST: the smallest of 26 magnitudes on [-2, 2] is about 2/26
+    old_best_period = 2.0 * math.pi / (2.0 / 26)
+    assert worst_period > 2.0 * old_best_period, (worst_period,
+                                                  old_best_period)
+    # and the slowest representable mode still outlasts the longest delay
+    assert 1.0 / rate_min >= 2 * 256
 
 
 def test_the_slowest_mode_can_outlast_the_longest_delay():

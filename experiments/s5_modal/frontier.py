@@ -82,17 +82,14 @@ CHANNELS = 2
 #: log-uniform decay rates: the slowest mode must outlast the longest delay
 RATE_MIN = 1.0 / (2.0 * max(DELAYS))
 RATE_MAX = 0.3
-#: log-uniform frequency MAGNITUDES, for the same reason the rates are.
-#: A 256-token exponential trace needs a mode with omega near zero as well
-#: as the right rate -- one complex mode offers exp(-rk)cos(wk+phi) and its
-#: sine, and no combination of those is non-oscillatory unless w is small.
-#: Drawn uniformly on [-2, 2], the smallest of 26 magnitudes is about
-#: 0.077, a period of 82 tokens, which oscillates nine times across a
-#: 768-token trace. Rates are drawn so that every timescale is present;
-#: frequencies are now drawn so that every frequency scale is, near zero
-#: included.
-OMEGA_MIN = 1e-3
-OMEGA_MAX = 2.0
+#: the dimensionless QUALITY FACTOR Q = omega / rate, uniform on
+#: [-Q_MAX, Q_MAX]. A mode is slow only if it decays slowly AND oscillates
+#: slowly; otherwise it is a fast oscillation inside a slow envelope, which
+#: is useless for representing a trace. Q is what says which. At the fast
+#: end (rate 0.3) Q_MAX = 8 gives |omega| up to 2.4, the range that worked;
+#: at the slow end (rate 1/256) it gives |omega| up to 0.031, a period of
+#: at least 200 tokens against a 256-token decay.
+Q_MAX = 8.0
 # ------------------------------------------------------------------ task --
 def make_batch(key, delay, batch=BATCH, length=LENGTH):
     """(inputs, target) for one delay.
@@ -153,6 +150,24 @@ def decay_rate(params):
     return jnp.clip(jnp.exp(params["log_rate"]), 1e-4, 0.9)
 
 
+def mode_frequency(params):
+    """omega = Q * rate, from the dimensionless quality factor.
+
+    Storing omega ADDITIVELY repeats, in the imaginary part, the bug the
+    log rate fixed in the real part: Adam moves every parameter by about
+    the learning rate per step, so a 3e-2 step is a hundred percent
+    overshoot for a mode that needs omega near 0.03, and a rounding error
+    for one that needs 2. Q is O(1) at every timescale, so the same step is
+    a fraction of a percent everywhere and omega stays proportional to the
+    mode's own decay rate.
+
+    Clipped below the Nyquist angle, since arg(lambda_bar) beyond pi is the
+    same mode aliased.
+    """
+    return jnp.clip(params["quality"] * decay_rate(params),
+                    -math.pi + 1e-6, math.pi - 1e-6)
+
+
 def model_apply(params, inputs, use_gates):
     """Native scan, per-mode cascade, linear readout.
 
@@ -160,7 +175,7 @@ def model_apply(params, inputs, use_gates):
     exact identity: that arm IS Native S5's recurrence, not an approximation
     of it.
     """
-    lambda_bar = jnp.exp(-decay_rate(params) + 1j * params["lambda_im"])
+    lambda_bar = jnp.exp(-decay_rate(params) + 1j * mode_frequency(params))
     b_bar = params["b_re"] + 1j * params["b_im"]
     d = MP.D_MIN + jax.nn.softplus(params["d_raw"])
     gates = [jax.nn.sigmoid(raw) if use_gates else jnp.zeros_like(raw)
@@ -215,10 +230,8 @@ def initial_params(key, stages, modes):
     mode_offset = jnp.linspace(-0.3, 0.3, modes)[None, :]
     return {
         "log_rate": log_rate,
-        "lambda_im": (jnp.exp(jax.random.uniform(
-            keys[1], (modes,), minval=math.log(OMEGA_MIN),
-            maxval=math.log(OMEGA_MAX)))
-            * jnp.sign(jax.random.normal(keys[7], (modes,)))),
+        "quality": jax.random.uniform(keys[1], (modes,), minval=-Q_MAX,
+                                      maxval=Q_MAX),
         "b_re": jax.random.normal(keys[2], (modes, 2)) * 0.5,
         "b_im": jax.random.normal(keys[3], (modes, 2)) * 0.5,
         "readout": jax.random.normal(keys[4], (2 * modes, CHANNELS)) * 0.1,
@@ -355,11 +368,12 @@ def gate_report(params, use_gates):
     # the diagnostics the 256-token failure had to be GUESSED from: which
     # timescales and which frequencies the arm actually ended up with
     slowest = jnp.argmin(rate)
-    omega = jnp.abs(params["lambda_im"])
+    omega = jnp.abs(mode_frequency(params))
     return {
         "slowest_timescale": 1.0 / rate[slowest],
         "omega_of_slowest_mode": omega[slowest],
         "min_abs_omega": jnp.min(omega),
+        "quality_of_slowest_mode": params["quality"][slowest],
         "mean_gate": jnp.mean(mean_gate),
         "mean_gate_slow_half": jnp.mean(mean_gate[slow]),
         "mean_gate_fast_half": jnp.mean(mean_gate[fast]),
