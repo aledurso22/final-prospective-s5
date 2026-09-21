@@ -323,3 +323,23 @@ def test_the_benchmark_reads_the_scan_back_rather_than_assuming_it_took():
     assert '"implementation_requested"' in source
     # identical peak memory across arms is called out
     assert "identical_peak_memory_suspicious" in source
+
+
+def test_every_call_to_the_jax_fixture_matches_its_signature():
+    """REGRESSION. `_coefficients` was renamed from `scale` to `largest`
+    when the fixture was made stable, and two call sites kept passing
+    `scale=1.5` -- a TypeError that only showed up after a three-minute GPU
+    run. A signature mismatch is a laptop-detectable defect."""
+    jax_tests = os.path.join(REPO, "tests/test_factored_recurrence_jax.py")
+    tree = SI.parse(jax_tests)
+    node = SI.function_node(tree, "_coefficients")
+    allowed = {argument.arg for argument in node.args.args}
+    offenders = []
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == "_coefficients"):
+            continue
+        for keyword in call.keywords:
+            if keyword.arg is not None and keyword.arg not in allowed:
+                offenders.append(keyword.arg)
+    assert offenders == [], (sorted(set(offenders)), sorted(allowed))

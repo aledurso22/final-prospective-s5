@@ -192,20 +192,37 @@ modes whose spectral radius is 0.99997 so nothing decays away — came in at
 algebraic discrepancy would survive into float64 and be caught by the
 `1e-10` gate; only round-off would not.
 
-## 7. Certification result (first run, float32 only)
+## 7. Certification and the correctness gate — result
 
-`certification.json`, seeds 301, 302, 303, all six layers, 64 modes each:
+### float64: the factored scan is algebraically exact
+
+`JAX_ENABLE_X64=1`, verified on by the file itself rather than assumed.
+**5 passed**, tolerance `1e-10`: both parallel routes against the
+sequential oracle at lengths 5, 257, 4000 and 16,000, forward and reverse,
+repeated and near-repeated roots (`ε = 0, 1e-14, 1e-10, 1e-6`), and
+gradients.
+
+### Whole inventory, seeds 301–303, both precisions
 
 ```
-total_modes_certified   1152
-worst_spectral_radius   0.9999748468399048      (bound 1.0)
-offending_modes         []
-certified               true
+x64_enabled                     true
+total_modes_certified           1152          (6 layers x 64 modes x 3 seeds)
+worst_spectral_radius           0.9999747626  (bound 1.0)
+worst_float64_relative_error    1.83e-13      <-- algebraically exact
+worst_float32_relative_error    3.83e-04      <-- pure accumulation
+offending_modes                 []
+certified                       true
 ```
 
-Every production mode is strictly inside the unit disc. **The float64
-column of that run is void** for reason (a) and must be re-measured with
-`JAX_ENABLE_X64=1`.
+**This is what licenses the float32 tolerance.** The two routes reproduce
+the sequential oracle to `1.8e-13` in double precision on every production
+mode, so the `3.8e-4` seen in single precision is round-off accumulating
+over 16,000 tokens on poles of radius 0.99997 — not an algebraic
+discrepancy. Had float64 come back at `3e-4` as well, no float32 tolerance
+would have been allowed to cover it.
+
+Every production mode is strictly inside the unit disc, worst radius
+0.99997, no offenders.
 
 ## 8. Benchmark — result
 
@@ -251,18 +268,19 @@ device capacity is confirmed against this number.
 
 | gate | status |
 |---|---|
-| Algebraic equivalence (laptop, 19 tests) | **passed** |
+| Algebraic equivalence (laptop, 20 tests) | **passed** |
 | Byte identity | **passed** |
-| Whole-inventory certification, radius, seeds 301–303 | **passed** — 1152 modes, worst 0.99997 |
+| **float64 correctness**, `1e-10` | **passed** — 5 tests; worst inventory error **1.83e-13** |
+| **float32 equivalence and gradients** | **passed** — 12 tests |
+| **Whole-inventory certification**, seeds 301–303 | **passed** — 1152 modes, worst ρ 0.99997, 0 offenders |
 | **Throughput and peak memory** | **passed** — factored 80.5× over sequential, 1.46 h per wave |
-| float64 correctness gate | **NOT RUN** — needs `JAX_ENABLE_X64=1`; the first attempt was void |
-| JAX float32 equivalence and gradients | **re-run pending** after the fixture fixes |
 | Device capacity vs 12.9 GiB peak | **unconfirmed** |
 | Launcher for this arm | **not added** |
 
-**Speed is not correctness.** The factored scan is fast; whether it
-computes the same recurrence is decided by the float64 gate, which has not
-run. Until it does, nothing here licenses a launch.
+All correctness and performance gates have passed. The two remaining
+items are operational: the device's memory capacity has not been checked
+against the 12.9 GiB peak, and no launcher exists. Nothing has been
+trained and no Slurm job has been submitted.
 
 No certification of the parallel routes is claimed yet, no launcher exists,
 nothing has been trained, and no Slurm job has been submitted.

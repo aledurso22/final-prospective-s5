@@ -84,7 +84,7 @@ def _relative(reference, candidate):
 
 # ------------------------------------------------- coefficient algebra --
 def test_the_roots_reproduce_the_coefficients_in_jax():
-    a1, a2 = _coefficients(jax.random.PRNGKey(0), modes=512, scale=1.5)
+    a1, a2 = _coefficients(jax.random.PRNGKey(0), modes=512)
     first, second = FR.companion_roots(a1, a2)
     assert _relative(a1, first + second) < 1e-4
     assert _relative(a2, -(first * second)) < 1e-4
@@ -93,7 +93,7 @@ def test_the_roots_reproduce_the_coefficients_in_jax():
 def test_the_factored_radius_agrees_with_companion_radius():
     """`companion_radius` is untouched production code; the factored route
     must agree with it, not replace it."""
-    a1, a2 = _coefficients(jax.random.PRNGKey(1), modes=512, scale=1.5)
+    a1, a2 = _coefficients(jax.random.PRNGKey(1), modes=512)
     assert _relative(companion_radius(a1, a2),
                      FR.spectral_radius_from_roots(a1, a2)) < 1e-4
 
