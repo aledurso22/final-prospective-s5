@@ -654,6 +654,118 @@ what the mode basis can express, not who gets to express it.
 `min_abs_omega` are now reported per arm, so the next failure of this kind
 is read off rather than guessed at.
 
+## 6i. The frontier result
+
+Five delays, five arms, 15 paired seeds, 1200 steps, length 1024
+(`9432669`, job 67211). **Predeclared verdict: `GATES_NOT_SELECTIVE` at
+every delay.** That verdict stands. What follows is what the run contains,
+including why that verdict is not the whole of it.
+
+### What is established
+
+**Gating improves lead, overwhelmingly.** `two_stage` against equal-mode
+Native: **15/15 seeds at every delay**, median 2.44–3.30×, sign p < 0.0001,
+Wilcoxon p = 0.0004. Against the capacity-matched Native, also 15/15 at
+every delay, 2.76–3.34× — a gated arm with *fewer* parameters beating a
+wider Native on every seed. This is far stronger than §6g's single point.
+
+**The second stage earns its place — the ablation you asked for.**
+`two_stage` against `one_stage` at equal modes and an *identical* Λ, B and
+readout draw, so the second stage is the only difference:
+
+| delay | lead wins | median | p | memory non-inferior |
+|---|---|---|---|---|
+| 16 | 13/15 | 1.63× | 0.0037 | 13/15 ✓ (also at 5%) |
+| 32 | 12/15 | 1.43× | 0.0176 | 15/15 ✓ (also at 5%) |
+| 64 | 13/15 | 1.40× | 0.0037 | 14/15 ✓ (also at 5%) |
+| 128 | 13/15 | 1.44× | 0.0037 | 15/15 ✓ (also at 5%) |
+| 256 | 15/15 | 1.34× | 0.0001 | 15/15 ✓ (also at 5%) |
+
+Significant lead gain at **every** delay while memory non-inferior at
+**every** delay. At equal *parameters* (against
+`one_stage_capacity_matched`) the lead gain is larger still, 1.67–2.03×,
+14–15/15. By the criterion declared in §6h — "if two stages improve the
+lead–memory frontier, that specifically supports the generalized
+mechanics" — this is that outcome. Ordinary prospectivity is **not**
+sufficient.
+
+**Memory against equal-mode Native** is non-inferior at 32, 64, 128 and 256
+(12, 14, 13, 13 of 15; p ≤ 0.018), and misses at 16 with 11/15, p = 0.0592
+— one seed short of the 12 the sign test needs.
+
+### Why the verdict says otherwise: the capacity-matched control is not paired
+
+The decision rule tests memory against `native_capacity_matched`, and that
+arm failed at every delay. It is not because the gated arm lost memory. Its
+median ratios are 0.718, 0.793, 0.799, 1.045, 0.899 — the gated arm mostly
+*better* — while only 8–11 of 15 seeds fall inside the margin. Low median
+with high scatter and no significance is the signature of a broken
+comparison, not of a trade.
+
+The cause is structural and it is mine. A capacity-matched arm has 26 modes
+instead of 16, so it draws a **different initialization**. A seed then
+shares only the data stream, not the recurrence it starts from. Measured at
+delay 16:
+
+| pair | draw | correlation across seeds | spread of paired ratios |
+|---|---|---|---|
+| native vs two_stage | **same** | **0.987** | 0.60 |
+| native vs capacity_matched | different | 0.187 | 4.10 |
+
+Against a decoupled arm the "paired" test degenerates into an unpaired one
+at n = 15, which has almost no power. The 16-mode arms, by contrast, track
+each other seed for seed — delay 16, seed 0: 0.1322 / 0.1489 / 0.1336;
+seed 14: 0.2560 / 0.2529 / 0.2352 — which is exactly why the tests among
+them resolve so cleanly.
+
+The same rank-sensitivity explains a discrepancy worth recording: per-seed
+memory spans 0.006 to 0.256, a 40× range, so a median-of-ratios (0.989)
+and a ratio-of-medians (1.098) disagree. The paired statistic is the
+correct one, which is why it was declared primary before the run.
+
+**The control was also worse than the thing it controls.** Adding 10 modes
+degraded Native's memory at every delay — 0.095 vs 0.037, 0.053 vs 0.026,
+0.035 vs 0.023, 0.038 vs 0.031, 0.055 vs 0.051. A control that gets worse
+when given more parameters is not isolating capacity; it is measuring
+optimization difficulty at 26 modes. So §6g's conclusion that memory was
+"explained by capacity" rested on the same defective instrument.
+
+### What is falsified: the selectivity premise
+
+The construction predicts slow modes holding at g ≈ 0 while faster modes
+open. Measured in `two_stage`:
+
+| delay | corr(gate, rate) | slow half | fast half |
+|---|---|---|---|
+| 16 | +0.026 | 0.085 | 0.067 (**inverted**) |
+| 32 | +0.025 | 0.085 | 0.078 |
+| 64 | +0.022 | 0.083 | 0.077 |
+| 128 | +0.027 | 0.081 | 0.110 |
+| 256 | +0.044 | 0.069 | 0.106 |
+
+Essentially no specialization, and at short delay the wrong way round.
+`one_stage` does better (+0.19 to +0.20, halves 0.078 against 0.176) but is
+the arm that loses the ablation. Mean gates sit at 0.09–0.13 throughout:
+mostly closed, near-uniformly.
+
+**So the second stage's advantage does not come from per-mode selectivity.
+It comes from the second-order numerator 1 + Γ_n D + M_n D² itself.** The
+cascade works; the "heterogeneous many-body" reading of *why* it works does
+not survive this run, and the framing should follow the evidence rather
+than the other way round.
+
+### Where this leaves the claim
+
+The standing bar is retained long-delay memory **and** reduced response
+lag. Against equal-mode Native that holds at four of five delays. Against a
+capacity control it is **not established**, and cannot be until the control
+shares its initialization — which is a new experiment, not a re-run.
+
+Two results are solid and do not depend on that repair: gating improves
+lead on every seed at every delay, and **two stages beat one** on the
+lead–memory frontier at every delay. The third — that gates specialize by
+timescale — is falsified.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a
