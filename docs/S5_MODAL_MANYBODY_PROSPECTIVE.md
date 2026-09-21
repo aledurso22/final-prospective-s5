@@ -590,6 +590,52 @@ only the geometry moves, and it moves identically in all five arms.
 The frontier is only worth measuring where the reference arm can do the
 task, so the power check is repeated before the sweep.
 
+### The second power check, and the two defects behind the last delay
+
+Learning the rate in the log fixed four of the five points:
+
+| delay | 16 | 32 | 64 | 128 | 256 |
+|---|---|---|---|---|---|
+| additive rate | 0.008 | 0.004 | 0.77 | 1.11 | 1.44 |
+| **log rate** | 0.006 | 0.004 | **0.011** | **0.030** | 1.31 |
+
+64 improved 73×, 128 improved 37×, and the monotone degradation in the
+delay disappeared — which is the diagnosis confirmed. What remained at 256
+was a **cliff**, 0.030 to 1.31 in one doubling, so it had a different
+cause. Training length was ruled out directly: 1200 → 1.31, 4000 → 1.28,
+12000 → **1.42**, worse. Two defects were behind it.
+
+**The readout had no bias.** `einsum(features, readout)` cannot emit a
+constant, so "predict the channel mean" — the fallback that *defines* a
+normalized error of 1.0 — was unavailable to the model. That is why scores
+above 1.0 appeared at all, in every arm, right back to the first smoke, and
+why 1.31 could not be read as "captured nothing". The bias is counted in
+the parameter budget, identically in each arm.
+
+**Frequencies were drawn uniformly while rates were drawn in the log.** A
+256-token exponential trace needs a mode with ω near zero as well as the
+right rate: one complex mode offers `e^{−rk}cos(ωk+φ)` and its sine, and no
+combination of those is non-oscillatory unless ω is small. Drawn uniformly
+on [−2, 2], the smallest of 26 magnitudes is about 0.077 — a period of 82
+tokens, nine oscillations across a 768-token trace. Longer training made it
+*worse* because the lead channel, which is easy and shares the same modes,
+kept pulling them fast.
+
+Rates are drawn so that every timescale is present. Frequencies are now
+drawn log-uniformly in magnitude so that every frequency scale is, near
+zero included. This is the same principle applied to the part that was left
+uniform, it is identical in all five arms, and it does not favour either
+channel — a near-zero ω is as useful to the lead filter as to the memory
+trace.
+
+Both changes make the task easier for *every* arm, which is the property
+that matters: the experiment compares arms, and the power floor exists to
+refuse comparisons where the reference cannot do the task at all.
+
+`slowest_timescale`, `omega_of_slowest_mode` and `min_abs_omega` are now
+reported per arm, so the next failure of this kind is read off rather than
+guessed at.
+
 ## 7. First deliverables, and what is deliberately absent
 
 Delivered: the derivation above, the implementation, both test suites, a

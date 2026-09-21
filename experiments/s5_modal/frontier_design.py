@@ -22,7 +22,8 @@ def effective_parameters(modes, stages, channels=CHANNELS):
     arm at the same mode count has FEWER effective parameters. `stages=0`
     names that arm.
     """
-    return 2 * modes + 4 * modes + 2 * modes * channels + 3 * stages * modes
+    return (2 * modes + 4 * modes + 2 * modes * channels + channels
+            + 3 * stages * modes)
 
 
 def matched_modes(target_parameters, stages, channels=CHANNELS):

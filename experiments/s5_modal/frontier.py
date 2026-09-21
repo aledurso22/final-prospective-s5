@@ -82,6 +82,17 @@ CHANNELS = 2
 #: log-uniform decay rates: the slowest mode must outlast the longest delay
 RATE_MIN = 1.0 / (2.0 * max(DELAYS))
 RATE_MAX = 0.3
+#: log-uniform frequency MAGNITUDES, for the same reason the rates are.
+#: A 256-token exponential trace needs a mode with omega near zero as well
+#: as the right rate -- one complex mode offers exp(-rk)cos(wk+phi) and its
+#: sine, and no combination of those is non-oscillatory unless w is small.
+#: Drawn uniformly on [-2, 2], the smallest of 26 magnitudes is about
+#: 0.077, a period of 82 tokens, which oscillates nine times across a
+#: 768-token trace. Rates are drawn so that every timescale is present;
+#: frequencies are now drawn so that every frequency scale is, near zero
+#: included.
+OMEGA_MIN = 1e-3
+OMEGA_MAX = 2.0
 # ------------------------------------------------------------------ task --
 def make_batch(key, delay, batch=BATCH, length=LENGTH):
     """(inputs, target) for one delay.
@@ -166,7 +177,13 @@ def model_apply(params, inputs, use_gates):
 
     states = jax.vmap(one)(inputs)
     features = jnp.concatenate((states.real, states.imag), axis=-1)
-    return jnp.einsum("blf,fc->blc", features, params["readout"]), gates
+    # the BIAS is not decoration. Without it the readout cannot emit a
+    # constant, so "predict the channel mean" -- the fallback that defines
+    # a normalized error of 1.0 -- is unavailable, the normalized scale has
+    # no floor, and every arm can and did score above 1.0 in a way that
+    # carries no information about how much of the channel it captured.
+    return (jnp.einsum("blf,fc->blc", features, params["readout"])
+            + params["readout_bias"], gates)
 
 
 def loss_fn(params, inputs, target, use_gates, gate_penalty):
@@ -198,11 +215,14 @@ def initial_params(key, stages, modes):
     mode_offset = jnp.linspace(-0.3, 0.3, modes)[None, :]
     return {
         "log_rate": log_rate,
-        "lambda_im": jax.random.uniform(keys[1], (modes,), minval=-2.0,
-                                        maxval=2.0),
+        "lambda_im": (jnp.exp(jax.random.uniform(
+            keys[1], (modes,), minval=math.log(OMEGA_MIN),
+            maxval=math.log(OMEGA_MAX)))
+            * jnp.sign(jax.random.normal(keys[7], (modes,)))),
         "b_re": jax.random.normal(keys[2], (modes, 2)) * 0.5,
         "b_im": jax.random.normal(keys[3], (modes, 2)) * 0.5,
         "readout": jax.random.normal(keys[4], (2 * modes, CHANNELS)) * 0.1,
+        "readout_bias": jnp.zeros((CHANNELS,)),
         "d_raw": offset + mode_offset,
         "delta_raw": 0.5 + offset
                      + 0.1 * jax.random.normal(keys[5], (stages, modes)),
@@ -332,7 +352,14 @@ def gate_report(params, use_gates):
     centred_gate = mean_gate - jnp.mean(mean_gate)
     denominator = (jnp.linalg.norm(centred_rate)
                    * jnp.linalg.norm(centred_gate) + 1e-12)
+    # the diagnostics the 256-token failure had to be GUESSED from: which
+    # timescales and which frequencies the arm actually ended up with
+    slowest = jnp.argmin(rate)
+    omega = jnp.abs(params["lambda_im"])
     return {
+        "slowest_timescale": 1.0 / rate[slowest],
+        "omega_of_slowest_mode": omega[slowest],
+        "min_abs_omega": jnp.min(omega),
         "mean_gate": jnp.mean(mean_gate),
         "mean_gate_slow_half": jnp.mean(mean_gate[slow]),
         "mean_gate_fast_half": jnp.mean(mean_gate[fast]),

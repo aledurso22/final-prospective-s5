@@ -119,7 +119,7 @@ def test_both_controls_have_at_least_as_many_parameters_as_two_stage():
                 for name, gates, stages, modes in D.arm_table())
     two = D.effective_parameters(*(arms["two_stage"][2],
                                    arms["two_stage"][1]))
-    assert two == 256
+    assert two == 258
     for name in ("native_capacity_matched", "one_stage_capacity_matched"):
         gates, stages, modes = arms[name]
         assert D.effective_parameters(modes, stages if gates else 0) >= two
@@ -137,7 +137,7 @@ def test_the_two_gated_arms_share_their_mode_count():
 def test_the_native_arms_carry_no_stage_parameters():
     for name, gates, stages, modes in D.arm_table():
         if not gates:
-            assert D.effective_parameters(modes, 0) == 10 * modes
+            assert D.effective_parameters(modes, 0) == 10 * modes + D.CHANNELS
 
 
 def test_every_comparison_names_arms_that_exist():
@@ -308,6 +308,48 @@ def test_the_decay_rate_is_learned_in_the_log_not_additively():
     assert '"log_rate"' in initial and '"lambda_re"' not in initial
     # the DISTRIBUTION must be unchanged: only the geometry moves
     assert "math.log(RATE_MIN)" in initial and "math.log(RATE_MAX)" in initial
+
+
+def test_the_readout_can_emit_a_constant():
+    """REGRESSION from the 256-token failure. Without a bias the readout
+    cannot predict a channel's mean, so the fallback that DEFINES a
+    normalized error of 1.0 is unavailable to the model and every arm can
+    score above 1.0 in a way that says nothing about how much of the
+    channel it captured. Every arm scored above 1.0 in the first smoke.
+
+    The bias is counted in the parameter budget, identically in each arm,
+    so it cannot quietly unbalance the capacity matching."""
+    source = io.open(FRONTIER).read()
+    assert '"readout_bias"' in source
+    model = ast.get_source_segment(
+        source, SI.function_node(SI.parse(FRONTIER), "model_apply")) or ""
+    assert 'params["readout_bias"]' in model
+    budget = ast.get_source_segment(
+        io.open(DESIGN).read(),
+        SI.function_node(SI.parse(DESIGN), "effective_parameters")) or ""
+    assert "+ channels" in budget
+
+
+def test_the_frequencies_are_drawn_on_every_scale_as_the_rates_are():
+    """REGRESSION from the 256-token failure. One complex mode offers
+    exp(-rk)cos(wk+phi) and its sine, so no combination is non-oscillatory
+    unless w is near zero. Drawn uniformly on [-2, 2], the smallest of 26
+    magnitudes is about 0.077 -- a period of 82 tokens, nine oscillations
+    across a 768-token trace -- and the reference arm could not represent
+    the target at all: 1.31 at 1200 steps, 1.28 at 4000, 1.42 at 12000,
+    which is not undertraining.
+
+    Rates are drawn so that every timescale is present; frequencies must be
+    drawn so that every frequency scale is, near zero included."""
+    source = io.open(FRONTIER).read()
+    assert "OMEGA_MIN = 1e-3" in source and "OMEGA_MAX = 2.0" in source
+    initial = ast.get_source_segment(
+        source, SI.function_node(SI.parse(FRONTIER), "initial_params")) or ""
+    assert "math.log(OMEGA_MIN)" in initial, "frequencies must be LOG-uniform"
+    assert "minval=-2.0" not in initial, "the uniform draw that failed"
+    # the smallest magnitude must be able to hold the longest trace: a
+    # period far longer than the sequence
+    assert 2.0 * math.pi / 1e-3 > 1024
 
 
 def test_the_slowest_mode_can_outlast_the_longest_delay():
