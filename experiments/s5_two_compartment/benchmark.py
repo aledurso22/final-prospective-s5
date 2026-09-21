@@ -46,22 +46,71 @@ def peak_device_bytes():
     return stats.get("peak_bytes_in_use")
 
 
+def patched_factory(runner, production, implementation):
+    """Build the arm's SSM with the requested scan, through the FACTORY.
+
+    REGRESSION, and it silently voided three rows of the first benchmark.
+    The first version set the class attribute:
+
+        GeneralizedProspectiveS5SSM.implementation = implementation
+
+    A Flax `nn.Module` is turned into a dataclass at CLASS DEFINITION time,
+    so `__init__` has already captured the field defaults; assigning to the
+    class attribute afterwards changes nothing an instance sees. Every
+    generalized row therefore ran `scan_companion_sequential`, and the
+    giveaway was `peak_device_bytes` identical to the BYTE between
+    `sequential` and `companion` (8957147904 both), which two different
+    algorithms cannot produce.
+
+    The implementation now goes through `init_generalized_prospective_S5SSM`,
+    which threads it into the partial, and `verify` below reads it back off
+    the constructed partial rather than trusting that it took.
+    """
+    from s5.three_arm_factory import init_generalized_prospective_S5SSM
+
+    original = runner.ssm_factory
+
+    def factory(arm):
+        if arm == "generalized_prospective_s5" and implementation is not None:
+            return init_generalized_prospective_S5SSM(
+                response_init=runner.T_INIT, rho_init=runner.RHO_INIT,
+                gamma_init=1.0, implementation=implementation,
+                **runner.ssm_kwargs(arm))
+        return original(arm)
+
+    runner.ssm_factory = factory
+    return original
+
+
+def verify(runner, production, implementation):
+    """Read the scan back off the constructed module. Never assume it took.
+
+    Returns the implementation actually in force, so the benchmark row
+    carries evidence rather than an intention.
+    """
+    built = runner.ssm_factory(production)
+    actual = getattr(built, "keywords", {}).get("implementation")
+    if production != "generalized_prospective_s5":
+        return None
+    if actual is None:
+        from s5.factored_recurrence import DEFAULT_IMPLEMENTATION
+        actual = DEFAULT_IMPLEMENTATION
+    if implementation is not None and actual != implementation:
+        raise SystemExit(
+            f"asked for {implementation!r} but the constructed module has "
+            f"{actual!r}; refusing to report a row that measures something "
+            f"else")
+    return actual
+
+
 def measure(label, warmup, steps):
     """One arm, in this process. Returns a plain dict."""
     from experiments.s5_three_arm_full import runner
 
-    arm = dict((name, (production, implementation))
-               for name, production, implementation in ARMS)[label]
-    production, implementation = arm
-
-    if implementation is not None:
-        # the ONLY thing that changes between the generalized rows: which
-        # scan evaluates the identical recurrence
-        import s5.generalized_prospective_ssm as GP
-        original = GP.GeneralizedProspectiveS5SSM.implementation
-        GP.GeneralizedProspectiveS5SSM.implementation = implementation
-    else:
-        original = None
+    production, implementation = dict(
+        (name, (arm, choice)) for name, arm, choice in ARMS)[label]
+    original = patched_factory(runner, production, implementation)
+    actual = verify(runner, production, implementation)
 
     state = runner.init_state(production, runner.SEEDS[0])
     model = runner.model_cls_for(production)(training=True)
@@ -84,15 +133,13 @@ def measure(label, warmup, steps):
         state = one(state, warmup + index)
     jax.block_until_ready(state.params)
     elapsed = time.time() - began
-
-    if original is not None:
-        import s5.generalized_prospective_ssm as GP
-        GP.GeneralizedProspectiveS5SSM.implementation = original
+    runner.ssm_factory = original
 
     per_step = elapsed / steps
     return {
         "arm": label, "production_arm": production,
-        "implementation": implementation,
+        "implementation_requested": implementation,
+        "implementation_in_force": actual,
         "batch": int(runner.BATCH_SIZE), "length": int(runner.SEQ_LEN),
         "steps_measured": steps, "warmup": warmup,
         "seconds_per_step": per_step,
@@ -158,7 +205,19 @@ def main():
         print(json.dumps(row, indent=2), flush=True)
 
     ok = {k: v for k, v in rows.items() if not v.get("failed")}
-    report = {"schema": "s5-two-compartment/benchmark-v1", "arms": rows}
+    # GUARD. Two different scans cannot allocate identically to the byte.
+    # The first benchmark reported sequential and companion both at exactly
+    # 8957147904 because the implementation never changed, so identical
+    # peaks are now called out rather than tabulated.
+    peaks = {}
+    for name, row in ok.items():
+        peaks.setdefault(row.get("peak_device_bytes"), []).append(name)
+    suspicious = {int(peak): names for peak, names in peaks.items()
+                  if peak and len(names) > 1}
+    report = {"schema": "s5-two-compartment/benchmark-v2", "arms": rows,
+              "implementations_in_force": {
+                  k: v.get("implementation_in_force") for k, v in ok.items()},
+              "identical_peak_memory_suspicious": suspicious}
     if "sequential" in ok:
         base = ok["sequential"]["seconds_per_step"]
         report["speedup_over_sequential"] = {

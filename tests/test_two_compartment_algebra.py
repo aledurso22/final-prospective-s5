@@ -271,3 +271,55 @@ def test_the_one_justified_change_only_adds_an_implementation_choice():
     for expected in ("response_init: float = 0.05", "rho_init: float = 0.5",
                      "gamma_init: float = 1.0", "RHO_MIN = 1e-4"):
         assert expected in source, expected
+
+
+# ------------------------------------------------------------- benchmark --
+BENCHMARK = os.path.join(REPO, "experiments/s5_two_compartment/benchmark.py")
+
+
+def test_the_benchmark_does_not_set_the_scan_by_class_attribute():
+    """REGRESSION, and it silently voided three rows of the first run.
+
+    A Flax nn.Module is turned into a dataclass at CLASS DEFINITION time,
+    so `__init__` has already captured the field defaults and assigning to
+    the class attribute afterwards changes nothing an instance sees. Every
+    generalized row ran the sequential scan; the giveaway was
+    `peak_device_bytes` identical to the BYTE between `sequential` and
+    `companion`, 8957147904 both, which two different algorithms cannot
+    produce.
+    """
+    source = io.open(BENCHMARK).read()
+    tree = SI.parse(BENCHMARK)
+    # by AST, not by substring: the literal now appears in the docstring
+    # that EXPLAINS the bug, so a substring search can never pass. That is
+    # the exact trap `source_introspection` was written for.
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if (isinstance(target, ast.Attribute)
+                    and target.attr == "implementation"
+                    and not isinstance(target.value, ast.Name)):
+                offenders.append(ast.dump(target))
+            elif (isinstance(target, ast.Attribute)
+                  and target.attr == "implementation"
+                  and isinstance(target.value, ast.Attribute)):
+                offenders.append(ast.dump(target))
+    assert offenders == [], offenders
+    assert SI.defines_function(tree, "patched_factory")
+    assert SI.defines_function(tree, "verify")
+    assert "init_generalized_prospective_S5SSM(" in source
+    assert "implementation=implementation" in source
+
+
+def test_the_benchmark_reads_the_scan_back_rather_than_assuming_it_took():
+    source = io.open(BENCHMARK).read()
+    node = SI.function_node(SI.parse(BENCHMARK), "verify")
+    body = ast.get_source_segment(source, node) or ""
+    assert "keywords" in body and "raise SystemExit" in body
+    # and the row carries the evidence, not the intention
+    assert '"implementation_in_force"' in source
+    assert '"implementation_requested"' in source
+    # identical peak memory across arms is called out
+    assert "identical_peak_memory_suspicious" in source

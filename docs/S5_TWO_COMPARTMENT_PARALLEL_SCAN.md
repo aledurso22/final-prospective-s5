@@ -207,19 +207,49 @@ Every production mode is strictly inside the unit disc. **The float64
 column of that run is void** for reason (a) and must be re-measured with
 `JAX_ENABLE_X64=1`.
 
-## 8. Benchmark (partial)
+## 8. Benchmark — first run, and the row that was not what it said
 
-Native, one process, batch 16, length 16,000, full forward/backward/optimizer:
+Batch 16, length 16,000, full forward/backward/optimizer, one process each:
+
+| arm | s/step | steps/min | peak GiB | three seeds, 15 epochs |
+|---|---|---|---|---|
+| `native` | **0.1172** | 511.9 | 6.909 | 0.79 h |
+| `sequential` | **17.525** | 3.42 | 8.342 | **117.4 h** |
+| `companion` | 17.580 | 3.41 | **8.342** | — **VOID** |
+
+`sequential` reproduces the original problem cleanly: 3.42 steps/min here
+against the ≈2.98 measured before, **149.5× Native's per-step cost**, and
+117 hours for a three-seed wave. That is why the arm never ran.
+
+**The `companion` row is void, and so was the `factored` one.**
+`peak_device_bytes` came back as **8957147904 for both `sequential` and
+`companion` — identical to the byte.** Two different scan algorithms cannot
+allocate identically to the byte. They ran the same code.
+
+The cause: the benchmark selected the scan by assigning to the class
+attribute. A Flax `nn.Module` is turned into a **dataclass at class
+definition time**, so `__init__` has already captured the field defaults
+and assigning to the class attribute afterwards changes nothing an instance
+sees. Every generalized row ran `scan_companion_sequential`.
+
+Fixed by threading the choice through
+`init_generalized_prospective_S5SSM`, which puts it in the partial, and by
+`verify()` reading it **back off the constructed module** and refusing to
+report a row whose scan is not the one requested. Each row now carries
+`implementation_in_force` as evidence rather than
+`implementation` as an intention, and the parent flags any two arms that
+report identical peak memory.
+
+### Thresholds the parallel rows have to clear
 
 ```
-seconds_per_step   0.11722
-steps_per_minute   511.9
-peak_device        6.909 GiB
-projection         0.262 h/seed, 0.785 h for three seeds at 15 epochs
+sequential                      17.525 s/step    117.4 h / three seeds
+≥  4.9× faster  →  ≤ 3.58 s/step   →  fits a 24 h allocation
+≥  9.8× faster  →  ≤ 1.79 s/step   →  fits a 12 h allocation
 ```
 
-The old sequential arm measured ≈2.98 steps/min, i.e. ≈20.1 s/step —
-**≈172× Native's per-step cost**. The remaining rows are pending.
+Native's 0.117 s/step is not a target: this arm carries twice the state
+(256 against 128 real values per layer) and runs two scans in series.
 
 ## 9. Gates — status
 
