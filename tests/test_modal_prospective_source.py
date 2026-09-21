@@ -158,7 +158,9 @@ WORKSTREAM_FILES = (CASCADE, LAYER, BENCHMARK, SYNTHETIC,
                                  "experiments/s5_modal/report_frontier.py"),
                     os.path.join(REPO,
                                  "experiments/s5_modal/why_generalized.py"),
-                    os.path.join(REPO, "s5/prospective_euler.py"))
+                    os.path.join(REPO, "s5/prospective_euler.py"),
+                    os.path.join(REPO,
+                                 "experiments/s5_modal/wwj_lagrangian.py"))
 
 
 def test_no_file_reads_a_name_nothing_binds():
