@@ -259,10 +259,11 @@ compartment, and it is affordable.
 Both thresholds are cleared with a wide margin: ≥ 9.8× was needed to fit a
 12 h allocation, and 80.5× lands the three-seed wave at 1.46 h.
 
-**One thing to check before any launch:** peak device memory is 12.9 GiB.
-That fits comfortably if the card has 24 GB or more, and not at all on a
-16 GB card at this batch size. The launcher must not be written until the
-device capacity is confirmed against this number.
+**Device capacity, confirmed.** `pgi15-gpu5` carries an NVIDIA GeForce RTX
+3090 with **24576 MiB = 24.0 GiB**. The factored arm's 12.885 GiB peak is
+**53.7% of the card, 1.86× headroom**, against Native's 6.909 GiB at 28.8%.
+`cluster_env.sh` sets `XLA_PYTHON_CLIENT_PREALLOCATE=false`, so JAX does
+not grab the card up front and the measured peak is the real one.
 
 ## 9. Gates — status
 
@@ -274,13 +275,13 @@ device capacity is confirmed against this number.
 | **float32 equivalence and gradients** | **passed** — 12 tests |
 | **Whole-inventory certification**, seeds 301–303 | **passed** — 1152 modes, worst ρ 0.99997, 0 offenders |
 | **Throughput and peak memory** | **passed** — factored 80.5× over sequential, 1.46 h per wave |
-| Device capacity vs 12.9 GiB peak | **unconfirmed** |
+| Device capacity vs 12.9 GiB peak | **passed** — RTX 3090, 24.0 GiB, peak is 53.7% |
 | Launcher for this arm | **not added** |
 
-All correctness and performance gates have passed. The two remaining
-items are operational: the device's memory capacity has not been checked
-against the 12.9 GiB peak, and no launcher exists. Nothing has been
-trained and no Slurm job has been submitted.
+**Every gate in the brief has now passed.** The only outstanding item is
+the launcher, which the brief permits only after these gates and which
+has deliberately not been written. Nothing has been trained and no Slurm
+job has been submitted.
 
 No certification of the parallel routes is claimed yet, no launcher exists,
 nothing has been trained, and no Slurm job has been submitted.
