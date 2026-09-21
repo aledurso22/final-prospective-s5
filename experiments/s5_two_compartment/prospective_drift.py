@@ -16,6 +16,20 @@ memory with a very fast prospective response -- and this script measures
 which of the four happened, per layer and over the whole inventory, by
 comparing the trained checkpoint against the initialization.
 
+NO MODEL IS BUILT. The first version called `runner.init_state` three
+times purely to obtain a parameter template, which pulled in optax, the
+dataloaders and a full Flax model construction for what is a read-only
+inspection of two files. `flax.serialization.msgpack_restore` reads a
+checkpoint into nested dicts with no template at all, so this needs only
+JAX and Flax, runs in seconds, needs no data cache, and does not care which
+device it is on. The checkpoints are 3.2 MiB each, so it can equally be run
+away from the cluster on copies of them.
+
+WHAT IT COMPARES. The FIRST and LAST checkpoints present, which is the
+honest "did training move it" question, plus the exact scalar values every
+mode starts from -- T = 0.05, rho = 0.5, gamma = 1.0 -- which are known
+without building anything.
+
     python -m experiments.s5_two_compartment.prospective_drift \\
         --run-root /Users/durso/s5-runs/s5-two-compartment-factored/<stamp> \\
         --arm matched_lag_prospective_s5 --out drift.json
@@ -29,13 +43,44 @@ import os
 import jax.numpy as np
 import numpy as onp
 from flax import serialization
+from flax.traverse_util import flatten_dict
 
 from s5 import matched_lag_ssm as ML
 from s5.generalized_prospective_ssm import response_mass_gamma
 from s5.ssm import discretize_zoh
-from experiments.s5_two_compartment.certify_inventory import _layer_groups
 
 H = 1.0
+#: what every mode starts from, from runner.T_INIT / RHO_INIT / gamma_init
+INITIAL = {"T": 0.05, "rho": 0.5, "gamma": 1.0}
+
+
+def _layer_groups(params):
+    """Every SSM layer's parameters, keyed by module path.
+
+    Located by `generalized_T_raw`, so the grouping follows the actual
+    tree rather than an assumed layout. Works on the plain nested dicts
+    `msgpack_restore` returns as well as on a live parameter tree.
+    """
+    flat = flatten_dict(params)
+    groups = {}
+    for path in flat:
+        if path[-1] == "generalized_T_raw":
+            groups["/".join(path[:-1])] = {}
+    for path, value in flat.items():
+        prefix = "/".join(path[:-1])
+        if prefix in groups:
+            groups[prefix][path[-1]] = np.asarray(value)
+    return groups
+
+
+def _read(path):
+    """A checkpoint as nested dicts. No template, no model, no device."""
+    with open(path, "rb") as handle:
+        restored = serialization.msgpack_restore(handle.read())
+    for key in ("params", "target"):
+        if key in restored:
+            return restored[key]
+    return restored
 
 
 def _mode_quantities(group, clip_eigs=True):
@@ -106,67 +151,66 @@ def main():
     parser.add_argument("--out", required=True)
     arguments = parser.parse_args()
 
-    from experiments.s5_three_arm_full import runner
-
-    report = {"schema": "s5-two-compartment/prospective-drift-v1",
+    report = {"schema": "s5-two-compartment/prospective-drift-v2",
               "arm": arguments.arm, "run_root": arguments.run_root,
-              "seeds": {}}
+              "initial_scalars": INITIAL, "seeds": {}}
     for seed in arguments.seeds:
-        template = runner.init_state(arguments.arm, seed)
         checkpoints = sorted(glob.glob(os.path.join(
             arguments.run_root, arguments.arm, str(seed),
             "checkpoint_epoch_*.msgpack")))
-        if not checkpoints:
-            print(f"seed {seed}: no checkpoint yet", flush=True)
+        if len(checkpoints) < 2:
+            print(f"seed {seed}: {len(checkpoints)} checkpoint(s), need 2",
+                  flush=True)
             continue
-        with open(checkpoints[-1], "rb") as handle:
-            trained = serialization.from_bytes(template, handle.read())
+        stages = {"first": _read(checkpoints[0]),
+                  "last": _read(checkpoints[-1])}
 
-        pieces = {"initial": _layer_groups(template.params),
-                  "trained": _layer_groups(trained.params)}
-        per_layer, pooled = {}, {"initial": [], "trained": []}
-        for name in sorted(pieces["initial"]):
+        pieces = {k: _layer_groups(v) for k, v in stages.items()}
+        per_layer, pooled = {}, {"first": [], "last": []}
+        for name in sorted(pieces["first"]):
             row = {}
-            for stage in ("initial", "trained"):
+            for stage in ("first", "last"):
                 values = _mode_quantities(pieces[stage][name])
                 pooled[stage].append(values)
                 row[stage] = _summary(stage, *values)
-            row["trained"]["joint"] = _joint(
-                *[pooled["trained"][-1][i] for i in (0, 4)])
+            row["last"]["joint"] = _joint(pooled["last"][-1][0],
+                                          pooled["last"][-1][4])
             per_layer[name] = row
-        stacked = {}
-        for stage in ("initial", "trained"):
-            columns = list(zip(*pooled[stage]))
-            stacked[stage] = [onp.concatenate(c) for c in columns]
+        stacked = {stage: [onp.concatenate(c)
+                           for c in zip(*pooled[stage])]
+                   for stage in ("first", "last")}
         summary = {stage: _summary(stage, *stacked[stage])
-                   for stage in ("initial", "trained")}
-        summary["trained"]["joint"] = _joint(stacked["trained"][0],
-                                             stacked["trained"][4])
-        report["seeds"][str(seed)] = {"checkpoint": checkpoints[-1],
-                                      "per_layer": per_layer,
-                                      "pooled": summary}
-        before, after = summary["initial"], summary["trained"]
-        print(f"seed {seed}  |lam| med {before['lambda_abs']['median']:.5f}"
+                   for stage in ("first", "last")}
+        summary["last"]["joint"] = _joint(stacked["last"][0],
+                                          stacked["last"][4])
+        report["seeds"][str(seed)] = {
+            "first_checkpoint": os.path.basename(checkpoints[0]),
+            "last_checkpoint": os.path.basename(checkpoints[-1]),
+            "epochs_seen": len(checkpoints),
+            "per_layer": per_layer, "pooled": summary}
+        before, after = summary["first"], summary["last"]
+        print(f"seed {seed}  epochs {len(checkpoints):2d}  "
+              f"|lam| med {before['lambda_abs']['median']:.5f}"
               f" -> {after['lambda_abs']['median']:.5f}   "
-              f"gamma med {before['gamma']['median']:.4f}"
+              f"gamma {before['gamma']['median']:.4f}"
               f" -> {after['gamma']['median']:.4f}   "
-              f"T med {before['T']['median']:.4f}"
+              f"T {before['T']['median']:.4f}"
               f" -> {after['T']['median']:.4f}   "
               f"|Gk| med {before['gamma_k_abs']['median']:.1f}"
               f" -> {after['gamma_k_abs']['median']:.1f}", flush=True)
 
-    # the verdict the question asks for, in one place
     verdicts = {}
     for seed, detail in report["seeds"].items():
-        before, after = detail["pooled"]["initial"], detail["pooled"]["trained"]
+        before, after = detail["pooled"]["first"], detail["pooled"]["last"]
         verdicts[seed] = {
             "retreated_lambda": bool(after["one_minus_lambda_abs_median"]
                                      > 1.2 * before["one_minus_lambda_abs_median"]),
-            "retreated_gamma": bool(after["gamma"]["median"]
-                                    < 0.5 * before["gamma"]["median"]),
+            "gamma_vs_initial_1.0": after["gamma"]["median"],
+            "T_vs_initial_0.05": after["T"]["median"],
             "retreated_gamma_k": bool(after["gamma_k_abs"]["median"]
                                       < 0.5 * before["gamma_k_abs"]["median"]),
-            "slow_modes_kept": int(after["lambda_abs"]["above_0.99"]),
+            "modes_above_0.99": after["lambda_abs"]["above_0.99"],
+            "modes_above_0.999": after["lambda_abs"]["above_0.999"],
             "concentration_ratio": after["joint"]["concentration_ratio"],
         }
     report["verdicts"] = verdicts
