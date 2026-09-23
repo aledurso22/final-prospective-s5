@@ -358,19 +358,80 @@ two parameter settings. Any comparison between them is a controlled comparison
 over `(M, γ)` with everything else — including `T` and its initialization —
 held fixed.
 
-### 4.4 Why zero mass fails: the poles leave the unit disc
+### 4.4 Why it fails — and it is **damping**, not mass
 
-At the production initialization `T = 0.05` with `h = 1`, the companion roots of
-the Zucchet arm have magnitude
+At `λ̄ = 1` exactly, `F = 1`, so `a₁ = 1 + α + δ` and `a₂ = −(α + δ)`, and the
+characteristic polynomial **factors exactly**:
 
 ```
-max root magnitude per mode: [1.63 1.59 1.59 1.63 1.39 1.16]
+z² − (1 + α + δ) z + (α + δ)  =  (z − 1)(z − (α + δ))
 ```
 
-which is the **ρ = 1.10–1.71** measured at initialization in the production run.
-Nothing damps the second-order recurrence, so the state diverges on the first
-update. Finite `M` and `γ` pull the roots inside the disc: the epoch-15
-checkpoints show `|r_slow| ≈ 0.999` and `|r_fast| ≈ 0.05`.
+with
+
+```
+α + δ = (M + hT) / (M + hT + hγ)
+```
+
+So one root is pinned at the memory pole `z = 1` and the other is `α + δ`.
+
+**`γ = 0` makes `α + δ = 1` for any `M` and any `T`** — numerator and
+denominator coincide. Both roots collapse onto `z = 1`: a **double pole at 1**,
+a double integrator with nothing damping it. Mass appears in the numerator *and*
+the denominator, so it cannot separate them.
+
+Verified on the real initialization (`T = 0.05`, HiPPO Λ, log-uniform `Δ`):
+
+| M | γ | median ρ | max ρ | modes with ρ > 1 | α+δ |
+|---|---|---|---|---|---|
+| 0 | 0 | 1.0984 | 1.7052 | **64/64** | 1.000000 |
+| 0.5 | 0 | 1.0287 | 1.1583 | **64/64** | 1.000000 |
+| 5 | 0 | 1.0094 | 1.0495 | **64/64** | 1.000000 |
+| 50 | 0 | 1.0030 | 1.0155 | **64/64** | 1.000000 |
+| 0 | 0.01 | 1.0203 | 1.5123 | 42/64 | 0.833333 |
+| 0 | 0.1 | 0.9974 | 0.9997 | **0/64** | 0.333333 |
+| 0 | 1.0 | 0.9996 | 1.0000 | **0/64** | 0.047619 |
+| 0.025 | 1.0 | 0.9996 | 1.0000 | **0/64** | 0.069767 |
+
+**`M = 50, γ = 0` is still unstable on every mode; `M = 0, γ = 0.1` is stable on
+every mode.** Damping is the variable that matters; mass is not.
+
+This matters because `|λ̄|` at initialization is **0.954 – 0.9995, median
+0.9947** — every mode sits immediately next to the `λ̄ = 1` degeneracy, which is
+exactly what a long-memory SSM is for. The Zucchet arm therefore has **64/64
+modes outside the unit disc at step 0**, median ρ = 1.0984, max 1.7052, and
+diverges on the first update.
+
+> Earlier write-ups in this project attributed the failure to zero *mass*. That
+> was wrong. The arm is at `M = γ = 0`, so the empirical contrast against the
+> generalized arm stands, but the mechanism is the vanishing damping.
+
+**The continuous-time statement.** Setting `M = γ = 0` in
+`M s̈ + (γ+T) ṡ = −s + Y + T Ẏ` with `Y = s + (T/h)(f − s)` and `u = f − s`:
+
+```
+T ṡ = −s + s + (T/h)u + T[ṡ + (T/h)u̇]
+0   = (T/h)u + (T²/h)u̇
+⟹ (1 + T ∂ₜ)(f − s) = 0
+```
+
+The state loses its own dynamics: the equation only says `f − s` decays, and `s`
+is slaved to `f = λ̄s + B̄x`. Substituting gives
+`(1 + T∂ₜ)[(λ̄−1)s + B̄x] = 0`, so `s` is determined by `x` through a factor of
+`1/(λ̄−1)` — singular precisely as `λ̄ → 1`. **This is the same cancellation
+structure `P(D)(f − s) = 0` that makes a prospective term cancel the memory it
+is supposed to anticipate**, here with `P = 1 + T∂ₜ`.
+
+**What finite damping restores.** With `γ > 0` the second root moves strictly
+inside the disc and the recurrence factors into *two timescales*: the memory
+pole stays at 1, and a response pole appears at `α + δ < 1`. At the production
+initialization (`M = 0.025, γ = 1, T = 0.05`) the roots at `λ̄ = 1` are exactly
+
+```
+{ 1 , 0.069767 }
+```
+
+which is the two-timescale structure the trained model then keeps (§7.3).
 
 ### 4.5 Parameterization of `(M, γ, T)`
 
@@ -663,8 +724,8 @@ codebase and placed on the **write residual** instead of the recurrence, where
 `a, b, c, d` are gate-independent constants and the memory recurrence is
 untouched. Over eight seeds on an MQAR-with-revision probe:
 
-* zero mass never trains — **0/8 seeds above chance**, and generalized beats it
-  **8/8, p = 0.0039** on all five metrics;
+* the undamped arm never trains — **0/8 seeds above chance**, and generalized
+  beats it **8/8, p = 0.0039** on all five metrics;
 * generalized does **not** beat the native baseline — 3/8 seeds, p = 0.86 — and
   is indistinguishable from literal Nesterov (mean difference −0.04).
 
