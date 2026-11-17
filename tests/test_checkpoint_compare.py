@@ -50,7 +50,7 @@ def test_matched_init_checkpoints_give_identity(runs, tmp_path):
     rep = CC.main(["--native", nat, "--generalized", gen, "--epoch", "15",
                    "--out", str(tmp_path)])
     s = rep["seeds"][0]
-    assert s["seed"] == 301 and s["backbone_init_identical_across_arms"]
+    assert s["seed"] == 301 and s["reconstructed_ssm_init_identical_across_arms"]
     a = s["actual"]
     for arm, keys in (("native", ("Delta", "decay")),
                       ("generalized", ("Delta", "T_over_gamma"))):
@@ -60,7 +60,8 @@ def test_matched_init_checkpoints_give_identity(runs, tmp_path):
     assert a["paired_trained"] == a["paired_init"]
     cf = s["counterfactual_at_generalized_learned_params"]
     assert cf["A"]["max_abs_diff_vs_production_coefficients"] < 1e-6
-    assert cf["A"]["stable"] == 384                       # 6 layers x 64 modes
+    assert cf["A"]["stable"] == 384 and cf["A"]["unstable"] == 0   # 6 x 64
+    assert "dc_delay_tokens_stable_modes_only" in cf["C"]
     # matched init really is the training init: T/gamma = 0.05 there
     assert a["generalized"]["matched_init"]["T_over_gamma"]["p50"] == pytest.approx(0.05, rel=1e-5)
     prov = rep["inputs"]["native"][0]
@@ -131,3 +132,38 @@ def test_missing_checkpoint_and_task_result_fail(runs, tmp_path):
     with pytest.raises(CC.CheckpointError, match="selected_epoch"):
         CC.main(["--native", bare, "--generalized", gen, "--epoch", "selected",
                  "--out", str(tmp_path)])
+
+
+def test_existing_output_is_never_overwritten(runs, tmp_path):
+    base, nat, gen = runs
+    out = tmp_path / "evidence"
+    out.mkdir()
+    (out / "checkpoint_compare.json").write_text('{"preserved": true}')
+    with pytest.raises(CC.CheckpointError, match="refusing to overwrite"):
+        CC.main(["--native", nat, "--generalized", gen, "--epoch", "15",
+                 "--out", str(out)])
+    assert (out / "checkpoint_compare.json").read_text() == '{"preserved": true}'
+
+
+def test_unstable_modes_are_counted_and_excluded(tmp_path):
+    """Push T/gamma up on the generalized checkpoint until some counterfactual
+    modes go unstable: they must be counted, and response statistics must be
+    over stable modes only."""
+    flat = dict(production_init_flat(CC.GENERALIZED, 301))
+    for k in list(flat):
+        if k[-1] == "generalized_gamma_raw":
+            flat[k] = onp.full_like(flat[k], -6.0)       # gamma ~ 2.5e-3
+        if k[-1] == "generalized_T_raw":
+            flat[k] = onp.full_like(flat[k], 1.0)        # T ~ 1.31
+    gen = _write_task(str(tmp_path / "g"), CC.GENERALIZED, 301, flat=flat)
+    nat = _write_task(str(tmp_path / "n"), CC.NATIVE, 301)
+    rep = CC.main(["--native", nat, "--generalized", gen, "--epoch", "15",
+                   "--out", str(tmp_path / "o")])
+    cf = rep["seeds"][0]["counterfactual_at_generalized_learned_params"]
+    unstable = {v: cf[v]["unstable"] for v in "ABCD"}
+    assert any(n > 0 for n in unstable.values()), unstable
+    for v in "ABCD":
+        assert cf[v]["stable"] + cf[v]["unstable"] == cf[v]["n_modes"] == 384
+        if cf[v]["unstable"]:
+            assert cf[v]["max_radius"] > 1
+            assert cf[v]["unstable_radius"]["p0"] >= 1 - 1e-12

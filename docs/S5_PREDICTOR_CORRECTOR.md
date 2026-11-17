@@ -383,7 +383,7 @@ learns better representations.
   The corrector change costs nothing measurable; it only changes the
   coefficients.
 
-### 4.7 Trained-checkpoint comparison (tool ready, not yet run)
+### 4.7 Trained-checkpoint comparison
 
 `experiments/s5_predictor_corrector/checkpoint_compare.py` reads checkpoints
 only. It does no training, needs no data, and does not repeat the
@@ -396,8 +396,25 @@ only. It does no training, needs no data, and does not repeat the
   scan).
 
 **Matched initialization.** Each arm is compared against
-`runner.init_state(arm, seed)` drawn in float32. The tool also checks that the
-backbone initialization is identical across the two arms.
+`runner.init_state(arm, seed)`, reconstructed today in float32.
+
+**What the init-agreement check does and does not verify.** The field
+`reconstructed_ssm_init_identical_across_arms` compares only the SSM-layer
+leaves (Λ, `log_step`, B, C1, C2) of the two arms' **reconstructed**
+initializations.
+* It does not verify that the historical runs started from that
+  reconstruction. No initial checkpoint was stored, so this cannot be checked.
+* It does not compare the encoder, norm or decoder leaves.
+
+**Stable modes only.** Each variant reports its Schur–Cohn stable and unstable
+counts. DC delay, decay times, residue ratios, the energy proxy, the
+exact-total energy share and the component gains are computed over stable
+modes only; their keys end in `_stable_modes_only`. An unstable mode has none
+of these infinite-horizon quantities. Paired decay ratios use only modes that
+are stable in both arms.
+
+**Evidence is never overwritten.** If `<out>/checkpoint_compare.json` already
+exists, the tool refuses before doing any work.
 
 **Reported per arm, at both trained and matched init:**
 * Λ and Δ jointly (`ΛΔ`), the actual effective poles, decay times
@@ -426,6 +443,24 @@ diagnostics of the epoch-15 parameters. They are not the selected-validation
 epoch's parameters, unless the two coincide; the selected epoch is printed
 next to each one. Nothing here is a performance comparison.
 
+**Result of the first cluster run** (as reported, epoch 15). The JSON is
+preserved on the cluster at
+`/Users/durso/s5-runs/checkpoint_compare_epoch15/checkpoint_compare.json` and
+is not copied into this repository.
+* **Actual comparison:** trained A keeps a median paired slow-decay-time ratio
+  of **17.04×, 13.99× and 15.19×** against trained native (seeds 301, 302,
+  303). Training did not compensate for the legacy timescale.
+* **Counterfactual comparison** at A's learned parameters:
+  * C has **64, 51 and 46** unstable modes out of 384;
+  * D is stable on all 384 modes for every seed.
+
+  These counterfactuals were never trained, so they do not predict how C or D
+  will train. They show that A's learned parameters lie outside C's stability
+  region, which is why §10 monitors C and D's own poles every epoch.
+
+That first run predates the stable-mode-only summaries and the renamed
+init-agreement field. A rerun must use a **new** `--out`.
+
 **Cluster command** (epoch-15 groups; the earlier native seed-301 run
 `20260919-190727` is excluded by naming the paths explicitly):
 
@@ -436,7 +471,7 @@ JAX_PLATFORMS=cpu PYTHONPATH=. .venv/bin/python -m \
   experiments.s5_predictor_corrector.checkpoint_compare \
   --native /Users/durso/s5-runs/s5-three-arm-15epoch/20260919-224525/native_matched_s5/301 /Users/durso/s5-runs/s5-three-arm-15epoch/20260919-224525/native_matched_s5/302 /Users/durso/s5-runs/s5-three-arm-15epoch/20260919-224525/native_matched_s5/303 \
   --generalized /Users/durso/s5-runs/s5-two-compartment-factored/20260921-175242/generalized_prospective_s5/301 /Users/durso/s5-runs/s5-two-compartment-factored/20260921-175242/generalized_prospective_s5/302 /Users/durso/s5-runs/s5-two-compartment-factored/20260921-175242/generalized_prospective_s5/303 \
-  --epoch 15 --out results/s5_predictor_corrector/trained_epoch15
+  --epoch 15 --out /Users/durso/s5-runs/checkpoint_compare_epoch15_v2
 ```
 
 ## 5. Fixed-quadratic illustration (separate from S5)
@@ -560,6 +595,17 @@ four sentence-level edits now state:
 **Pre-existing test state (not changed here).**
 * `tests/test_s5_three_arm_equations.py::test_three_arm_names_are_exactly_three`
   fails at `a01d2b2`, because the committed runner now has a fourth arm.
+* Pre-existing at `15aa1a2` and unchanged by the training integration:
+  * `test_s5_three_arm_protocol_corrections.py` fails 2 tests
+    (`exact_three_names`, `ARM_CONFIGS == ARM_ORDER`);
+  * `test_s5_three_arm_equations.py` fails 1 test (`exactly_three`);
+  * `test_matched_lag_jax.py` fails 3 tests.
+
+  All six fail identically on a clean `15aa1a2` worktree. The name tests
+  predate the matched-lag arm. The training-integration suites
+  (`test_timescale_training_integration.py` 14, `test_checkpoint_compare.py`
+  9) and `test_s5_three_arm_production.py` (3) and
+  `test_s5_execution_telemetry.py` (20) pass.
 * Several existing test modules enable x64 globally at import. The float32 file
   must therefore run in its own pytest process; its guard refuses to run
   otherwise, rather than silently testing float64.
@@ -572,12 +618,105 @@ four sentence-level edits now state:
   constants were not verified.
 * The calibrated-scale "no stable-old/unstable-new" result is empirical.
 
+## 10. Training integration: N / A / C / D × seeds 301, 302
+
+**Arms.**
+
+| arm | code identifier | constructor |
+|---|---|---|
+| N | `native_matched_s5` | `init_S5SSM`, unchanged |
+| A | `generalized_prospective_s5` | `init_generalized_prospective_S5SSM`, the **original** constructor, unchanged |
+| C | `calibrated_old_s5` | `init_predictor_corrector_S5SSM(variant="C")` |
+| D | `calibrated_prediction_s5` | `init_predictor_corrector_S5SSM(variant="D")` |
+
+* C and D reuse A's raw initial values, parameter names, optimizer groups
+  (`NO_BC_DECAY_SSM_KEYS`) and scan. Only the coefficient map differs.
+* `ARM_ORDER` and the finalizer remain the original three-arm study.
+
+**Shared protocol, unchanged.**
+* `runner.train_arm`; batch 16; 15 epochs (one warm-up epoch, then cosine
+  decay over 14).
+* The same data cache and the same official split.
+* The same selection rule: best validation accuracy, then lower validation
+  cross-entropy, then the earlier epoch.
+* No finalizer, so the test split is never read.
+* Every arm starts fresh from `runner.init_state(arm, seed)`.
+* Comparisons stay inside this wave, which shares one split and one selection
+  rule. These results are never mixed with held-out-test scores.
+
+**Production float32.**
+* `run_task` refuses to start if x64 is on, and the launcher forces
+  `JAX_ENABLE_X64=0`.
+* Before anything trains, the launcher's pre-flight confirms on CPU:
+  * A, C and D have identical initial leaves;
+  * N's leaves are identical to A's backbone;
+  * the batch size is 16.
+
+**Pole diagnostics** (`experiments/s5_three_arm_full/pole_diagnostics.py`).
+* **Every step:** the logged `companion_spectral_radius` is computed from each
+  arm's own recurrence. For native, Zucchet and A it is unchanged and
+  test-checked against a verbatim copy of the original code. C and D use their
+  predictor–corrector coefficients, which the old code would have computed
+  incorrectly.
+* **At initialization, every epoch, and at a numerical failure,**
+  `pole_diagnostics.jsonl` records:
+  * Schur–Cohn stability, margins, repeated-root proximity, `|P|` and `η|K|`;
+  * slow and fast poles, decay times and rotations;
+  * the slow time constant relative to the native pole of the same backbone;
+  * residues (stable modes only), DC delay (stable modes only), and `T/γ`.
+* **Production precision.** Each mode is also evaluated in the model's own
+  float32, through the same coefficient functions and the same
+  `companion_roots` the factored scan uses, and classified:
+  * **stable**;
+  * **numerical boundary:** within 1e-5 of the unit circle, or float32 and
+    float64 disagree about stability;
+  * **unstable:** the float64 radius exceeds 1 + 1e-5, so the equations
+    themselves are unstable.
+* Nothing is clipped or repaired. A finite instability is recorded and
+  training continues under the unchanged protocol. A non-finite step raises
+  `NumericalTrainingFailure`, which writes `failure.json` and the poles at the
+  failure.
+* At the production initialization, all four arms are 384/0/0 stable. A has
+  the smallest margin, about 2.5e-5.
+
+**Monitoring and logging overhead,** measured. The training computation is
+unchanged.
+* **Before:** after every step, one blocking device-to-host sync per
+  TrainState leaf (239–293 leaves), plus eager norm and radius ops, plus an
+  open, append and close of the JSONL file.
+* **After:** one jitted call and one transfer per step; buffered JSONL flushed
+  every 50 steps and at each epoch end; validation sums brought back in one
+  transfer.
+* **CPU, per step:** 8.0–11.0 ms → 0.28–0.51 ms (22–28×). JSONL append:
+  23 µs → 3 µs.
+* **On the cluster,** every smoke re-measures this on its own GPU and gates on
+  equal values and lower cost (`smoke_result.json: telemetry_check`).
+* **Trajectory identity.** On synthetic data, 2 epochs × 2 steps, the old
+  runner (`15aa1a2`) and the new one produce:
+  * **byte-identical** epoch checkpoints;
+  * identical per-step records in every field;
+  * identical validation results and the same selected epoch.
+
+  This was checked for A and for native.
+
+**Launcher:** `bin/run_experiments/allocation_s5_timescale_2x2_eight_gpu.sh`.
+* Eight tasks, one per GPU, run as direct children of the allocation.
+* The eight smokes run at once and gate training. The gate checks: scan,
+  x64 off, telemetry agreement and lower cost, and no unstable mode at init.
+* All eight trainings then run at once.
+* Each task's JAX compilation cache is shared between its own smoke and its
+  own training run.
+* `STAGE=smoke` stops after the gate. `DRY_RUN=1` prints the plan.
+* It refuses an existing run root.
+* A task that fails is recorded and never retried.
+
 ## 9. Reproduce
 
 ```bash
 JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_predictor_corrector.py -q    # 46
 .venv/bin/python -m pytest tests/test_predictor_corrector_float32.py -q             # 16, x64 OFF, own process
-.venv/bin/python -m pytest tests/test_checkpoint_compare.py -q                      # 7
+.venv/bin/python -m pytest tests/test_checkpoint_compare.py -q                      # 9
+.venv/bin/python -m pytest tests/test_timescale_training_integration.py -q          # 14, x64 OFF
 # the init is drawn float32 in a subprocess; x64 only affects the analysis
 JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu PYTHONPATH=. .venv/bin/python -m \
     experiments.s5_predictor_corrector.diagnostic --out results/s5_predictor_corrector   # ~60 s

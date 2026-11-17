@@ -39,6 +39,22 @@ TWO SEPARATE QUESTIONS, never mixed in the output:
 Compensation is NOT inferred from log_step alone: the report states the
 effective slow-pole decay times and rotations of both trained arms.
 
+STABLE MODES ONLY for response statistics. Each variant reports its count of
+stable (Schur-Cohn) and unstable modes. DC delay, residue ratios, the energy
+proxy, the exact-total energy share and the component gains are computed over
+STABLE modes only (keys end in `_stable_modes_only`): for an unstable mode
+those infinite-horizon quantities do not exist.
+
+INITIALIZATION AGREEMENT. `reconstructed_ssm_init_identical_across_arms`
+compares the SSM-layer leaves (Lambda, log_step, B, C1, C2) of the two arms'
+initializations as RECONSTRUCTED today by `runner.init_state(arm, seed)`
+in float32. It does NOT verify that the historical runs started from that
+reconstruction, and it does not compare the rest of the backbone (encoder,
+norms, decoder); no initial checkpoint was stored to check against.
+
+OUTPUT IS NEVER OVERWRITTEN: if <out>/checkpoint_compare.json exists the
+tool refuses; choose a new --out.
+
     python -m experiments.s5_predictor_corrector.checkpoint_compare \
         --native  RUN_N/native_matched_s5/301 RUN_N/native_matched_s5/302 ... \
         --generalized RUN_G/generalized_prospective_s5/301 ... \
@@ -266,8 +282,10 @@ def analyse_generalized(groups):
                           disc_ratio=onp.abs(co[0] ** 2 + 4 * co[1]) / onp.abs(co[0]) ** 2,
                           fast_component_energy_proxy=e2 / (e1 + e2),
                           fast_energy_over_exact_total=e2 / total,
-                          slow_component_gain=m["c_norm"] * m["b_bar_norm"] * onp.sqrt(e1),
-                          fast_component_gain=m["c_norm"] * m["b_bar_norm"] * onp.sqrt(e2))
+                          slow_component_gain=m["c_norm"] * m["b_bar_norm"] * onp.sqrt(
+                              onp.where(stable, e1, onp.nan)),
+                          fast_component_gain=m["c_norm"] * m["b_bar_norm"] * onp.sqrt(
+                              onp.where(stable, e2, onp.nan)))
             if v == "A":
                 rec[v]["max_abs_diff_vs_production_coefficients"] = float(max(
                     onp.max(onp.abs(onp.asarray(a) - onp.asarray(b)))
@@ -305,19 +323,30 @@ def generalized_summary(layers, variants):
         T_over_gamma=q(cat("T_over_gamma")),
         b_bar_norm=q(cat("b_bar_norm")), c_norm=q(cat("c_norm")))
     for v in variants:
+        sc = vcat(v, "stable").astype(bool)
+        only = lambda k: vcat(v, k)[sc]
+        radius = onp.maximum(vcat(v, "slow_radius"), vcat(v, "fast_radius"))
         rows = dict(
-            stable=int(vcat(v, "stable").sum()),
+            # VALID = Schur-Cohn stable. Every *_stable_modes_only statistic
+            # below is over these modes only; unstable modes have no
+            # infinite-horizon energy, gain or DC delay.
+            n_modes=int(sc.size), stable=int(sc.sum()), unstable=int((~sc).sum()),
+            unstable_radius=q(radius[~sc]) if (~sc).any() else None,
+            max_radius=float(radius.max()),
             slow_radius=q(vcat(v, "slow_radius")),
-            slow_decay_tokens=q(vcat(v, "slow_decay")),
-            slow_rotation_rad_per_token=q(onp.abs(vcat(v, "slow_rotation"))),
             fast_radius=q(vcat(v, "fast_radius")),
-            fast_decay_tokens=q(vcat(v, "fast_decay")),
-            residue_fast_over_slow=q(onp.abs(vcat(v, "R_fast")) / onp.abs(vcat(v, "R_slow"))),
-            fast_component_energy_proxy=q(vcat(v, "fast_component_energy_proxy")),
-            fast_energy_over_exact_total=q(vcat(v, "fast_energy_over_exact_total")),
-            slow_component_gain=q(vcat(v, "slow_component_gain")),
-            fast_component_gain=q(vcat(v, "fast_component_gain")),
-            dc_delay_tokens=q(vcat(v, "dc_delay")),
+            slow_decay_tokens_stable_modes_only=q(only("slow_decay")),
+            slow_rotation_rad_per_token=q(onp.abs(vcat(v, "slow_rotation"))),
+            fast_decay_tokens_stable_modes_only=q(only("fast_decay")),
+            residue_fast_over_slow_stable_modes_only=q(
+                onp.abs(only("R_fast")) / onp.abs(only("R_slow"))),
+            fast_component_energy_proxy_stable_modes_only=q(
+                only("fast_component_energy_proxy")),
+            fast_energy_over_exact_total_stable_modes_only=q(
+                only("fast_energy_over_exact_total")),
+            slow_component_gain_stable_modes_only=q(only("slow_component_gain")),
+            fast_component_gain_stable_modes_only=q(only("fast_component_gain")),
+            dc_delay_tokens_stable_modes_only=q(only("dc_delay")),
             eta_over_1_minus_mu=q(vcat(v, "eta_over_1_minus_mu")),
             abs_P=q(vcat(v, "abs_P")), eta_absK=q(vcat(v, "eta_absK")),
             min_discriminant_ratio=float(vcat(v, "disc_ratio").min()))
@@ -335,6 +364,8 @@ def paired(native_layers, gen_layers):
     nd = onp.concatenate([l["decay"] for l in native_layers])
     nw = onp.abs(onp.concatenate([l["rotation"] for l in native_layers]))
     gd = onp.concatenate([l["variants"]["A"]["slow_decay"] for l in gen_layers])
+    stable = onp.concatenate([l["variants"]["A"]["stable"] for l in gen_layers]).astype(bool)
+    gd = onp.where(stable, gd, onp.nan)          # unstable: no decay time
     gw = onp.abs(onp.concatenate([l["variants"]["A"]["slow_rotation"] for l in gen_layers]))
     ndl = onp.concatenate([l["Delta"] for l in native_layers])
     gdl = onp.concatenate([l["Delta"] for l in gen_layers])
@@ -365,7 +396,13 @@ def compare_seed(native_ckpt, gen_ckpt, seed, init_flat):
         for n in nat_init for k in LAYER_KEYS)
     an = {"trained": analyse_native(nat), "init": analyse_native(nat_init)}
     ag = {"trained": analyse_generalized(gen), "init": analyse_generalized(gen_init)}
-    out = dict(seed=seed, backbone_init_identical_across_arms=bool(shared_init))
+    out = dict(seed=seed,
+               reconstructed_ssm_init_identical_across_arms=bool(shared_init),
+               init_agreement_scope=(
+                   "SSM-layer leaves (Lambda, log_step, B, C1, C2) of today's "
+                   "float32 runner.init_state reconstruction for both arms; NOT "
+                   "a check of the historical runs' initial state, and not of "
+                   "the encoder/norm/decoder leaves"))
     out["actual"] = dict(
         native=dict(trained=native_summary(an["trained"]),
                     matched_init=native_summary(an["init"]),
@@ -414,6 +451,10 @@ def main(argv=None):
     if sorted(nat) != sorted(gen):
         raise CheckpointError(
             f"unmatched seeds: native {sorted(nat)} vs generalized {sorted(gen)}")
+    if os.path.exists(os.path.join(args.out, "checkpoint_compare.json")):
+        raise CheckpointError(
+            f"{os.path.join(args.out, 'checkpoint_compare.json')} exists; "
+            "refusing to overwrite evidence. Choose a new --out.")
 
     # NO x64 here: the matched init must be the float32 production draw
     # (production_init draws it in an x64-off subprocess regardless); the
@@ -436,6 +477,9 @@ def main(argv=None):
                for s in seeds])
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, "checkpoint_compare.json")
+    if os.path.exists(path):
+        raise CheckpointError(f"{path} exists; refusing to overwrite evidence. "
+                              "Choose a new --out.")
     with open(path, "w") as fh:
         json.dump(report, fh, indent=1, default=float)
     _print_digest(report)
@@ -457,26 +501,30 @@ def _print_digest(report):
                   f"scan {md.get('scan_implementation')}  {p['checkpoint']}")
     for s in report["seeds"]:
         a = s["actual"]
-        print(f"== seed {s['seed']}  (backbone init identical across arms: "
-              f"{s['backbone_init_identical_across_arms']})")
+        print(f"== seed {s['seed']}  (reconstructed SSM init identical across "
+              f"arms: {s['reconstructed_ssm_init_identical_across_arms']})")
         for arm in ("native", "generalized"):
             for when in ("matched_init", "trained"):
                 d = a[arm][when]
-                slow = d.get("decay_tokens") or d["A"]["slow_decay_tokens"]
+                slow = d.get("decay_tokens") or d["A"]["slow_decay_tokens_stable_modes_only"]
                 rot = d.get("rotation_rad_per_token") or d["A"]["slow_rotation_rad_per_token"]
                 print(f"  ACTUAL {arm:11s} {when:12s} Delta {m(d['Delta'])}  "
                       f"slow decay {m(slow)}  |rotation| {m(rot)}")
         g = a["generalized"]["trained"]
         print(f"  ACTUAL generalized trained T/gamma {m(g['T_over_gamma'])}  "
-              f"fast/slow residue {m(g['A']['residue_fast_over_slow'])}  "
-              f"fast-component energy proxy {m(g['A']['fast_component_energy_proxy'])}")
+              f"fast/slow residue {m(g['A']['residue_fast_over_slow_stable_modes_only'])}  "
+              f"fast-component energy proxy "
+              f"{m(g['A']['fast_component_energy_proxy_stable_modes_only'])} "
+              f"(stable modes only: {g['A']['stable']}/{g['A']['n_modes']})")
         print(f"  ACTUAL paired trained gen/native slow decay "
               f"{m(a['paired_trained']['slow_decay_generalized_over_native'])}  "
               f"(at init {m(a['paired_init']['slow_decay_generalized_over_native'])})")
         cf = s["counterfactual_at_generalized_learned_params"]
         for v in ("A", "B", "C", "D"):
-            print(f"  COUNTERFACTUAL {v}: stable {cf[v]['stable']}  slow decay "
-                  f"{m(cf[v]['slow_decay_tokens'])}  DC delay {m(cf[v]['dc_delay_tokens'])}")
+            print(f"  COUNTERFACTUAL {v}: stable {cf[v]['stable']}/{cf[v]['n_modes']} "
+                  f"unstable {cf[v]['unstable']} (max radius {cf[v]['max_radius']:.6f})  "
+                  f"stable-mode slow decay {m(cf[v]['slow_decay_tokens_stable_modes_only'])}  "
+                  f"stable-mode DC delay {m(cf[v]['dc_delay_tokens_stable_modes_only'])}")
 
 
 if __name__ == "__main__":

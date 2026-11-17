@@ -1,0 +1,14 @@
+== generalized_prospective_s5
+epoch 1 checkpoint bytes identical: True
+epoch 2 checkpoint bytes identical: True
+step records old 4 new 4, every field identical: True
+validation records identical: True
+wall seconds old 89.1 new 86.9 (CPU, step-dominated)
+IDENTICAL
+== native_matched_s5
+epoch 1 checkpoint bytes identical: True
+epoch 2 checkpoint bytes identical: True
+step records old 4 new 4, every field identical: True
+validation records identical: True
+wall seconds old 28.3 new 22.6 (CPU, step-dominated)
+IDENTICAL

@@ -21,6 +21,10 @@ from experiments.s5_three_arm_full import gpu_telemetry as GPU_TELEMETRY
 from s5.seq_model import BatchClassificationModel
 from s5.ssm_init import make_DPLR_HiPPO
 from s5.matched_lag_ssm import init_matched_lag_prospective_S5SSM
+from s5.predictor_corrector import init_predictor_corrector_S5SSM
+from experiments.s5_three_arm_full import step_telemetry as STEP_TELEMETRY
+from experiments.s5_three_arm_full.pole_diagnostics import (
+    CALIBRATED_ARMS, pole_summary, radius_array)
 from s5.three_arm_factory import (init_S5SSM,
                                   init_generalized_prospective_S5SSM,
                                   init_prospective_S5SSM)
@@ -38,6 +42,11 @@ SCIENTIFIC_NAMES = {
     "zucchet_prospective_s5": "Zucchet prospective dynamics — finite-difference realization",
     "generalized_prospective_s5": "generalized prospective dynamics (M,γ,T) — finite-difference realization",
     "matched_lag_prospective_s5": "theory-matched zero-first-order-lag prospective dynamics (M,γ,Γ_k) — finite-difference realization",
+    # the timescale study (docs/S5_PREDICTOR_CORRECTOR.md). Variant A is
+    # `generalized_prospective_s5` above, unchanged; C and D share its
+    # parameterization, parameter names, initial values and scan.
+    "calibrated_old_s5": "generalized prospective dynamics, calibrated target k=γ, correction at the previous state (variant C)",
+    "calibrated_prediction_s5": "generalized prospective dynamics, calibrated target k=γ, correction at the prediction y_t (variant D)",
 }
 #: PINNED to the original three. The fourth arm is a theory test, not part
 #: of the three-arm comparison, and `finalize.py` and `arm_summary` iterate
@@ -114,7 +123,19 @@ ARM_CONFIGS = {
                                     "recurrence_constructor": "init_matched_lag_prospective_S5SSM",
                                     "extra_parameters": ("T", "rho", "gamma"),
                                     "state_dimension": 256},
+    "calibrated_old_s5": {"shared": SHARED_CONFIG,
+                          "recurrence_constructor": "init_predictor_corrector_S5SSM(variant='C')",
+                          "extra_parameters": ("T", "rho", "gamma"),
+                          "state_dimension": 256},
+    "calibrated_prediction_s5": {"shared": SHARED_CONFIG,
+                                 "recurrence_constructor": "init_predictor_corrector_S5SSM(variant='D')",
+                                 "extra_parameters": ("T", "rho", "gamma"),
+                                 "state_dimension": 256},
 }
+#: arms whose recurrence is the second-order companion form and whose scan
+#: is chosen by --implementation
+SCAN_ARMS = ("generalized_prospective_s5", "matched_lag_prospective_s5",
+             "calibrated_old_s5", "calibrated_prediction_s5")
 
 
 def sha256_file(path):
@@ -162,6 +183,13 @@ def ssm_factory(arm):
         return init_matched_lag_prospective_S5SSM(
             response_init=T_INIT, rho_init=RHO_INIT, gamma_init=1.0,
             implementation=GENERALIZED_IMPLEMENTATION, **kw)
+    if arm in CALIBRATED_ARMS:
+        # IDENTICAL raw initialization, names and scan to the generalized
+        # arm; only the coefficient map differs (k = gamma; C/D corrector)
+        return init_predictor_corrector_S5SSM(
+            variant="C" if arm == "calibrated_old_s5" else "D",
+            response_init=T_INIT, rho_init=RHO_INIT, gamma_init=1.0,
+            implementation=GENERALIZED_IMPLEMENTATION, **kw)
     raise ValueError(arm)
 
 
@@ -202,8 +230,7 @@ def parameter_count(params):
 
 
 def recurrent_state_size(arm):
-    two_compartment = ("generalized_prospective_s5",
-                       "matched_lag_prospective_s5")
+    two_compartment = SCAN_ARMS
     per_layer = 2 * SSM_SIZE_BASE if arm in two_compartment else SSM_SIZE_BASE
     return {"complex_modes": SSM_SIZE_BASE // 2,
             "real_values_total": N_LAYERS * per_layer,
@@ -289,43 +316,29 @@ def _gpu_memory_stats():
 
 
 def companion_spectral_radius(state, arm):
-    flat = flatten_dict(state.params)
-    radii = []
-    for key in flat:
-        if key[-1] != "Lambda_re":
-            continue
-        prefix = key[:-1]
-        lam_re, lam_im = flat[key], flat[prefix + ("Lambda_im",)]
-        step = jnp.exp(flat[prefix + ("log_step",)][..., 0])
-        lam = jnp.clip(lam_re, None, -1e-4) + 1j * lam_im
-        b = jnp.zeros((lam.shape[0], 1), dtype=lam.dtype)
-        abar, bbar = discretize_zoh(lam, b, step)
-        if arm == "native_matched_s5":
-            radii.append(jnp.max(jnp.abs(abar)))
-            continue
-        if arm == "zucchet_prospective_s5":
-            raw = flat[prefix + ("prospective_T_raw",)]
-            coeff = zucchet_coefficients(abar, bbar, jax.nn.softplus(raw))
-        else:
-            t = jax.nn.softplus(flat[prefix + ("generalized_T_raw",)])
-            rho = 1e-4 + (1.0 - 1e-4) * jax.nn.sigmoid(
-                flat[prefix + ("generalized_rho_raw",)])
-            gamma = jax.nn.softplus(flat[prefix + ("generalized_gamma_raw",)])
-            coeff = generalized_coefficients(abar, bbar, t, rho * gamma * t, gamma)
-        radii.append(jnp.max(companion_radius(coeff[0], coeff[1])))
-    return float(jnp.max(jnp.asarray(radii)))
+    """Max spectral radius of the arm's ACTUAL recurrence. Identical to the
+    original computation for the native, Zucchet and generalized arms; the
+    calibrated arms use their own (predictor-corrector) coefficients."""
+    return float(radius_array(state.params, arm))
 
 
 def evaluate(state, model, x, y):
-    losses, correct, count = [], 0, 0
+    # per-batch sums stay on device and come back in ONE transfer; the host
+    # then reduces them in the original order, so the numbers are identical
+    device_losses, device_correct, count = [], [], 0
     for start in range(0, len(y), BATCH_SIZE):
         xb = jnp.asarray(x[start:start + BATCH_SIZE])
         yb = jnp.asarray(y[start:start + BATCH_SIZE])
         batch_loss, batch_acc, logits = eval_step(
             xb, yb, jnp.ones((xb.shape[0], SEQ_LEN)), state, model, True)
-        losses.append(float(jnp.sum(batch_loss)))
-        correct += int(jnp.sum(batch_acc))
+        device_losses.append(jnp.sum(batch_loss))
+        device_correct.append(jnp.sum(batch_acc))
         count += len(yb)
+    host_losses, host_correct = jax.device_get((device_losses, device_correct))
+    losses = [float(v) for v in host_losses]
+    correct = 0
+    for v in host_correct:
+        correct += int(v)
     return {"cross_entropy": float(sum(losses) / count),
             "accuracy": float(correct / count), "n": count}
 
@@ -393,6 +406,13 @@ def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None,
     best = None
     start_time = time.perf_counter()
     steps_per_epoch = len(data["train"][1]) // BATCH_SIZE
+    # fused telemetry: identical per-step fields, one device round trip
+    state_telemetry = STEP_TELEMETRY.make_state_telemetry(arm)
+    step_log = STEP_TELEMETRY.JsonlWriter(
+        os.path.join(checkpoint_dir, "step_metrics.jsonl"))
+    pole_log = STEP_TELEMETRY.JsonlWriter(
+        os.path.join(checkpoint_dir, "pole_diagnostics.jsonl"), flush_every=1)
+    pole_log.write({"epoch": 0, "step": 0, **pole_summary(state.params, arm)})
     for epoch in range(epochs):
         for indices in SC.epoch_batches(len(data["train"][1]), BATCH_SIZE,
                                         seed, epoch, drop_last=True):
@@ -404,25 +424,31 @@ def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None,
                 state, rng, xb, yb, train_model, step, steps_per_epoch, epochs)
             if epoch == 0 and step == 0:
                 record_lifecycle(checkpoint_dir, "after_first_actual_training_step")
-            state_finite = _all_finite(state)
-            nonfinite = not (bool(gradients_finite) and state_finite and
-                             bool(jnp.isfinite(loss)) and bool(jnp.isfinite(accuracy)) and
-                             bool(jnp.isfinite(grad_norm)))
+            scalars = STEP_TELEMETRY.host_scalars(
+                loss, accuracy, grad_norm, gradients_finite,
+                state_telemetry(state))
+            nonfinite = STEP_TELEMETRY.is_nonfinite(scalars)
             telemetry = {"arm": SCIENTIFIC_NAMES[arm], "code_identifier": arm,
                          "seed": seed, "epoch": epoch + 1, "step": step,
-                         "loss": float(loss), "accuracy": float(accuracy),
-                         "state_norm": float(jnp.sqrt(sum(
-                             jnp.sum(jnp.abs(v) ** 2) for v in jax.tree_util.tree_leaves(state)
-                             if hasattr(v, "dtype")))),
-                         "gradient_norm": float(grad_norm),
-                         "gradients_finite": bool(gradients_finite),
-                         "state_finite": state_finite, "nonfinite": nonfinite,
-                         "companion_spectral_radius": companion_spectral_radius(state, arm)}
-            with open(os.path.join(checkpoint_dir, "step_metrics.jsonl"), "a") as handle:
-                handle.write(json.dumps(telemetry) + "\n")
+                         "loss": scalars["loss"], "accuracy": scalars["accuracy"],
+                         "state_norm": scalars["state_norm"],
+                         "gradient_norm": scalars["gradient_norm"],
+                         "gradients_finite": scalars["gradients_finite"],
+                         "state_finite": scalars["state_finite"],
+                         "nonfinite": nonfinite,
+                         "companion_spectral_radius": scalars["companion_spectral_radius"]}
+            step_log.write(telemetry)
             if nonfinite:
+                step_log.close()
+                pole_log.write({"epoch": epoch + 1, "step": step,
+                                "at": "numerical_failure",
+                                **pole_summary(state.params, arm)})
+                pole_log.close()
                 raise NumericalTrainingFailure(telemetry)
             step += 1
+        step_log.flush()
+        pole_log.write({"epoch": epoch + 1, "step": step,
+                        **pole_summary(state.params, arm)})
         val = evaluate(state, eval_model, *data["val"])
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(
@@ -438,6 +464,8 @@ def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None,
                     "state": state, "val": val,
                     "checkpoint": checkpoint_path}
     elapsed = time.perf_counter() - start_time
+    step_log.close()
+    pole_log.close()
     return {"scientific_name": SCIENTIFIC_NAMES[arm],
             "code_identifier": arm, "seed": seed,
             "epochs_requested": epochs,
@@ -500,6 +528,11 @@ def arm_summary(rows):
 def run_task(args):
     if args.arm not in RUNNABLE_ARMS or args.seed not in SEEDS:
         raise ValueError(f"invalid task identity: {args.arm}, {args.seed}")
+    # PRODUCTION FLOAT32. With x64 on, init_state draws a different
+    # initialization (jax.random's float64 path) and every computation
+    # changes precision; refuse rather than silently run another protocol.
+    if jax.config.read("jax_enable_x64"):
+        raise RuntimeError("JAX_ENABLE_X64 is on; production training is float32")
     # a caller that never heard of --epochs gets the original protocol
     epochs = getattr(args, "epochs", EPOCHS)
     os.makedirs(args.out, exist_ok=True)
@@ -544,9 +577,9 @@ def production_check(arm, seed, out, batch, state, model, epochs=EPOCHS):
               # every run's artifacts so a result can never be read without
               # knowing how it was computed.
               "scan_implementation": (GENERALIZED_IMPLEMENTATION
-                                      if arm in ("generalized_prospective_s5",
-                                                 "matched_lag_prospective_s5")
-                                      else None),
+                                      if arm in SCAN_ARMS else None),
+              "x64_enabled": bool(jax.config.read("jax_enable_x64")),
+              "initial_poles": pole_summary(state.params, arm),
               "slurm": _execution_identity(),
               "loss": float(loss), "accuracy": float(accuracy),
               "gradient_norm": float(grad_norm),
@@ -611,8 +644,14 @@ def full_path_smoke(arm, seed, data, out, state, train_model,
               "validation_cross_entropy": float(jnp.mean(losses)),
               "checkpoint": checkpoint, "checkpoint_restored": _all_finite(restored),
               "production_check": os.path.join(out, "production_check.json")}
+    # the fused per-step telemetry must reproduce the original eager values
+    # on THIS device, and be cheaper; both are recorded and gated
+    result["telemetry_check"] = STEP_TELEMETRY.measure_overhead(state, arm)
+    result["poles_after_smoke_steps"] = pole_summary(state.params, arm)
     if not result["checkpoint_restored"]:
         raise RuntimeError("smoke checkpoint restoration produced nonfinite state")
+    if not result["telemetry_check"]["values_agree"]:
+        raise RuntimeError(f"fused telemetry disagrees: {result['telemetry_check']}")
     with open(os.path.join(out, "smoke_result.json"), "w") as handle:
         json.dump(result, handle, indent=2)
     return result
