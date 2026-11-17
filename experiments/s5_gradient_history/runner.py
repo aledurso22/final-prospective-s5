@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from functools import partial
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 
@@ -209,11 +210,39 @@ def check_smoke_gate(report, identity):
         raise ValueError("training requires a GPU smoke; CPU checks cannot authorize it")
     if report.get("status") != "SMOKE_PASS" or not report.get("checkpoint_restored"):
         raise ValueError("smoke did not pass checkpoint restoration")
+    if report.get("code_identifier") != ARM or report.get("seed") != identity.get("seed"):
+        raise ValueError("smoke arm or seed does not match requested training")
+    if report.get("scan_implementation") != "history_stationary_block":
+        raise ValueError("smoke did not use the stationary history scan")
+    if report.get("training_steps") != 2:
+        raise ValueError("smoke must complete exactly two training updates")
+    for key, lower, upper in (("validation_accuracy", 0.0, 1.0),
+                               ("validation_cross_entropy", 0.0, math.inf)):
+        value = report.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            raise ValueError(f"smoke {key} must be finite")
+        if not lower <= value <= upper:
+            raise ValueError(f"smoke {key} is outside its valid range")
     if not report.get("telemetry_check", {}).get("values_agree"):
         raise ValueError("smoke telemetry values disagree")
     poles = report.get("poles_after_smoke_steps", {}).get("production_precision", {})
     if poles.get("unstable", 1) or poles.get("nonfinite", 1):
         raise ValueError("smoke produced unstable or nonfinite modes")
+    for key in ("max_radius_production", "max_radius_float64"):
+        value = poles.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"smoke {key} must be finite and nonnegative")
+
+
+def stamp_training_result(path, seed):
+    """Label this research scan without changing the inherited result values."""
+    path = Path(path)
+    report = json.loads(path.read_text())
+    if report.get("code_identifier") != ARM or report.get("seed") != seed:
+        raise ValueError("training result arm or seed does not match history task")
+    report.update(scan_implementation="history_stationary_block", history_alpha=ALPHA)
+    path.write_text(json.dumps(report, indent=2) + "\n")
+    return report
 
 
 def main(argv=None):
@@ -252,6 +281,8 @@ def main(argv=None):
             path.write_text(json.dumps(report, indent=2) + "\n")
             if report["backend"] == "gpu":
                 check_smoke_gate(report, identity)
+        else:
+            stamp_training_result(out / "task_result.json", args.seed)
     except Exception as error:
         (out / "failure.json").write_text(json.dumps({"arm": ARM, "seed": args.seed,
             "error_type": type(error).__name__, "failure": str(error)}, indent=2) + "\n")

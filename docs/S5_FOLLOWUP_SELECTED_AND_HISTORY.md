@@ -187,3 +187,43 @@ JAX_ENABLE_X64=0 JAX_PLATFORMS=cuda \
 
 The eventual pilot uses seeds 301/302 and compares against those same seeds,
 separately from the unchanged seed-303 replication. No accuracy gain is assumed.
+
+## Queued history pilot
+
+`submit_s5_history_pilot.sh` adds only the history pilot; it does not resubmit
+the two follow-up jobs. Run it from the pinned follow-up checkout on the head
+node with `EXPECTED_COMMIT` and `HISTORY_AFTER_JOB` set. The latter is the
+selected-checkpoint audit job, currently 76860. The helper requests two RTX4090
+GPUs, 16 CPUs, 100 GB and six hours on pgi14-gpu1. It waits for that audit job
+to complete successfully. If its final eight-task audit summary already exists,
+the helper verifies that report and its manifest hash instead of relying on a
+possibly expired Slurm job id.
+
+The pilot uses its own node-local checkout. Its output is
+`/Users/durso/s5-runs/s5-history-pilot/job-<id>/`, with external task logs under
+`logs/`, smoke artifacts under `smoke/gradient_history_s5/<seed>/`, and fresh
+training outputs under `gradient_history_s5/<seed>/`. Both seeds share only
+their own smoke/training compilation cache. Preflight checks the full native
+parameter tree and optimizer initialization, in production float32, for both
+seeds. Both full-size GPU smokes must pass before either training begins.
+
+Smoke gates check finite production loss/gradients/state, the exact two smoke
+updates, finite validation metrics, checkpoint restoration, telemetry agreement,
+the correct scan and protocol identity, and initial/post-smoke pole diagnostics.
+A failure preserves the diagnostic outputs and blocks training; batch size,
+precision, dynamics and stabilizers are not changed to make a failed gate pass.
+Finite pole instability arising later during training remains logged under the
+existing protocol, while a nonfinite training step fails the task.
+
+### Selected C301 stability finding
+
+The completed audit reports C301 layer 3, mode 28 at radius
+1.0000356246235906 in float64 and 1.0000356435775757 in production float32.
+This exceeds the recorded 1e-5 boundary tolerance; it is a genuine learned
+instability, not merely a disagreement between precisions. The isolated pole's
+homogeneous amplitude grows by about 1.768 over 16,000 tokens (doubling time
+about 19,457 tokens). This is not the full network's output gain: input/readout
+coupling, other modes, nonlinearities and sequence resets matter. The result
+can remain finite and accurate on the benchmark while lacking asymptotic
+stability. Both selected D checkpoints passed the strict mode check, which
+does not prove that D or the history family is stable throughout training.

@@ -107,8 +107,12 @@ def test_actual_block_poles_finite_update_and_checkpoint(tiny, tmp_path):
 def test_smoke_gate_refuses_wrong_protocol_cpu_or_unstable():
     identity = {"seed": 301, "alpha": .1}
     good = {"protocol_identity": identity, "backend": "gpu", "status": "SMOKE_PASS",
+            "code_identifier": H.ARM, "seed": 301,
+            "scan_implementation": "history_stationary_block", "training_steps": 2,
+            "validation_accuracy": .5, "validation_cross_entropy": .7,
             "checkpoint_restored": True, "telemetry_check": {"values_agree": True},
-            "poles_after_smoke_steps": {"production_precision": {"unstable": 0, "nonfinite": 0}}}
+            "poles_after_smoke_steps": {"production_precision": {"unstable": 0, "nonfinite": 0,
+                "max_radius_production": .999, "max_radius_float64": .999}}}
     H.check_smoke_gate(good, identity)
     with pytest.raises(ValueError, match="seed differs"):
         H.check_smoke_gate(good, {"seed": 302, "alpha": .1})
@@ -118,6 +122,23 @@ def test_smoke_gate_refuses_wrong_protocol_cpu_or_unstable():
         H.check_smoke_gate({**good, "poles_after_smoke_steps": {
             "production_precision": {"unstable": 1, "nonfinite": 0}}}, identity)
 
+    for changes, match in (({"code_identifier": "native_matched_s5"}, "arm or seed"),
+                           ({"seed": 302}, "arm or seed"),
+                           ({"scan_implementation": "factored"}, "stationary history scan"),
+                           ({"training_steps": 1}, "exactly two"),
+                           ({"validation_accuracy": float("nan")}, "must be finite"),
+                           ({"validation_cross_entropy": float("inf")}, "must be finite"),
+                           ({"validation_cross_entropy": -.1}, "valid range"),
+                           ({"validation_accuracy": 1.1}, "valid range")):
+        with pytest.raises(ValueError, match=match):
+            H.check_smoke_gate({**good, **changes}, identity)
+    for key in ("max_radius_production", "max_radius_float64"):
+        for value in (None, float("nan"), float("inf"), -.1):
+            pp = {**good["poles_after_smoke_steps"]["production_precision"], key: value}
+            with pytest.raises(ValueError, match=key):
+                H.check_smoke_gate({**good, "poles_after_smoke_steps": {
+                    "production_precision": pp}}, identity)
+
 
 def test_cli_never_reuses_output(tmp_path):
     out = tmp_path / "keep"
@@ -126,3 +147,27 @@ def test_cli_never_reuses_output(tmp_path):
     with pytest.raises(SystemExit):
         H.main(["--data-cache", str(tmp_path), "--out", str(out), "--seed", "301", "--smoke"])
     assert (out / "artifact").read_text() == "keep"
+
+
+def test_result_scan_metadata_preserves_selection_and_checkpoint(tmp_path):
+    checkpoint = tmp_path / "checkpoint_epoch_14.msgpack"
+    checkpoint.write_bytes(b"frozen trained checkpoint")
+    original = {"code_identifier": H.ARM, "seed": 301, "selected_epoch": 14,
+                "selected_checkpoint": str(checkpoint),
+                "validation": {"accuracy": .875, "cross_entropy": .4, "n": 16},
+                "scan_implementation": None, "epochs_requested": 15}
+    result = tmp_path / "task_result.json"
+    result.write_text(json.dumps(original))
+    before = checkpoint.read_bytes()
+    updated = H.stamp_training_result(result, 301)
+    assert json.loads(result.read_text()) == updated
+    assert updated["scan_implementation"] == "history_stationary_block"
+    assert updated["history_alpha"] == H.ALPHA
+    for key, value in original.items():
+        if key != "scan_implementation":
+            assert updated[key] == value
+    assert checkpoint.read_bytes() == before
+    result_before = result.read_bytes()
+    with pytest.raises(ValueError, match="arm or seed"):
+        H.stamp_training_result(result, 302)
+    assert result.read_bytes() == result_before
