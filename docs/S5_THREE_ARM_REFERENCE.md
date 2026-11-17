@@ -86,8 +86,10 @@ SAMPLE_RATE = 16000
 > **Known deviation, stated rather than hidden.** The file split is *not*
 > speaker-disjoint, unlike the official Speech Commands split. The loader's own
 > docstring says so. Numbers here are therefore not directly comparable to
-> official-split literature. Every arm shares the split, so the *between-arm*
-> comparison is unaffected; the absolute level is optimistic.
+> official-split literature, and the absolute level is optimistic. Every arm
+> shares the split, which controls for data differences, **but it does not make
+> the between-arm comparison immune**: speaker leakage can reward architectures
+> unequally (e.g. one that fits speaker-specific features better).
 
 ### 2.3 Model
 
@@ -394,7 +396,11 @@ Verified on the real initialization (`T = 0.05`, HiPPO Λ, log-uniform `Δ`):
 | 0.025 | 1.0 | 0.9996 | 1.0000 | **0/64** | 0.069767 |
 
 **`M = 50, γ = 0` is still unstable on every mode; `M = 0, γ = 0.1` is stable on
-every mode.** Damping is the variable that matters; mass is not.
+every mode.** In these settings (implemented discretization, `T = 0.05`) damping
+is what decides stability. That does **not** make mass irrelevant in general: it
+shifts the damping required (median minimal `γ` 0.023 at `M = 0`, 0.96 at
+`M = 100`), and the continuous law's zero-drag stability depends on it. See
+`docs/S5_ZERO_DRAG_DIAGNOSTIC.md`.
 
 This matters because `|λ̄|` at initialization is **0.954 – 0.9995, median
 0.9947** — every mode sits immediately next to the `λ̄ = 1` degeneracy, which is
@@ -510,11 +516,13 @@ iterations per step costs ~30 µs of kernel-launch overhead to perform ~0.8 ns o
 useful work. **This is an implementation property, not an instability in the
 equation** — the run stayed finite over the observed prefix.
 
-> Note an asymmetry in the production configuration: the **Zucchet arm uses
-> `scan_companion`** (the parallel 2×2 route) while the **generalized arm
-> defaulted to `scan_companion_sequential`**. Both are exact; they differ in
-> floating-point summation order, and only the generalized arm paid the
-> sequential cost.
+> Provenance: the constructor default is `scan_companion_sequential`, and the
+> **earlier, aborted** three-arm wave ran the generalized arm that way. The
+> **reported** generalized results (`20260921-175242`, `d845663`) ran
+> **`factored`**: `allocation_s5_two_compartment_factored.sh` defaults to it,
+> passes `--implementation`, and refuses to train unless the smoke recorded it;
+> `runner.py` writes `scan_implementation` into every result. The Zucchet arm
+> uses `scan_companion` and produced no number.
 
 ### 5.3 Companion — parallel, but carries a 2×2 per token
 
@@ -594,7 +602,9 @@ Agreement against the sequential oracle in float64, across all 1152 production
 modes: **worst relative error 1.83e-13** — algebraically exact.
 
 Memory: the parallel routes cost 12.885 GiB against 8.342, a 1.54× increase, and
-80.5× turns a 155-hour wave into **1.46 h**. On a 24.0 GiB RTX 3090 that is one
+80.5× per optimizer step. (An earlier "1.46 h" used a guessed 536 steps/epoch
+and is retracted; the **measured** wave ran at ≈17 min/epoch, three seeds on
+three RTX 3090s, **≈4.3 h** for 15 epochs.) On a 24.0 GiB RTX 3090 that is one
 seed per GPU, never two.
 
 > The float64 certification is guarded: `x64_enabled()` refuses to report a
@@ -688,20 +698,22 @@ not toward it. The predicted two-timescale separation is achieved; it costs
 Listed because they are real, not to pre-empt them.
 
 1. **The split is not speaker-disjoint.** Absolute accuracies are optimistic
-   relative to official-split results. Between-arm comparison is unaffected.
+   relative to official-split results, and a shared split does not prove the
+   between-arm comparison is unaffected (§2.2).
 2. **Three seeds.** The paired t is significant only because the effect is
    unusually consistent. A single anomalous seed would change the interval
    substantially.
-3. **Validation, not test.** No test-set number is reported; model selection
-   used the same validation split.
+3. **Selected validation, not test.** Each number is the validation accuracy at
+   the epoch selected on that same split, so it is optimistically biased, and
+   not necessarily equally across arms. No test-set number exists.
 4. **Not capacity-matched** (§2.6). Generalized carries 2× the recurrent state
    and +1152 parameters and still loses. This cuts against the prospective arm,
    so it is not a threat to the negative result — but a *positive* result under
    this configuration would have been confounded.
-5. **The arms use different scans.** Zucchet ran `scan_companion` (parallel),
-   Generalized ran `scan_companion_sequential`. Both exact to 1.83e-13 in
-   float64, but summation order differs; float32 training trajectories are not
-   bitwise comparable across implementations.
+5. **The arms use different scans.** Native uses its first-order scan, the
+   reported Generalized run used `factored`, and Zucchet `scan_companion` (§5.2
+   provenance note). The second-order routes agree to 1.83e-13 in float64, but
+   summation order differs; float32 trajectories are not bitwise comparable.
 6. **Wall clock is not comparable across implementations**, and the benchmark
    measures optimizer steps only — roughly 2× less overhead than a full epoch
    with evaluation.
@@ -729,8 +741,10 @@ untouched. Over eight seeds on an MQAR-with-revision probe:
 * generalized does **not** beat the native baseline — 3/8 seeds, p = 0.86 — and
   is indistinguishable from literal Nesterov (mean difference −0.04).
 
-So in neither architecture and at neither placement does the prospective law
-outperform the model it is added to. What mass and damping buy is a law that
+That experiment has frontend confounds, so it is **not clean corroborating
+evidence** for the S5 result; read it as consistent, not as an independent
+replication. Within those limits, in neither architecture and at neither
+placement did the prospective law outperform the model it is added to. What mass and damping buy is a law that
 runs at all rather than one that diverges at initialization or never leaves
 chance.
 

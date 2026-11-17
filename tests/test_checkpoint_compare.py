@@ -1,0 +1,133 @@
+"""checkpoint_compare: provenance, pairing, refusal, and matched-init identity.
+
+Synthetic run directories laid out exactly as the S5 launchers write them,
+holding the float32 production init as the "trained" checkpoint (so every
+trained/init ratio must be exactly 1), plus one perturbed copy.
+
+    python -m pytest tests/test_checkpoint_compare.py -q
+"""
+
+import json
+import os
+
+import numpy as onp
+import pytest
+from flax import serialization
+from flax.traverse_util import unflatten_dict
+
+from experiments.s5_predictor_corrector import checkpoint_compare as CC
+from experiments.s5_predictor_corrector.production_init import (
+    production_init_flat)
+
+
+def _write_task(root, arm, seed, epoch=15, flat=None, result=True, rid=None):
+    task = os.path.join(root, arm, str(seed))
+    os.makedirs(task, exist_ok=True)
+    flat = production_init_flat(arm, seed) if flat is None else flat
+    state = {"step": 0, "params": unflatten_dict(flat), "opt_state": {},
+             "batch_stats": {}}
+    with open(os.path.join(task, f"checkpoint_epoch_{epoch:02d}.msgpack"), "wb") as fh:
+        fh.write(serialization.msgpack_serialize(state))
+    if result:
+        with open(os.path.join(task, "task_result.json"), "w") as fh:
+            json.dump({"code_identifier": rid or arm, "seed": seed,
+                       "selected_epoch": 11}, fh)
+    with open(os.path.join(root, "run_metadata.txt"), "w") as fh:
+        fh.write("authoritative_commit=abc123\nscan_implementation=factored\n")
+    return task
+
+
+@pytest.fixture(scope="module")
+def runs(tmp_path_factory):
+    base = tmp_path_factory.mktemp("runs")
+    nat = _write_task(str(base / "native_run"), CC.NATIVE, 301)
+    gen = _write_task(str(base / "gen_run"), CC.GENERALIZED, 301)
+    return base, nat, gen
+
+
+def test_matched_init_checkpoints_give_identity(runs, tmp_path):
+    base, nat, gen = runs
+    rep = CC.main(["--native", nat, "--generalized", gen, "--epoch", "15",
+                   "--out", str(tmp_path)])
+    s = rep["seeds"][0]
+    assert s["seed"] == 301 and s["backbone_init_identical_across_arms"]
+    a = s["actual"]
+    for arm, keys in (("native", ("Delta", "decay")),
+                      ("generalized", ("Delta", "T_over_gamma"))):
+        for k in keys:
+            d = a[arm]["trained_over_init"][k]
+            assert d["p0"] == pytest.approx(1) and d["p100"] == pytest.approx(1)
+    assert a["paired_trained"] == a["paired_init"]
+    cf = s["counterfactual_at_generalized_learned_params"]
+    assert cf["A"]["max_abs_diff_vs_production_coefficients"] < 1e-6
+    assert cf["A"]["stable"] == 384                       # 6 layers x 64 modes
+    # matched init really is the training init: T/gamma = 0.05 there
+    assert a["generalized"]["matched_init"]["T_over_gamma"]["p50"] == pytest.approx(0.05, rel=1e-5)
+    prov = rep["inputs"]["native"][0]
+    assert prov["epoch"] == 15 and prov["seed"] == 301
+    assert prov["run_metadata"]["authoritative_commit"] == "abc123"
+    assert len(prov["checkpoint_sha256"]) == 64
+    assert os.path.exists(tmp_path / "checkpoint_compare.json")
+
+
+def test_trained_drift_is_measured_on_effective_poles(tmp_path):
+    flat = dict(production_init_flat(CC.NATIVE, 301))
+    for k in list(flat):
+        if k[-1] == "log_step":
+            flat[k] = flat[k] + onp.float32(onp.log(2.0))   # Delta doubled
+    nat = _write_task(str(tmp_path / "n"), CC.NATIVE, 301, flat=flat)
+    gen = _write_task(str(tmp_path / "g"), CC.GENERALIZED, 301)
+    rep = CC.main(["--native", nat, "--generalized", gen, "--epoch", "15",
+                   "--out", str(tmp_path / "o")])
+    a = rep["seeds"][0]["actual"]
+    assert a["native"]["trained_over_init"]["Delta"]["p50"] == pytest.approx(2, rel=1e-5)
+    # Re(Lambda) is the same for every mode, so decay time halves exactly
+    assert a["native"]["trained_over_init"]["decay"]["p50"] == pytest.approx(0.5, rel=1e-4)
+
+
+def test_selected_epoch_is_read_from_task_result(runs, tmp_path):
+    base, nat, gen = runs
+    with pytest.raises(CC.CheckpointError, match="checkpoint_epoch_11"):
+        CC.main(["--native", nat, "--generalized", gen, "--epoch", "selected",
+                 "--out", str(tmp_path)])
+
+
+def test_unmatched_seeds_fail(runs, tmp_path):
+    base, nat, gen = runs
+    gen302 = _write_task(str(tmp_path / "g"), CC.GENERALIZED, 302,
+                         flat=production_init_flat(CC.GENERALIZED, 301))
+    with pytest.raises(CC.CheckpointError, match="unmatched seeds"):
+        CC.main(["--native", nat, "--generalized", gen302, "--epoch", "15",
+                 "--out", str(tmp_path)])
+
+
+def test_native_checkpoint_passed_as_generalized_fails(tmp_path):
+    fake = _write_task(str(tmp_path / "g"), CC.GENERALIZED, 301,
+                       flat=production_init_flat(CC.NATIVE, 301))
+    nat = _write_task(str(tmp_path / "n"), CC.NATIVE, 301)
+    with pytest.raises(CC.CheckpointError, match="no generalized_"):
+        CC.main(["--native", nat, "--generalized", fake, "--epoch", "15",
+                 "--out", str(tmp_path / "o")])
+
+
+def test_wrong_arm_directory_or_identity_fails(runs, tmp_path):
+    base, nat, gen = runs
+    with pytest.raises(CC.CheckpointError, match="parent directory"):
+        CC.main(["--native", gen, "--generalized", gen, "--epoch", "15",
+                 "--out", str(tmp_path)])
+    bad = _write_task(str(tmp_path / "x"), CC.NATIVE, 301,
+                      rid="zucchet_prospective_s5")
+    with pytest.raises(CC.CheckpointError, match="code_identifier"):
+        CC.main(["--native", bad, "--generalized", gen, "--epoch", "15",
+                 "--out", str(tmp_path)])
+
+
+def test_missing_checkpoint_and_task_result_fail(runs, tmp_path):
+    base, nat, gen = runs
+    with pytest.raises(CC.CheckpointError, match="missing"):
+        CC.main(["--native", nat, "--generalized", gen, "--epoch", "14",
+                 "--out", str(tmp_path)])
+    bare = _write_task(str(tmp_path / "b"), CC.NATIVE, 301, result=False)
+    with pytest.raises(CC.CheckpointError, match="selected_epoch"):
+        CC.main(["--native", bare, "--generalized", gen, "--epoch", "selected",
+                 "--out", str(tmp_path)])

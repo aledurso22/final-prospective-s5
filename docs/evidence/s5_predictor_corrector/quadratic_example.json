@@ -1,0 +1,110 @@
+[
+ {
+  "alpha": 0.0,
+  "theta": 0.0,
+  "beta": 0.01,
+  "rate_old": 0.99,
+  "iters_old": 588,
+  "rate_prediction": 0.99,
+  "iters_prediction": 588
+ },
+ {
+  "alpha": 0.0,
+  "theta": 0.005,
+  "beta": 0.01,
+  "rate_old": 1.0,
+  "iters_old": null,
+  "rate_prediction": 0.9900497487562805,
+  "iters_prediction": 591
+ },
+ {
+  "alpha": 0.5,
+  "theta": 0.0,
+  "beta": 0.01,
+  "rate_old": 0.979574082114798,
+  "iters_old": 287,
+  "rate_prediction": 0.9797893802933453,
+  "iters_prediction": 290
+ },
+ {
+  "alpha": 0.5,
+  "theta": 0.005,
+  "beta": 0.01,
+  "rate_old": 0.9797893802933453,
+  "iters_old": 290,
+  "rate_prediction": 0.9799979164405853,
+  "iters_prediction": 294
+ },
+ {
+  "alpha": 0.8,
+  "theta": 0.0,
+  "beta": 0.01,
+  "rate_old": 0.9270156211871634,
+  "iters_old": 87,
+  "rate_prediction": 0.9343704968844031,
+  "iters_prediction": 93
+ },
+ {
+  "alpha": 0.8,
+  "theta": 0.005,
+  "beta": 0.01,
+  "rate_old": 0.9319493345951493,
+  "iters_old": 90,
+  "rate_prediction": 0.9377862994651988,
+  "iters_prediction": 98
+ },
+ {
+  "alpha": 0.9,
+  "theta": 0.0,
+  "beta": 0.01,
+  "rate_old": 0.948683298050514,
+  "iters_old": 167,
+  "rate_prediction": 0.9439279633531364,
+  "iters_prediction": 115
+ },
+ {
+  "alpha": 0.9,
+  "theta": 0.005,
+  "beta": 0.01,
+  "rate_old": 0.9460443964212251,
+  "iters_old": 123,
+  "rate_prediction": 0.9413022893842341,
+  "iters_prediction": 107
+ },
+ {
+  "alpha": 0.95,
+  "theta": 0.0,
+  "beta": 0.01,
+  "rate_old": 0.9746794344808966,
+  "iters_old": 346,
+  "rate_prediction": 0.9697937925146767,
+  "iters_prediction": 204
+ },
+ {
+  "alpha": 0.95,
+  "theta": 0.005,
+  "beta": 0.01,
+  "rate_old": 0.972111104761179,
+  "iters_old": 231,
+  "rate_prediction": 0.9672383367092103,
+  "iters_prediction": 182
+ },
+ {
+  "alpha": 0.5,
+  "theta": 0.0,
+  "beta": 0.019,
+  "rate_old": 0.9603641626095527,
+  "iters_old": 147,
+  "rate_prediction": 1.6266433155337139,
+  "iters_prediction": null
+ },
+ {
+  "alpha": 0.9,
+  "theta": 0.0,
+  "beta": 0.019,
+  "rate_old": 0.948683298050514,
+  "iters_old": 169,
+  "rate_prediction": 2.096380280172035,
+  "iters_prediction": null
+ }
+]
