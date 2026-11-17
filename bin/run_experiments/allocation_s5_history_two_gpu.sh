@@ -60,7 +60,7 @@ echo "  data: $DATA_CACHE"
 echo "  output: $RUN_ROOT"
 
 if [[ "$DRY_RUN" == 0 ]]; then
-  mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/inventories"
+  mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/inventories" "$RUN_ROOT/memory-profiles"
   JAX_PLATFORMS=cpu "$PY" - "$DATA_CACHE" "$RUN_ROOT/preflight.json" <<'PYEOF'
 import json, sys
 import jax, numpy as np
@@ -120,6 +120,9 @@ start_task() {
   args+=(--out "$task_root")
   if [[ "$DRY_RUN" == 1 ]]; then
     echo "DRY_RUN $stage seed $seed GPU $token cache $cache"
+    if [[ "$stage" == smoke ]]; then
+      echo "  $PY -u -m experiments.s5_gradient_history.memory_profile --seed $seed --out $RUN_ROOT/memory-profiles/$seed.json"
+    fi
     echo "  $PY -u -m experiments.s5_gradient_history.runner ${args[*]}"
     return
   fi
@@ -146,6 +149,16 @@ PYEOF
       --out "$RUN_ROOT/inventories/$stage-$seed.json" --label "pre_jax_$stage-$seed" \
       > "$RUN_ROOT/logs/$stage-$seed-inventory.log" 2>&1 &
     child="$!"; wait "$child"; child=""
+    if [[ "$stage" == smoke ]]; then
+      # Compile abstract full-shape updates before allocating their buffers.
+      # This records CUDA buffer accounting, warms this task's compile cache,
+      # and runs no training/evaluation or dataset access. Actual smoke is
+      # still required: compiler accounting does not capture all live memory.
+      "$PY" -u -m experiments.s5_gradient_history.memory_profile \
+        --seed "$seed" --out "$RUN_ROOT/memory-profiles/$seed.json" \
+        > "$RUN_ROOT/logs/memory-$seed.log" 2>&1 &
+      child="$!"; wait "$child"; child=""
+    fi
     exec "$PY" -u -m experiments.s5_gradient_history.runner "${args[@]}" \
       > "$RUN_ROOT/logs/$stage-$seed.log" 2>&1
   ) &

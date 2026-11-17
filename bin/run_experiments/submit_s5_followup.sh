@@ -11,7 +11,16 @@ SHA="$(git -C "$REPO" rev-parse HEAD)"
 [[ "$SHA" == "$EXPECTED_COMMIT" ]] || { echo "FAIL: checkout differs from EXPECTED_COMMIT" >&2; exit 1; }
 [[ -z "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]] || {
   echo "FAIL: refusing modified submission checkout" >&2; exit 1; }
-for task in seed303 selected-audit; do
+TASKS=(seed303 selected-audit)
+if [[ "$#" -gt 1 ]]; then
+  echo "Usage: $0 [--seed303-only]" >&2; exit 1
+fi
+case "${1:-}" in
+  "") ;;
+  --seed303-only) TASKS=(seed303) ;;
+  *) echo "Usage: $0 [--seed303-only]" >&2; exit 1 ;;
+esac
+for task in "${TASKS[@]}"; do
   if [[ "${DRY_RUN:-0}" == 1 ]]; then
     echo "DRY_RUN: $task on pgi14-gpu1, partition pgi14, 4 RTX4090 GPUs, 16 CPUs, 100G, 4h; commit $SHA"
     continue

@@ -227,3 +227,54 @@ coupling, other modes, nonlinearities and sequence resets matter. The result
 can remain finite and accurate on the benchmark while lacking asymptotic
 stability. Both selected D checkpoints passed the strict mode check, which
 does not prove that D or the history family is stable throughout training.
+
+## History GPU memory failure and exact-adjoint repair
+
+Job 76864 passed native parameter/optimizer matching and both single-GPU
+visibility checks. Both history seeds then failed in the first full-size
+`jit_train_step_observable`: the allocator could not satisfy a 14.60 GiB
+request. This is a GPU allocation failure, not evidence of a nonfinite state
+or a rejection of the proposed dynamics. The requested buffer is not a
+measurement of total peak memory; other allocations were already live.
+
+The default `parallel` implementation now uses a custom reverse-mode rule for
+the same stationary forward scan. For the recurrence
+\(x_t=A x_{t-1}+b u_t\), it retains only \(A,b,u\), recomputes states in the
+backward pass, and evaluates
+\(\lambda_t=g_t+A^\top\lambda_{t+1}\). The transpose is correct for JAX's
+complex cotangent convention; using a conjugate transpose would be wrong.
+Gradients use direct contractions over time rather than a time-indexed stack
+of outer products. The former autodiff implementation remains available as
+`parallel_reference`. The optimized custom VJP targets reverse-mode training;
+use the reference implementation when direct forward-mode JVPs are required.
+
+The forward scan is bit-identical. Complex pullback, shared-parameter batching,
+reverse scans, repeated poles, real/complex mixed inputs and long sequences
+are checked against independent sequential/reference gradients. A complete
+training update also checks loss, gradients, parameters, Adam state and BN
+state under identical dropout randomness and the same whole batch. No
+microbatching, precision change, parameter change, pole clipping or new
+stabilization is introduced.
+
+Matched compile-only CPU evidence at the full production shape reports
+22.3764 GiB for the old reference versus 13.0411 GiB for the new adjoint,
+a 41.7% reduction. The two reports and reproduction commands are under
+`docs/evidence/s5_gradient_history_memory/`. They identify the dirty working
+implementation through exact source hashes and explicitly label CPU compiler
+accounting. A one-layer CPU forward/backward benchmark measured 50.45 ms
+versus 38.10 ms; this is not a GPU throughput estimate.
+
+The history launcher now records `memory-profiles/<seed>.json` on the actual
+GPU before the full-size smoke. Profiling compiles abstract production update
+signatures without running updates or reading data, then exits before the
+smoke process starts. The CUDA report includes both observable and telemetry
+updates. Its compilation cache is shared with that seed's smoke/training.
+Actual smoke success remains required because compiler accounting excludes
+allocator fragmentation, runtime/library buffers and other live allocations.
+
+Seed-303 job 76859 is a separate incident: its four GPU smokes passed and
+training processes launched before the batch job ended with signal 9. The
+available accounting does not establish the kill's cause. Use
+`submit_s5_followup.sh --seed303-only` to retry its unchanged four-arm protocol
+in a new output directory without repeating the completed selected-checkpoint
+audit. The interrupted run remains preserved and is not counted as a result.

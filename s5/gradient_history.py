@@ -119,21 +119,72 @@ def _stationary_scan(A, drive):
     return interleaved
 
 
+@jax.custom_vjp
+def _history_scan_adjoint(A, b, drive):
+    """Same forward scan with a recomputed, explicit linear-recurrence VJP.
+
+    The custom-VJP residuals contain only the scalar input drive and small
+    transition/input blocks. Backward re-evaluates the forward states instead
+    of retaining the recursive scan's automatic-differentiation tape. XLA may
+    still reschedule or reuse buffers; actual memory is checked separately.
+    """
+    return _stationary_scan(A, drive[..., None] * b[None, ...])
+
+
+def _history_scan_adjoint_fwd(A, b, drive):
+    states = _stationary_scan(A, drive[..., None] * b[None, ...])
+    return states, (A, b, drive)
+
+
+def _cotangent_dtype(value, primal):
+    # custom_vjp must also support real inputs to the public scan. The
+    # production constructor uses complex A/b/drive, but a real primal's
+    # cotangent is the real part of this complex-linear pullback.
+    if not jnp.issubdtype(primal.dtype, jnp.complexfloating):
+        value = value.real
+    return value.astype(primal.dtype)
+
+
+def _history_scan_adjoint_bwd(residuals, cotangent):
+    A, b, drive = residuals
+    states = _stationary_scan(A, drive[..., None] * b[None, ...])
+    # JAX represents complex cotangents with a bilinear transpose, not a
+    # Hermitian transpose: lambda_t = g_t + A.T @ lambda_{t+1}.
+    adjoint = _stationary_scan(jnp.swapaxes(A, -1, -2), cotangent[::-1])[::-1]
+    # x_{-1}=0, so no transition contribution from token zero. Contract
+    # directly rather than allocating a (length,modes,3,3) outer-product.
+    grad_A = jnp.einsum("tpi,tpj->pij", adjoint[1:], states[:-1])
+    grad_b = jnp.sum(adjoint * drive[..., None], axis=0)
+    grad_drive = jnp.sum(adjoint * b[None, ...], axis=-1)
+    return tuple(_cotangent_dtype(g, x) for g, x in
+                 ((grad_A, A), (grad_b, b), (grad_drive, drive)))
+
+
+_history_scan_adjoint.defvjp(_history_scan_adjoint_fwd,
+                           _history_scan_adjoint_bwd)
+
+
 def scan_history_blocks(Ad, bd, drive, *, reverse=False, implementation="parallel"):
     """Return all three states for drive shape (length,modes), zero start.
 
     Ad shape (modes,3,3), bd shape (modes,3). The input/output sampling is
     post-update, matching native S5. Reverse direction processes reversed
     inputs from its own zero state and restores the original token order.
+    ``parallel`` has an explicit reverse-mode rule; ``parallel_reference``
+    is the same forward computation with ordinary autodiff, also available
+    when direct forward-mode differentiation is needed.
     """
     sequence = drive[::-1] if reverse else drive
-    inputs = sequence[..., None] * bd[None, ...]
     if implementation == "parallel":
-        states = _stationary_scan(Ad, inputs)
+        states = _history_scan_adjoint(Ad, bd, sequence)
+    elif implementation == "parallel_reference":
+        states = _stationary_scan(Ad, sequence[..., None] * bd[None, ...])
     elif implementation == "associative":
+        inputs = sequence[..., None] * bd[None, ...]
         matrices = jnp.broadcast_to(Ad, (sequence.shape[0],) + Ad.shape)
         _, states = jax.lax.associative_scan(_compose, (matrices, inputs))
     elif implementation == "sequential":
+        inputs = sequence[..., None] * bd[None, ...]
         def body(state, value):
             state = _matvec(Ad, state) + value
             return state, state
@@ -157,8 +208,8 @@ class NormalizedGradientHistoryS5SSM(S5SSM):
             raise ValueError("history_alpha must be finite and nonnegative")
         if self.discretization != "zoh":
             raise ValueError("gradient-history S5 requires ZOH discretization")
-        if self.implementation not in ("parallel", "associative", "sequential"):
-            raise ValueError("gradient-history scan must be parallel, associative or sequential")
+        if self.implementation not in ("parallel", "parallel_reference", "associative", "sequential"):
+            raise ValueError("gradient-history scan must be parallel, parallel_reference, associative or sequential")
         super().setup()
         if self.history_alpha == 0:
             return

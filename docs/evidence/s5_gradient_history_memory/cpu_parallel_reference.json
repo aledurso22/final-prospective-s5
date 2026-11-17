@@ -1,0 +1,63 @@
+{
+  "arm": "gradient_history_s5",
+  "seed_for_shape_construction": 301,
+  "history_scan": "parallel_reference",
+  "backend": "cpu",
+  "devices": [
+    "cpu:0"
+  ],
+  "jax": "0.11.1",
+  "batch_size": 16,
+  "sequence_length": 16000,
+  "layers": 6,
+  "d_model": 96,
+  "ssm_real_size": 128,
+  "x64": false,
+  "training_executed": false,
+  "data_read": false,
+  "git_commit": "2369da7effe956b408a6cb3ea1da1cee5515566d",
+  "git_worktree_dirty": true,
+  "source_sha256": {
+    "s5/gradient_history.py": "fc0d759754b1624855bfa490e8c08f6a863b27e7aa5d50880179eb4dff4fae13",
+    "s5/train_helpers.py": "b9889790d18ff133171aa450a3aac6cb2a1110d8c1606c75324902137684cb99",
+    "s5/layers.py": "87a2c9ff50ff5ab19da5660f756f2c89324513a60f976020206ae54bc76f169e",
+    "experiments/s5_gradient_history/runner.py": "692289005e44e0f950f7456bb8dcd647369654217027116061ccbe5fa76a6b80"
+  },
+  "scope": "Compiler buffer accounting on the named backend; not measured peak GPU use or CPU-to-GPU extrapolation.",
+  "updates": [
+    {
+      "kind": "observable",
+      "compile_seconds": 9.61515779200272,
+      "memory": {
+        "argument_size_in_bytes": 4401928,
+        "output_size_in_bytes": 3379821,
+        "alias_size_in_bytes": 0,
+        "temp_size_in_bytes": 24018719360,
+        "generated_code_size_in_bytes": 0,
+        "host_argument_size_in_bytes": 0,
+        "host_output_size_in_bytes": 0,
+        "host_alias_size_in_bytes": 0,
+        "host_temp_size_in_bytes": 0,
+        "host_generated_code_size_in_bytes": 0,
+        "buffer_accounting_total_bytes": 24026501109
+      }
+    },
+    {
+      "kind": "telemetry",
+      "compile_seconds": 8.728725082997698,
+      "memory": {
+        "argument_size_in_bytes": 4401928,
+        "output_size_in_bytes": 3379797,
+        "alias_size_in_bytes": 0,
+        "temp_size_in_bytes": 24018718976,
+        "generated_code_size_in_bytes": 0,
+        "host_argument_size_in_bytes": 0,
+        "host_output_size_in_bytes": 0,
+        "host_alias_size_in_bytes": 0,
+        "host_temp_size_in_bytes": 0,
+        "host_generated_code_size_in_bytes": 0,
+        "buffer_accounting_total_bytes": 24026500701
+      }
+    }
+  ]
+}

@@ -64,6 +64,10 @@ out = pathlib.Path(a[a.index("--out") + 1])
 if module.endswith("gpu_telemetry"):
     out.write_text("{}")
     sys.exit(0)
+if module.endswith("memory_profile"):
+    if os.environ.get("FAIL_MEMORY_PROFILE"): sys.exit(6)
+    out.write_text(json.dumps({"backend": "gpu", "training_executed": False}))
+    sys.exit(0)
 seed = int(a[a.index("--seed") + 1])
 # This emulates the real history CLI's stronger output refusal. Logs/tmp
 # or telemetry pre-created inside a task directory would break the job.
@@ -105,7 +109,7 @@ else:
                EXPECTED_COMMIT=sha, SLURM_JOB_ID="1234", CUDA_VISIBLE_DEVICES="4,5",
                JAX_ENABLE_X64="0", DRY_RUN="1", STAGE="train")
     for key in ("HISTORY_RUN_ROOT", "FAIL_PREFLIGHT", "FAIL_DEVICE", "BAD_SMOKE",
-                "FAIL_TRAIN", "MISSING_RESULT"):
+                "FAIL_TRAIN", "MISSING_RESULT", "FAIL_MEMORY_PROFILE"):
         env.pop(key, None)
     return repo, scripts / NAME, env
 
@@ -165,11 +169,13 @@ def test_success_and_outside_task_logs(allocation):
     assert json.loads((root / "smoke_gate.json").read_text())["all_passed"]
     assert len(list(root.glob("gradient_history_s5/*/task_result.json"))) == 2
     assert len(list(root.glob("inventories/*.json"))) == 4
+    assert len(list(root.glob("memory-profiles/*.json"))) == 2
     assert (root / "logs/smoke-301.log").exists()
     assert (root / "logs/train-302.log").exists()
 
 
 @pytest.mark.parametrize("env", [{"FAIL_PREFLIGHT": "1"}, {"FAIL_DEVICE": "1"},
+                                  {"FAIL_MEMORY_PROFILE": "1"},
                                   {"FAIL_TRAIN": "302"}, {"MISSING_RESULT": "302"}])
 def test_failed_stage_never_reports_completion(allocation, env):
     r = run(allocation, DRY_RUN="0", **env)
