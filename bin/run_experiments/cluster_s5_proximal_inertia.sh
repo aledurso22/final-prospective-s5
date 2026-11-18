@@ -112,9 +112,15 @@ trap 'exit 143' TERM
 # trained-P audit, CPU only, alongside the GPU workers
 ( export JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
   args=(); for t in "${P_TASKS[@]}"; do args+=(--task "$t"); done
+  # status: PASS (all listed P tasks audited), PARTIAL (audit succeeded, some
+  # listed tasks unfinished/unavailable; reported, not fatal) or FAIL (fatal)
   if "$PY" -u -m experiments.s5_proximal_inertia.block_audit "${args[@]}" --allow-missing \
        --out "$RUN_ROOT/p-audit" > "$RUN_ROOT/logs/p-audit.log" 2>&1; then
-    echo PASS > "$RUN_ROOT/status/p-audit"; else echo FAIL > "$RUN_ROOT/status/p-audit"; fi ) &
+    "$PY" -m experiments.s5_proximal_inertia.job_report p-audit-status \
+      "$RUN_ROOT/p-audit/block_audit.json" > "$RUN_ROOT/status/p-audit" 2>>"$RUN_ROOT/logs/p-audit.log" || true
+  else
+    echo "FAIL block_audit_exit=$?" > "$RUN_ROOT/status/p-audit"
+  fi ) &
 PIDS+=("$!")
 
 worker() {
@@ -148,6 +154,13 @@ for i in 0 1 2 3; do worker "$i" & PIDS+=("$!"); done
 FAILED=0
 for p in "${PIDS[@]}"; do wait "$p" || FAILED=1; done
 PIDS=()
+P_AUDIT_STATUS="$(cat "$RUN_ROOT/status/p-audit" 2>/dev/null || echo "FAIL no_status")"
+case "$P_AUDIT_STATUS" in
+  PASS*) ;;
+  PARTIAL*) echo "NOTE: trained-P audit $P_AUDIT_STATUS (unfinished P tasks listed in $RUN_ROOT/p-audit/summary.txt)" ;;
+  *) echo "FAIL: trained-P audit $P_AUDIT_STATUS; see $RUN_ROOT/logs/p-audit.log" >&2
+     echo "$P_AUDIT_STATUS" > "$RUN_ROOT/status/p-audit"; FAILED=1 ;;
+esac
 
 if [[ "$STAGE" == train ]]; then
   trained=()
@@ -163,25 +176,8 @@ if [[ "$STAGE" == train ]]; then
 fi
 
 echo "==== summary ($RUN_ROOT)"
-"$PY" - "$RUN_ROOT" <<'PY'
-import json, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-for st in sorted((root / "status").iterdir()):
-    print(f"{st.name:40s} {st.read_text().strip()}")
-for arm in ("proximal_inertial_s5", "proximal_inertial_control_s5"):
-    for seed in (301, 302):
-        g = root / "profiles" / f"{arm}-{seed}-gpu.json"
-        r = root / arm / str(seed) / "task_result.json"
-        line = f"{arm:30s} {seed}"
-        if g.exists():
-            gp = json.loads(g.read_text())
-            line += f"  peak {gp['peak_gib']:.2f} GiB  step {gp['steady_step_seconds']['median']:.3f} s"
-        if r.exists():
-            v = json.loads(r.read_text())
-            line += f"  selected epoch {v['selected_epoch']}  val acc {100*v['validation']['accuracy']:.4f}%  CE {v['validation']['cross_entropy']:.4f}"
-        print(line)
-PY
-[[ "$(cat "$RUN_ROOT/status/p-audit" 2>/dev/null)" == PASS ]] || echo "WARNING: trained-P audit did not pass; see $RUN_ROOT/logs/p-audit.log"
+# reporting only: never changes the job outcome; null telemetry prints as n/a
+"$PY" -m experiments.s5_proximal_inertia.job_report summary "$RUN_ROOT" \
+  || echo "WARNING: summary formatting failed; results are in $RUN_ROOT" >&2
 if [[ "$FAILED" != 0 ]]; then echo "INCOMPLETE: see $RUN_ROOT/status and logs" >&2; exit 1; fi
 echo "Completed stage $STAGE: $RUN_ROOT"

@@ -111,8 +111,12 @@ Per layer and mode it reports:
 Checkpoints are hashed before and after the audit.
 
 The cluster job runs it on CPU, alongside the GPU tasks, over P alpha=1 seeds 301–305 and
-alpha=0.1 seeds 301/302. Tasks without a completed result are listed as unavailable, not
-fatal. After training it audits the four new tasks. During training, every epoch writes
+alpha=0.1 seeds 301/302. Its status (`status/p-audit`) is explicit:
+- `PASS audited=N unavailable=0`;
+- `PARTIAL audited=N unavailable=M`: unfinished P tasks are listed in `p-audit/summary.txt`, and this is not fatal;
+- `FAIL ...`: the audit crashed, its report is unreadable, nothing was auditable, or no status was written.
+
+A FAIL marks the whole Slurm job failed (exit 1), even when all training succeeded. After training it audits the four new tasks. During training, every epoch writes
 the arm's own 2x2 pole summary (float32 vs float64, stable/boundary/unstable) to
 `pole_diagnostics.jsonl`, and every step logs the block spectral radius.
 
@@ -136,7 +140,10 @@ It writes only to `/Users/durso/s5-runs/s5-proximal-inertia/job-<job>/`:
 - `inertia-audit/`: trained audit of the new tasks;
 - `status/` and `logs/`.
 
-The log is `/Users/durso/s5-runs/s5-proximal-inertia-<job>.log`. The test split is never read.
+The log is `/Users/durso/s5-runs/s5-proximal-inertia-<job>.log`. It ends with a summary from
+`experiments/s5_proximal_inertia/job_report.py`. That summary is reporting only: missing or null
+telemetry (e.g. `peak_gib=None` when the allocator exposes no statistics) prints as `n/a`,
+and a formatting error cannot change the job's outcome. The test split is never read.
 
 Comparisons to make afterwards, all paired by seed and all using the selected-validation rule:
 - candidate vs control, which isolates the inertial mode, subject to the caveat above;
