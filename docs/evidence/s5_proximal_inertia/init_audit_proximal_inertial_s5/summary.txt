@@ -1,0 +1,3 @@
+arm seed sel_epoch val_acc stage f64_ge1 f32[stable/boundary/unstable] max|z| dom/native_p50 aux_decay_p50 aux_decay_p95 fwd_L90_med
+proximal_inertial_s5 301 None - reconstructed_init 0 384/0/0 0.9994986 1.0087 4.22 91.37 96
+proximal_inertial_s5 302 None - reconstructed_init 0 384/0/0 0.9995082 1.0087 4.01 78.34 100

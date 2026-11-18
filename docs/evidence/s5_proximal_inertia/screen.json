@@ -1,0 +1,232 @@
+{
+  "scope": "NO TRAINING. Float64 analytical proposal evaluated on current reconstructed float32 native CPU initialization; not saved historical epoch-zero or trained checkpoints, not a tested GPU constructor.",
+  "equations": "m*x_ddot+x_dot=-r_mu-tau*r_mu_dot; r_mu=(kappa*x-b)/(1+mu*kappa); tau=alpha/abs(kappa); m=1.5*tau; mu=0.5*tau",
+  "mass_ratio": 1.5,
+  "proximal_ratio": 0.5,
+  "horizon_samples": 16000,
+  "metric_scope": "Per-mode real B/C-coupled finite-window impulse energies. Both directions pooled for summaries. Exact cross-root interference in denominator; no cross-mode interference. Ratios are not additive shares of layer energy. Pole ordering is by decay rate, not a claim of mode identity across parameters.",
+  "limitations": [
+    "Initialization agreement is not historical reconstruction proof.",
+    "Both seeds share the deterministic initial Lambda spectrum; matching decay-ratio summaries are not independent evidence.",
+    "Near-native dominant decay at alpha=0.1 is an initialization result, not a uniform statement for trained kappa approaching the imaginary axis.",
+    "Positive component energy does not establish task-relevant memory or an accuracy gain.",
+    "No assertion is made that this is a mass-only change from calibrated arm C or a literal FOOF optimizer."
+  ],
+  "environment": {
+    "python": "3.14.4",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "packages": {
+      "numpy": "2.5.2",
+      "scipy": "1.18.1",
+      "jax": "0.11.1",
+      "jaxlib": "0.11.1",
+      "flax": "0.12.9"
+    },
+    "git_head": "e2573fc50be25f03052d86ca848ce29ec72c014b",
+    "source_sha256": {
+      "experiments/s5_predictor_corrector/proximal_inertia_screen.py": "3b89c364aa1339c7a881ded5c1274545e87ff6acc66c52826ba0687583a78ac9",
+      "experiments/s5_predictor_corrector/production_init.py": "522ac89c47bce2a5db4666bdb1db6e41452b8ad67f0853fe943039c655d066ee",
+      "experiments/s5_predictor_corrector/checkpoint_compare.py": "9791fc4328b84a978224576bdb2b81f99320f33e1ce892dc4ffdd80cbbf35053",
+      "experiments/s5_three_arm_full/runner.py": "92e40b2c8029ae7690c76487e0605c72ac6964dd10cc4ce554c0632dcbd5c2ec"
+    }
+  },
+  "oracles": {
+    "augmented_expm_ZOH_impulse_max_abs_error": 1.545028520406728e-14,
+    "dense_real_kernel_energy_max_relative_error": 4.0078307212730455e-16,
+    "mass_equals_tau_transfer_cancellation_max_abs_error": 2.0014830212433607e-16
+  },
+  "seeds": [
+    {
+      "seed": 301,
+      "reconstructed_native_full_parameter_sha256": "2307ca550706dee0b2c3c514b959b26631969d07f39cc80ae0d4d52c3a03b098",
+      "layer_names": [
+        "encoder/layers_0/seq",
+        "encoder/layers_1/seq",
+        "encoder/layers_2/seq",
+        "encoder/layers_3/seq",
+        "encoder/layers_4/seq",
+        "encoder/layers_5/seq"
+      ],
+      "variants": [
+        {
+          "alpha": 0.1,
+          "n_complex_channels": 384,
+          "continuous_poles_with_nonnegative_real_part": 0,
+          "max_discrete_radius_float64": 0.999498580279067,
+          "dominant_decay_over_native": {
+            "min": 0.9796311293360209,
+            "p5": 0.9796311293360213,
+            "median": 1.0087004712355667,
+            "p95": 1.0175212931784283,
+            "max": 1.0175212931784283
+          },
+          "secondary_decay_samples": {
+            "min": 0.07879003150452604,
+            "p5": 0.21086080870759527,
+            "median": 4.472937384393586,
+            "p95": 103.85656078355647,
+            "max": 214.51503961396742
+          },
+          "secondary_component_energy_over_exact_mode_energy": {
+            "min": 9.081267071692414e-05,
+            "p5": 0.00017797582599438943,
+            "median": 0.0028389123039661256,
+            "p95": 0.02073248091715749,
+            "max": 0.021250894272621543
+          },
+          "secondary_over_dominant_ZOH_residue_magnitude": {
+            "min": 0.031148934259636805,
+            "p5": 0.0713747287090637,
+            "median": 0.3068975474471315,
+            "p95": 0.3863830448993809,
+            "max": 0.38722978616342396
+          },
+          "tau_samples": {
+            "min": 0.05271711739649031,
+            "p5": 0.14108350757949165,
+            "median": 2.9361769083980382,
+            "p95": 66.59918732050963,
+            "max": 137.56018106637646
+          }
+        },
+        {
+          "alpha": 1.0,
+          "n_complex_channels": 384,
+          "continuous_poles_with_nonnegative_real_part": 0,
+          "max_discrete_radius_float64": 0.9996979428956974,
+          "dominant_decay_over_native": {
+            "min": 0.14808107211947114,
+            "p5": 0.14808107211947116,
+            "median": 0.7258849195445776,
+            "p95": 1.8289670720663624,
+            "max": 1.8289670720663627
+          },
+          "secondary_decay_samples": {
+            "min": 0.6835332694398246,
+            "p5": 1.8292971232578876,
+            "median": 39.96181233381468,
+            "p95": 995.4847335418009,
+            "max": 2056.1671351303776
+          },
+          "secondary_component_energy_over_exact_mode_energy": {
+            "min": 0.014284838018886447,
+            "p5": 0.014941955391945455,
+            "median": 0.02572916937705244,
+            "p95": 0.13289300312728825,
+            "max": 0.13806853479647951
+          },
+          "secondary_over_dominant_ZOH_residue_magnitude": {
+            "min": 0.18227656473222267,
+            "p5": 0.22764363043510358,
+            "median": 0.30804350476579123,
+            "p95": 0.5662373977886562,
+            "max": 0.5662929812335625
+          },
+          "tau_samples": {
+            "min": 0.5271711739649031,
+            "p5": 1.4108350757949164,
+            "median": 29.361769083980377,
+            "p95": 665.9918732050962,
+            "max": 1375.6018106637646
+          }
+        }
+      ]
+    },
+    {
+      "seed": 302,
+      "reconstructed_native_full_parameter_sha256": "8d899f41636b55f3fc9eccbd79493b62d5fc4b75d0ddd4cd10041314b1596751",
+      "layer_names": [
+        "encoder/layers_0/seq",
+        "encoder/layers_1/seq",
+        "encoder/layers_2/seq",
+        "encoder/layers_3/seq",
+        "encoder/layers_4/seq",
+        "encoder/layers_5/seq"
+      ],
+      "variants": [
+        {
+          "alpha": 0.1,
+          "n_complex_channels": 384,
+          "continuous_poles_with_nonnegative_real_part": 0,
+          "max_discrete_radius_float64": 0.9995082369656421,
+          "dominant_decay_over_native": {
+            "min": 0.9796311293360209,
+            "p5": 0.9796311293360211,
+            "median": 1.0087004712355667,
+            "p95": 1.0175212931784283,
+            "max": 1.0175212931784283
+          },
+          "secondary_decay_samples": {
+            "min": 0.07731407927386388,
+            "p5": 0.2064433112731017,
+            "median": 4.042867487965351,
+            "p95": 91.9682128033419,
+            "max": 226.48662240154604
+          },
+          "secondary_component_energy_over_exact_mode_energy": {
+            "min": 8.578692658285713e-05,
+            "p5": 0.00017777743267442976,
+            "median": 0.0028912733420224175,
+            "p95": 0.020723122380638895,
+            "max": 0.02134360725544466
+          },
+          "secondary_over_dominant_ZOH_residue_magnitude": {
+            "min": 0.03076556246887453,
+            "p5": 0.07001444858589781,
+            "median": 0.30835404671308253,
+            "p95": 0.3861702668300608,
+            "max": 0.3872718450085874
+          },
+          "tau_samples": {
+            "min": 0.051729581974436833,
+            "p5": 0.13812783252255864,
+            "median": 2.653815417250364,
+            "p95": 58.97565051077665,
+            "max": 145.23709313218765
+          }
+        },
+        {
+          "alpha": 1.0,
+          "n_complex_channels": 384,
+          "continuous_poles_with_nonnegative_real_part": 0,
+          "max_discrete_radius_float64": 0.9997139066831847,
+          "dominant_decay_over_native": {
+            "min": 0.1480810721194711,
+            "p5": 0.14808107211947116,
+            "median": 0.7258849195445776,
+            "p95": 1.8289670720663624,
+            "max": 1.8289670720663627
+          },
+          "secondary_decay_samples": {
+            "min": 0.6707288266125156,
+            "p5": 1.7909736652457175,
+            "median": 36.115370236478995,
+            "p95": 881.5326747402357,
+            "max": 2170.9170152674947
+          },
+          "secondary_component_energy_over_exact_mode_energy": {
+            "min": 0.014402150640981624,
+            "p5": 0.014981280673397372,
+            "median": 0.025928643618760298,
+            "p95": 0.13298586494005327,
+            "max": 0.14017485515502498
+          },
+          "secondary_over_dominant_ZOH_residue_magnitude": {
+            "min": 0.18139529367980833,
+            "p5": 0.22682375766412005,
+            "median": 0.3085449262864027,
+            "p95": 0.5662234054606387,
+            "max": 0.5662957380856789
+          },
+          "tau_samples": {
+            "min": 0.5172958197443683,
+            "p5": 1.3812783252255865,
+            "median": 26.53815417250364,
+            "p95": 589.7565051077664,
+            "max": 1452.3709313218765
+          }
+        }
+      ]
+    }
+  ]
+}
