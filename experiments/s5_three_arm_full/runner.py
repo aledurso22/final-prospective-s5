@@ -396,24 +396,41 @@ def bind_process_gpu(out):
 
 
 def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None,
-              epochs=EPOCHS):
+              epochs=EPOCHS, *, start_epoch=0, previous_best=None):
+    """Train through ``epochs``; a resume keeps the original total horizon.
+
+    ``start_epoch`` is the count of completed epochs, never a new schedule
+    length. The separate history resume entry point validates/restores the
+    full state and reconstructs ``previous_best`` before using this hook.
+    Existing callers retain the original loop, records and result fields.
+    """
+    if not isinstance(start_epoch, int) or not 0 <= start_epoch < epochs:
+        raise ValueError("start_epoch must be a completed epoch below epochs")
+    if start_epoch and (state is None or previous_best is None):
+        raise ValueError("resume requires full state and previous selection")
+    if not start_epoch and previous_best is not None:
+        raise ValueError("previous selection requires a resumed epoch")
     if state is None:
         state = init_state(arm, seed)
     if train_model is None:
         train_model = model_for(arm, True)
     eval_model = model_for(arm, False)
-    step = 0
-    best = None
+    best = None if previous_best is None else dict(previous_best)
     start_time = time.perf_counter()
     steps_per_epoch = len(data["train"][1]) // BATCH_SIZE
+    step = start_epoch * steps_per_epoch
+    if start_epoch and int(state.step) != step:
+        raise ValueError("restored state step disagrees with completed epochs")
     # fused telemetry: identical per-step fields, one device round trip
     state_telemetry = STEP_TELEMETRY.make_state_telemetry(arm)
     step_log = STEP_TELEMETRY.JsonlWriter(
         os.path.join(checkpoint_dir, "step_metrics.jsonl"))
     pole_log = STEP_TELEMETRY.JsonlWriter(
         os.path.join(checkpoint_dir, "pole_diagnostics.jsonl"), flush_every=1)
-    pole_log.write({"epoch": 0, "step": 0, **pole_summary(state.params, arm)})
-    for epoch in range(epochs):
+    pole_log.write({"epoch": start_epoch, "step": step,
+                    **({"at": "resume"} if start_epoch else {}),
+                    **pole_summary(state.params, arm)})
+    for epoch in range(start_epoch, epochs):
         for indices in SC.epoch_batches(len(data["train"][1]), BATCH_SIZE,
                                         seed, epoch, drop_last=True):
             xb, yb = batch_arrays(*data["train"], indices)
@@ -474,7 +491,7 @@ def train_arm(arm, seed, data, checkpoint_dir, state=None, train_model=None,
             "parameter_count": parameter_count(state.params),
             "recurrent_state": recurrent_state_size(arm),
             "training_seconds": elapsed,
-            "examples_per_second": epochs * len(data["train"][1]) / elapsed}
+            "examples_per_second": (epochs - start_epoch) * len(data["train"][1]) / elapsed}
 
 
 def paired_summary(rows):
