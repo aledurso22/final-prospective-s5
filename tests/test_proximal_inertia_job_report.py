@@ -33,8 +33,8 @@ def _run_root(tmp_path, peak):
 
 def test_summary_tolerates_missing_allocator_telemetry(tmp_path):
     text = JR.summary(_run_root(tmp_path, None))
-    assert text.count("peak n/a GiB  step n/a s") == 4
-    assert text.count("val acc 97.0000%") == 4          # training results still reported
+    assert text.count("peak n/a GiB  step n/a s") == 2 * len(JR.ARMS)
+    assert text.count("val acc 97.0000%") == 2 * len(JR.ARMS)         # training results still reported
     text = JR.summary(_run_root(tmp_path / "b", 3.25))
     assert "peak 3.25 GiB  step 0.500 s" in text
 

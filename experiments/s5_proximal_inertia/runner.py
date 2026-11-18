@@ -2,6 +2,8 @@
 
     proximal_inertial_s5          m = 1.5 tau  (releases the inertial mode)
     proximal_inertial_control_s5  m = tau      (exactly first-order proximal flow)
+    proximal_inertial_nolead_s5   m = 1.5 tau, input lead sigma = 0 (ablation of
+                                  proximal_inertial_s5: only the input column changes)
 
 Both use tau = 0.1/|kappa|, mu = tau/2, kappa = -Lambda*Delta, and the native
 S5 parameters, readout, outer optimizer, batch 16, 15 epochs, split and
@@ -31,24 +33,29 @@ from s5 import proximal_inertia as PI
 
 #: arm -> mass_ratio; everything else is shared and fixed
 ARMS = {"proximal_inertial_s5": PI.MASS_RATIO,
-        "proximal_inertial_control_s5": PI.CONTROL_MASS_RATIO}
+        "proximal_inertial_control_s5": PI.CONTROL_MASS_RATIO,
+        "proximal_inertial_nolead_s5": PI.MASS_RATIO}
+#: arm -> sigma, the coefficient of the explicit input derivative. sigma=1 is
+#: the original model (and its original code path); only the ablation changes it.
+INPUT_LEAD = {"proximal_inertial_s5": 1.0, "proximal_inertial_control_s5": 1.0,
+              "proximal_inertial_nolead_s5": 0.0}
 ALPHA, PROXIMAL_RATIO = PI.ALPHA, PI.PROXIMAL_RATIO
 RECURRENCE = "unfiltered proximal inertial NLA; derivative-free (s, w) coordinates; exact physical-input ZOH"
 
 
-def transitions(params, mass_ratio):
-    return jnp.concatenate([PI.proximal_inertia_zoh(k, ALPHA, mass_ratio, PROXIMAL_RATIO)[0]
+def transitions(params, mass_ratio, input_lead=1.0):
+    return jnp.concatenate([PI.proximal_inertia_zoh(k, ALPHA, mass_ratio, PROXIMAL_RATIO, input_lead)[0]
                             for _, k in H._kappas(params)], axis=0)
 
 
-def reference_blocks(kappa, mass_ratio, alpha=ALPHA, proximal_ratio=PROXIMAL_RATIO):
+def reference_blocks(kappa, mass_ratio, alpha=ALPHA, proximal_ratio=PROXIMAL_RATIO, input_lead=1.0):
     """Float64 SciPy (Ad, bd, continuous A) for one mode, written independently."""
     tau = alpha / abs(kappa)
     mu, m = proximal_ratio * tau, mass_ratio * tau
     d = 1 + mu * kappa
     A = np.array([[-tau * kappa / (m * d), 1 / m],
                   [(tau / m - 1) * kappa / d, -1 / m]], np.complex128)
-    g = np.array([tau / m, 1 - tau / m], np.complex128) / d
+    g = np.array([input_lead * tau / m, 1 - input_lead * tau / m], np.complex128) / d
     aug = np.zeros((3, 3), np.complex128)
     aug[:2, :2], aug[:2, 2] = A, g
     E = expm(aug)
@@ -56,18 +63,18 @@ def reference_blocks(kappa, mass_ratio, alpha=ALPHA, proximal_ratio=PROXIMAL_RAT
 
 
 def pole_summary(params, arm):
-    mass_ratio = ARMS[arm]
+    mass_ratio, lead = ARMS[arm], INPUT_LEAD[arm]
     host = jax.device_get(params)
     host64 = jax.tree_util.tree_map(lambda x: np.asarray(x, np.float64), host)
     kappas = np.concatenate([k for _, k in H._kappas(host64, np)])
-    mats32 = np.asarray(jax.device_get(transitions(params, mass_ratio)))
+    mats32 = np.asarray(jax.device_get(transitions(params, mass_ratio, lead)))
     poles32 = np.linalg.eigvals(mats32.astype(np.complex128))
     radius32 = np.max(np.abs(poles32), axis=-1)
     radius_solver = np.max(np.abs(np.asarray(jax.device_get(
         jnp.linalg.eigvals(jnp.asarray(mats32))))), axis=-1)
     radius64, cont, dom, aux = [], [], [], []
     for k in kappas:
-        Ad, _, A = reference_blocks(k, mass_ratio)
+        Ad, _, A = reference_blocks(k, mass_ratio, input_lead=lead)
         z = np.linalg.eigvals(Ad)
         z = z[np.argsort(-abs(z))]
         radius64.append(abs(z[0])); dom.append(abs(z[0])); aux.append(abs(z[1]))
@@ -81,7 +88,7 @@ def pole_summary(params, arm):
         dom_ratio = np.log(native) / np.log(dom)
         aux_decay = -1 / np.log(aux)
     return {"arm": arm, "n_modes": int(len(kappas)), "history_alpha": ALPHA,
-            "mass_ratio": mass_ratio, "proximal_ratio": PROXIMAL_RATIO,
+            "mass_ratio": mass_ratio, "proximal_ratio": PROXIMAL_RATIO, "input_lead": lead,
             "scan_implementation": "history_stationary_block", "block_width": PI.WIDTH,
             "radius_semantics": "actual exact-ZOH 2x2 (s, w) transition; inherited per-step key is companion_spectral_radius",
             "stable": int(np.sum(finite & (radius64 < 1))),
@@ -113,14 +120,14 @@ def _check_arm(arm):
 def configured(arm):
     """Scope every patch to this process; restore old arms and defaults."""
     _check_arm(arm)
-    mass_ratio = ARMS[arm]
+    mass_ratio, lead = ARMS[arm], INPUT_LEAD[arm]
     old = {key: getattr(H, key) for key in (
         "ARM", "ALPHA", "NormalizedGradientHistoryS5SSM", "production_transitions",
         "history_pole_summary", "protocol_identity", "registered_history")}
 
     def identity(data_cache, seed):
         result = old["protocol_identity"](data_cache, seed)
-        result.update(mass_ratio=mass_ratio, proximal_ratio=PROXIMAL_RATIO,
+        result.update(mass_ratio=mass_ratio, proximal_ratio=PROXIMAL_RATIO, input_lead=lead,
                       block_width=PI.WIDTH, horizon_normalization="magnitude",
                       recurrence=RECURRENCE, outer_optimizer="unchanged")
         return result
@@ -142,12 +149,12 @@ def configured(arm):
             R.recurrent_state_size = size
             R.SCIENTIFIC_NAMES = {**R.SCIENTIFIC_NAMES, arm:
                 f"proximal inertial S5; alpha={ALPHA}, mass_ratio={mass_ratio}, "
-                f"proximal_ratio={PROXIMAL_RATIO}; exact ZOH"}
+                f"proximal_ratio={PROXIMAL_RATIO}, input_lead={lead}; exact ZOH"}
             R.ARM_CONFIGS = {**R.ARM_CONFIGS, arm: {
                 "shared": R.SHARED_CONFIG, "recurrence_constructor": "ProximalInertialS5SSM",
                 "extra_parameters": (), "state_dimension": 2 * R.SSM_SIZE_BASE,
                 "history_alpha": ALPHA, "mass_ratio": mass_ratio,
-                "proximal_ratio": PROXIMAL_RATIO}}
+                "proximal_ratio": PROXIMAL_RATIO, "input_lead": lead}}
             try:
                 yield
             finally:
@@ -155,8 +162,8 @@ def configured(arm):
 
     H.ARM, H.ALPHA = arm, ALPHA
     H.NormalizedGradientHistoryS5SSM = partial(PI.ProximalInertialS5SSM, mass_ratio=mass_ratio,
-                                              proximal_ratio=PROXIMAL_RATIO)
-    H.production_transitions = lambda params: transitions(params, mass_ratio)
+                                              proximal_ratio=PROXIMAL_RATIO, input_lead=lead)
+    H.production_transitions = lambda params: transitions(params, mass_ratio, lead)
     H.history_pole_summary = lambda params: pole_summary(params, arm)
     H.protocol_identity = identity
     H.registered_history = registered
@@ -183,7 +190,8 @@ def memory_profile(arm, seed, out):
         finally:
             MP.ARMS = old_arms
     root = Path(__file__).resolve().parents[2]
-    result.update(mass_ratio=ARMS[arm], proximal_ratio=PROXIMAL_RATIO, history_alpha=ALPHA)
+    result.update(mass_ratio=ARMS[arm], proximal_ratio=PROXIMAL_RATIO, history_alpha=ALPHA,
+                  input_lead=INPUT_LEAD[arm])
     for rel in SOURCES:
         result["source_sha256"][rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -221,7 +229,8 @@ def main(argv=None):
         if path.exists():
             result = json.loads(path.read_text())
             result.update(history_alpha=ALPHA, mass_ratio=ARMS[args.arm],
-                          proximal_ratio=PROXIMAL_RATIO, block_width=PI.WIDTH,
+                          proximal_ratio=PROXIMAL_RATIO, input_lead=INPUT_LEAD[args.arm],
+                          block_width=PI.WIDTH,
                           recurrence=RECURRENCE, outer_optimizer="unchanged")
             path.write_text(json.dumps(result, indent=2) + "\n")
 

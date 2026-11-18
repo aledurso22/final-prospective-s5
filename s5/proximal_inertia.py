@@ -37,6 +37,19 @@ Properties verified in tests/test_proximal_inertia.py:
 
 Readout, conjugate symmetry, bidirectional zero starts and the D skip are the
 native S5 ones; the position s is read out, never w.
+
+INPUT-LEAD ABLATION (``input_lead`` = sigma). Expanding tau d/dt r_mu separates
+the explicit input derivative:
+
+    m s'' + s' = -r_mu - tau kappa/d s' + sigma tau/d b'.
+
+sigma=1 is the model above (and runs the ORIGINAL code path unchanged);
+sigma=0 removes only the prospective input lead. With
+w_sigma = m s' + tau kappa s/d - sigma tau b/d the generator A is unchanged and
+only the input column changes: g_sigma = [sigma tau/m, 1 - sigma tau/m]/d.
+Input jumps then satisfy m Delta(s') = sigma tau Delta(b)/d. The transfer is
+(1 + sigma tau p)/[(1+mu kappa)(m p^2+p) + kappa(1+tau p)]: same poles and DC
+gain, different residues, and sigma=0 adds tau to the continuous DC delay.
 """
 
 import math
@@ -52,7 +65,10 @@ ALPHA, PROXIMAL_RATIO, MASS_RATIO, CONTROL_MASS_RATIO = 0.1, 0.5, 1.5, 1.0
 WIDTH = 2
 
 
-def _check(alpha, mass_ratio, proximal_ratio):
+def _check(alpha, mass_ratio, proximal_ratio, input_lead=1.0):
+    if isinstance(input_lead, bool) or not isinstance(input_lead, (int, float)) \
+            or not math.isfinite(input_lead):
+        raise ValueError("input_lead must be a finite static number")
     if not math.isfinite(alpha) or alpha <= 0:
         raise ValueError("alpha must be finite and positive")
     if not math.isfinite(mass_ratio) or mass_ratio <= 0:
@@ -61,10 +77,11 @@ def _check(alpha, mass_ratio, proximal_ratio):
         raise ValueError("proximal_ratio must be finite and nonnegative")
 
 
-def inertia_generator(kappa, tau, mu, m):
-    """Continuous (A, g) for state (s, w); g multiplies the scalar drive b.
+def inertia_generator(kappa, tau, mu, m, input_lead=1.0):
+    """Continuous (A, g) for state (s, w_sigma); g multiplies the scalar drive b.
 
     Arrays broadcast over modes. tau and m must be positive, mu >= 0.
+    input_lead (sigma) is static; sigma == 1 evaluates the original expression.
     """
     kappa, tau, mu, m = jnp.broadcast_arrays(kappa, tau, mu, m)
     dtype = jnp.result_type(kappa, jnp.complex64)
@@ -74,7 +91,11 @@ def inertia_generator(kappa, tau, mu, m):
     ratio = tau / m
     A = jnp.stack((jnp.stack((-ratio * k, 1 / m), -1),
                    jnp.stack(((ratio - 1) * k, -1 / m), -1)), -2)
-    g = jnp.stack((ratio / d, (1 - ratio) / d), -1)
+    if input_lead == 1:      # the original model, the original arithmetic
+        g = jnp.stack((ratio / d, (1 - ratio) / d), -1)
+    else:
+        lead = input_lead * ratio
+        g = jnp.stack((lead / d, (1 - lead) / d), -1)
     return A, g
 
 
@@ -89,11 +110,11 @@ def augmented_zoh(A, g):
 
 
 def proximal_inertia_zoh(kappa, alpha=ALPHA, mass_ratio=MASS_RATIO,
-                         proximal_ratio=PROXIMAL_RATIO):
+                         proximal_ratio=PROXIMAL_RATIO, input_lead=1.0):
     """(Ad, bd, tau) per mode; bd multiplies the physical drive b."""
-    _check(alpha, mass_ratio, proximal_ratio)
+    _check(alpha, mass_ratio, proximal_ratio, input_lead)
     tau = jnp.asarray(alpha, kappa.real.dtype) / jnp.abs(kappa)
-    A, g = inertia_generator(kappa, tau, proximal_ratio * tau, mass_ratio * tau)
+    A, g = inertia_generator(kappa, tau, proximal_ratio * tau, mass_ratio * tau, input_lead)
     Ad, bd = augmented_zoh(A, g)
     return Ad, bd, tau
 
@@ -200,10 +221,11 @@ class ProximalInertialS5SSM(S5SSM):
     history_alpha: float = ALPHA
     mass_ratio: float = MASS_RATIO
     proximal_ratio: float = PROXIMAL_RATIO
+    input_lead: float = 1.0
     implementation: str = "parallel"
 
     def setup(self):
-        _check(self.history_alpha, self.mass_ratio, self.proximal_ratio)
+        _check(self.history_alpha, self.mass_ratio, self.proximal_ratio, self.input_lead)
         if self.discretization != "zoh":
             raise ValueError("proximal inertial S5 requires ZOH discretization")
         if self.implementation not in SCANS:
@@ -212,7 +234,7 @@ class ProximalInertialS5SSM(S5SSM):
         step = self.step_rescale * jnp.exp(self.log_step[:, 0])
         kappa = -self.Lambda * step
         self.inertia_Ad, self.inertia_bd, self.inertia_tau = proximal_inertia_zoh(
-            kappa, self.history_alpha, self.mass_ratio, self.proximal_ratio)
+            kappa, self.history_alpha, self.mass_ratio, self.proximal_ratio, self.input_lead)
         self.inertia_B = step[:, None] * (self.B[..., 0] + 1j * self.B[..., 1])
 
     def __call__(self, input_sequence):

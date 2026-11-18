@@ -49,14 +49,16 @@ def main(argv=None):
             start = time.perf_counter()
             state, loss, acc, gnorm, finite = R.train_one_batch_observable(
                 state, jax.random.PRNGKey(i), x, y, model, i, steps_per_epoch, 15)
-            loss = float(jax.block_until_ready(loss))
+            state, loss = jax.block_until_ready((state, loss))   # synchronized step
+            loss = float(loss)
             times.append(time.perf_counter() - start)
             losses.append(loss)
             if not (math.isfinite(loss) and bool(finite)):
                 raise SystemExit(f"FAIL: nonfinite update at step {i}")
     stats = jax.devices()[0].memory_stats() or {}
     steady = times[2:] if len(times) > 2 else times[1:]
-    report = {"arm": args.arm, "mass_ratio": PIR.ARMS[args.arm], "backend": jax.default_backend(),
+    report = {"arm": args.arm, "mass_ratio": PIR.ARMS[args.arm],
+              "input_lead": PIR.INPUT_LEAD[args.arm], "backend": jax.default_backend(),
               "device": str(jax.devices()[0]), "batch_size": R.BATCH_SIZE,
               "sequence_length": R.SEQ_LEN, "layers": R.N_LAYERS, "steps": args.steps,
               "first_step_seconds_including_compile": times[0],

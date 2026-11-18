@@ -40,7 +40,9 @@ from experiments.s5_predictor_corrector import selected_checkpoint_audit as SA
 from experiments.s5_predictor_corrector.memory_poles import summarize_poles
 
 P_ARM = "proximal_history_s5"
-PI_ARMS = ("proximal_inertial_s5", "proximal_inertial_control_s5")
+PI_ARMS = ("proximal_inertial_s5", "proximal_inertial_control_s5", "proximal_inertial_nolead_s5")
+#: arms trained before the input-lead coefficient existed use the original sigma=1
+LEGACY_LEAD = {"proximal_inertial_s5": 1.0, "proximal_inertial_control_s5": 1.0}
 ARMS = (P_ARM,) + PI_ARMS
 TOL = 1e-5
 COND_LIMIT = 1e8
@@ -71,6 +73,7 @@ def resolve_task(task, expected_epochs=15):
               "proximal_ratio": result.get("proximal_ratio")}
     if arm in PI_ARMS:
         config["mass_ratio"] = result.get("mass_ratio")
+        config["input_lead"] = result.get("input_lead", LEGACY_LEAD.get(arm))
     for k, v in config.items():
         if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
             raise AuditError(f"{result_path}: missing or invalid {k}")
@@ -122,11 +125,12 @@ def blocks64(arm, config, kappa):
             ke = k / d
             A = np.array([[0, 1 / h, 0], [-2 * ke, -1 / h, 1 / h], [ke, 0, -1 / h]], complex)
             g = np.array([0, 2, -1], complex) / d
-        else:              # (s, w = m s' + tau r_mu)
+        else:              # (s, w_sigma = m s' + tau kappa s/d - sigma tau b/d)
             tau, mu, m = h, pr * h, config["mass_ratio"] * h
+            sig = config.get("input_lead", 1.0)
             d = 1 + mu * k
             A = np.array([[-tau * k / (m * d), 1 / m], [(tau / m - 1) * k / d, -1 / m]], complex)
-            g = np.array([tau / m, 1 - tau / m], complex) / d
+            g = np.array([sig * tau / m, 1 - sig * tau / m], complex) / d
         n = len(g)
         aug = np.zeros((n + 1, n + 1), complex)
         aug[:n, :n], aug[:n, n] = A, g
@@ -149,7 +153,7 @@ def blocks32(arm, config, group):
     else:
         from s5.proximal_inertia import proximal_inertia_zoh
         Ad, bd, _ = proximal_inertia_zoh(kappa, config["history_alpha"], config["mass_ratio"],
-                                         config["proximal_ratio"])
+                                         config["proximal_ratio"], config.get("input_lead", 1.0))
     return np.asarray(jax.device_get(Ad)), np.asarray(jax.device_get(bd))
 
 
@@ -187,7 +191,7 @@ def components(Ad, bd, horizon):
 
 # ------------------------------------------------------------ analysis ---
 
-def analyze_layer(arm, config, name, group, horizon):
+def analyze_layer(arm, config, name, group, horizon, counterfactual=None):
     kappa, delta = kappa64(group)
     Ad, bd = blocks64(arm, config, kappa)
     Ad32, bd32 = blocks32(arm, config, group)
@@ -209,6 +213,42 @@ def analyze_layer(arm, config, name, group, horizon):
             "max_abs_radius_difference": float(np.nanmax(abs(r32 - r64))),
             "max_abs_block_difference": float(np.nanmax(abs(Ad32 - Ad))),
             "boundary_tol": TOL}
+    B = delta[:, None] * CC._complex(np.asarray(group["B"]))       # physical drive Delta B~
+    h_native = native[None, :] ** np.arange(horizon)[:, None] * ((1 - native) / kappa)[None, :]
+    lag = np.unique(np.r_[0, np.rint(np.geomspace(1, horizon - 1, 96)).astype(int), horizon - 1])
+    resp, h = responses(Ad, bd, B, group, horizon, lag, h_native)
+    out = {"layer": name, "n_modes": int(len(kappa)), "block_width": int(bd.shape[1]),
+           "poles_float64": poles["summary"], "production_precision": prod,
+           "dominant_decay_over_native_counterfactual": CC.q(dom_ratio),
+           "auxiliary_decay_samples": [CC.q(poles["decay_samples"][:, j])
+                                       for j in range(1, bd.shape[1])],
+           "poles": {"float64": z64, "float32": z32}, "kappa": kappa,
+           "lag_samples": lag, **resp}
+    if counterfactual is not None:
+        cfg = {**config, "input_lead": counterfactual}
+        Ad_c, bd_c = blocks64(arm, cfg, kappa)
+        resp_c, h_c = responses(Ad_c, bd_c, B, group, horizon, lag, None)
+        diff = {}
+        for direction, key in (("forward", "C1"), ("backward", "C2")):
+            C = CC._complex(np.asarray(group[key]))
+            e_diff, _, _, _ = MI._real_kernel_energy(h_c - h, B, C)
+            base = resp["directions"][direction]["summary"]["total_energy"]
+            diff[direction] = {
+                "difference_kernel_energy": float(np.sum(e_diff)),
+                "relative_difference_energy": (float(np.sum(e_diff)) / base) if base else None,
+                "counterfactual_over_actual_total_energy":
+                    (resp_c["directions"][direction]["summary"]["total_energy"] / base) if base else None}
+        out["input_lead_counterfactual"] = {
+            "input_lead": counterfactual, "actual_input_lead": config.get("input_lead", 1.0),
+            "label": "untrained counterfactual: same frozen weights, only the input column changed",
+            "max_abs_Ad_difference": float(np.max(abs(Ad_c - Ad))),
+            "max_abs_bd_difference": float(np.max(abs(bd_c - bd))),
+            "kernel_difference": diff, **resp_c}
+    return out
+
+
+def responses(Ad, bd, B, group, horizon, lag, h_native):
+    """B/C-coupled kernel energies, per-pole components, residues and interference."""
     h = impulse(Ad, bd, horizon)
     z, res, cond, waves = components(Ad, bd, horizon)
     resolved = np.isfinite(cond) & (cond < COND_LIMIT)
@@ -217,46 +257,41 @@ def analyze_layer(arm, config, name, group, horizon):
         scale = np.max(abs(h), axis=0)
         recon_err = np.where(resolved, np.max(abs(recon - h), axis=0) / np.maximum(scale, 1e-300), np.nan)
         rel_res = abs(res) / np.sum(abs(res), axis=1, keepdims=True)
-    B = delta[:, None] * CC._complex(np.asarray(group["B"]))       # physical drive Delta B~
-    h_native = native[None, :] ** np.arange(horizon)[:, None] * ((1 - native) / kappa)[None, :]
-    lag = np.unique(np.r_[0, np.rint(np.geomspace(1, horizon - 1, 96)).astype(int), horizon - 1])
-    out = {"layer": name, "n_modes": int(len(kappa)), "block_width": int(bd.shape[1]),
-           "poles_float64": poles["summary"], "production_precision": prod,
-           "dominant_decay_over_native_counterfactual": CC.q(dom_ratio),
-           "auxiliary_decay_samples": [CC.q(poles["decay_samples"][:, j])
-                                       for j in range(1, bd.shape[1])],
-           "auxiliary_relative_residue": [CC.q(np.where(resolved, rel_res[:, j], np.nan))
+    out = {"auxiliary_relative_residue": [CC.q(np.where(resolved, rel_res[:, j], np.nan))
                                           for j in range(1, bd.shape[1])],
            "eigenvector_condition": CC.q(cond),
            "components_withheld_ill_conditioned": int((~resolved).sum()),
            "component_reconstruction_relative_error_max": float(np.nanmax(recon_err)) if resolved.any() else None,
-           "poles": {"float64": z64, "float32": z32}, "kappa": kappa,
-           "lag_samples": lag, "directions": {}}
+           "directions": {}}
     for direction, key in (("forward", "C1"), ("backward", "C2")):
         C = CC._complex(np.asarray(group[key]))
         energy, audit, G, Hm = MI._real_kernel_energy(h, B, C)
-        total, mode_audit = MI._mode_energy(h, G, Hm)
-        comp = []
+        total, _ = MI._mode_energy(h, G, Hm)
+        comp, energies = [], []
         for j, wave in enumerate(waves):
             ce, _ = MI._mode_energy(np.where(resolved[None, :], wave, 0), G, Hm)
             ce = np.where(resolved, ce, np.nan)
+            energies.append(ce)
             with np.errstate(divide="ignore", invalid="ignore"):
                 comp.append({"pole_rank": j, "fraction_of_mode_energy": CC.q(ce / total)})
-        nat_energy, _, _, _ = MI._real_kernel_energy(h_native, B, C)
-        out["directions"][direction] = {
-            "curve_energy": energy[lag], "summary": MI._energy_summary(energy),
-            "numerical_audit": audit, "mode_energy": CC.q(total),
-            "components": comp,
-            "native_counterfactual_summary": MI._energy_summary(nat_energy)}
-    return out
+        with np.errstate(divide="ignore", invalid="ignore"):
+            interference = (total - np.sum(energies, axis=0)) / total
+        d = {"curve_energy": energy[lag], "summary": MI._energy_summary(energy),
+             "numerical_audit": audit, "mode_energy": CC.q(total), "components": comp,
+             "cross_pole_interference_fraction_of_mode_energy": CC.q(interference)}
+        if h_native is not None:
+            nat_energy, _, _, _ = MI._real_kernel_energy(h_native, B, C)
+            d["native_counterfactual_summary"] = MI._energy_summary(nat_energy)
+        out["directions"][direction] = d
+    return out, h
 
 
-def stage_report(arm, config, params, horizon, where):
+def stage_report(arm, config, params, horizon, where, counterfactual=None):
     groups = CC.layer_groups(params, "", where)
     for name, g in groups.items():
         if any(np.asarray(v).dtype != np.float32 for v in g.values()):
             raise AuditError(f"{where}/{name}: expected saved float32 parameters")
-    layers = [analyze_layer(arm, config, n, g, horizon) for n, g in sorted(groups.items())]
+    layers = [analyze_layer(arm, config, n, g, horizon, counterfactual) for n, g in sorted(groups.items())]
     agg = {k: sum(l["production_precision"][k] for l in layers)
            for k in ("stable", "numerical_boundary", "unstable", "nonfinite")}
     return {"layers": layers, "production_precision_totals": agg,
@@ -269,16 +304,16 @@ def init_params(seed):
     return unflatten_dict(production_init_flat("native_matched_s5", seed))
 
 
-def analyze_task(row, horizon):
+def analyze_task(row, horizon, counterfactual=None):
     out = {k: v for k, v in row.items() if k not in ("checkpoints",)}
     out["stages"] = {"reconstructed_init": stage_report(
-        row["arm"], row["config"], init_params(row["seed"]), horizon, "init")}
+        row["arm"], row["config"], init_params(row["seed"]), horizon, "init", counterfactual)}
     for e, path in sorted(row["checkpoints"].items()):
         label = "selected" if e == row["selected_epoch"] else "final"
         if e == row["selected_epoch"] and len(row["checkpoints"]) == 1:
             label = "selected_and_final"
         out["stages"][label] = stage_report(row["arm"], row["config"], CC.read_params(path),
-                                            horizon, path)
+                                            horizon, path, counterfactual)
         out["stages"][label]["epoch"] = e
     return out
 
@@ -298,9 +333,17 @@ def digest(tasks):
                              for l in L])
             ge1 = sum(l["poles_float64"]["poles_ge_one"] for l in L)
             acc = "-" if t["validation"] is None else f"{t['validation']['accuracy']:.4f}"
-            lines.append(f"{t['arm']} {t['seed']} {t['selected_epoch']} {acc} "
-                         f"{stage} {ge1} {pp['stable']}/{pp['numerical_boundary']}/{pp['unstable']} "
-                         f"{s['max_radius_float64']:.7f} {dom:.4f} {a50:.2f} {a95:.2f} {l90:.0f}")
+            res = np.median([(l["auxiliary_relative_residue"][0] or {}).get("p50", np.nan) for l in L])
+            line = (f"{t['arm']} {t['seed']} {t['selected_epoch']} {acc} "
+                    f"{stage} {ge1} {pp['stable']}/{pp['numerical_boundary']}/{pp['unstable']} "
+                    f"{s['max_radius_float64']:.7f} {dom:.4f} {a50:.2f} {a95:.2f} {l90:.0f} aux_res_p50={res:.3g}")
+            if "input_lead_counterfactual" in L[0]:
+                cf = [l["input_lead_counterfactual"] for l in L]
+                rd = np.median([c["kernel_difference"]["forward"]["relative_difference_energy"] or np.nan for c in cf])
+                cres = np.median([(c["auxiliary_relative_residue"][0] or {}).get("p50", np.nan) for c in cf])
+                line += (f" | sigma={cf[0]['input_lead']}: fwd_kernel_rel_diff_energy_med={rd:.3g}"
+                         f" aux_res_p50={cres:.3g}")
+            lines.append(line)
     return "\n".join(lines) + "\n"
 
 
@@ -310,6 +353,9 @@ def main(argv=None):
     ap.add_argument("--init-arm", choices=PI_ARMS,
                     help="audit only the reconstructed production initialization of this arm")
     ap.add_argument("--init-seed", type=int, action="append", default=[])
+    ap.add_argument("--compare-input-lead", type=float,
+                    help="also analyse each stage with this input lead sigma at the same frozen "
+                         "weights (proximal inertial arms only; an untrained counterfactual)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--horizon", type=int, default=16000)
     ap.add_argument("--allow-missing", action="store_true",
@@ -323,11 +369,12 @@ def main(argv=None):
     rows, unavailable = [], []
     if args.init_arm:
         from s5 import proximal_inertia as PIM
-        mass = PIM.MASS_RATIO if args.init_arm == PI_ARMS[0] else PIM.CONTROL_MASS_RATIO
+        from experiments.s5_proximal_inertia import runner as PIR
         for seed in args.init_seed or [301]:
             rows.append({"task": None, "arm": args.init_arm, "seed": seed,
                          "config": {"history_alpha": PIM.ALPHA, "proximal_ratio": PIM.PROXIMAL_RATIO,
-                                    "mass_ratio": mass},
+                                    "mass_ratio": PIR.ARMS[args.init_arm],
+                                    "input_lead": PIR.INPUT_LEAD[args.init_arm]},
                          "selected_epoch": None, "validation": None, "checkpoints": {}, "sha256": {}})
     for t in args.task:
         try:
@@ -338,7 +385,9 @@ def main(argv=None):
             unavailable.append({"task": str(t), "reason": str(exc)})
     if not rows:
         raise AuditError(f"no auditable task: {unavailable}")
-    tasks = [analyze_task(r, args.horizon) for r in rows]
+    if args.compare_input_lead is not None and any(r["arm"] not in PI_ARMS for r in rows):
+        raise AuditError("--compare-input-lead applies only to proximal inertial arms")
+    tasks = [analyze_task(r, args.horizon, args.compare_input_lead) for r in rows]
     changed = [r["task"] for r in rows
                if {e: CC._sha256(p) for e, p in r["checkpoints"].items()} != r["sha256"]]
     if changed:
