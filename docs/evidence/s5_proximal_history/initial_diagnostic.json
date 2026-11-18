@@ -1,0 +1,232 @@
+{
+  "scope": "No training; independent float64 equations on float32 production initialization.",
+  "seeds": [
+    301,
+    302
+  ],
+  "stability_grid": {
+    "0.0": {
+      "n": 12000,
+      "nonnegative_max_real": 5167,
+      "max_real": 52.61290803258771
+    },
+    "0.49": {
+      "n": 12000,
+      "nonnegative_max_real": 2,
+      "max_real": 0.006251512884238806
+    },
+    "0.5": {
+      "n": 12000,
+      "nonnegative_max_real": 0,
+      "max_real": -4.1280024862366294e-07
+    },
+    "1.0": {
+      "n": 12000,
+      "nonnegative_max_real": 0,
+      "max_real": -6.041870050993727e-07
+    }
+  },
+  "positive_real_identity_error": 5.551115123125783e-16,
+  "below_bound_boundary_example": {
+    "ratio": 0.49,
+    "q": [
+      0.00999900009999001,
+      -0.9999000099990001
+    ],
+    "polynomial_error": 1.249000902703301e-16
+  },
+  "initialized_modes": [
+    {
+      "seed": 301,
+      "variant": "history",
+      "alpha": 0.1,
+      "proximal_ratio": 0.0,
+      "n_modes": 384,
+      "continuous_unstable": 0,
+      "discrete_unstable": 0,
+      "max_radius": 0.9994890718993186,
+      "slow_decay_time_vs_native": {
+        "min": 0.9778049850337278,
+        "p5": 0.9778049850337308,
+        "median": 0.9910984011180056,
+        "p95": 1.0548304151135697,
+        "max": 1.054830415113603
+      },
+      "continuous_dc_gain_relative_error_max": 4.485690159396981e-16,
+      "near_native_resonance_gain_vs_native_peak": {
+        "min": 1.0004553597121746,
+        "p5": 1.000455359712175,
+        "median": 1.014390352832371,
+        "p95": 1.0861728897438843,
+        "max": 1.0861728897438858
+      },
+      "horizon_tokens": {
+        "min": 0.05271711739649029,
+        "p5": 0.14108350757949162,
+        "median": 2.936176908398038,
+        "p95": 66.59918732050963,
+        "max": 137.56018106637646
+      }
+    },
+    {
+      "seed": 301,
+      "variant": "proximal_matched",
+      "alpha": 0.1,
+      "proximal_ratio": 0.5,
+      "n_modes": 384,
+      "continuous_unstable": 0,
+      "discrete_unstable": 0,
+      "max_radius": 0.9994500969119843,
+      "slow_decay_time_vs_native": {
+        "min": 0.3355170288573915,
+        "p5": 0.33551702885739565,
+        "median": 0.7413250468846995,
+        "p95": 1.0045115731430174,
+        "max": 1.0045115731430194
+      },
+      "continuous_dc_gain_relative_error_max": 5.552720301589161e-16,
+      "near_native_resonance_gain_vs_native_peak": {
+        "min": 0.34471939681942637,
+        "p5": 0.34471939681942654,
+        "median": 0.7553182388062937,
+        "p95": 0.9746048552794425,
+        "max": 0.9746048552794426
+      },
+      "horizon_tokens": {
+        "min": 0.05271711739649029,
+        "p5": 0.14108350757949162,
+        "median": 2.936176908398038,
+        "p95": 66.59918732050963,
+        "max": 137.56018106637646
+      }
+    },
+    {
+      "seed": 301,
+      "variant": "proximal_main",
+      "alpha": 1.0,
+      "proximal_ratio": 0.5,
+      "n_modes": 384,
+      "continuous_unstable": 0,
+      "discrete_unstable": 0,
+      "max_radius": 0.9997010803514637,
+      "slow_decay_time_vs_native": {
+        "min": 1.5081914680270085,
+        "p5": 1.5081914680271034,
+        "median": 1.5458546132324238,
+        "p95": 1.848166780686179,
+        "max": 1.84816678068618
+      },
+      "continuous_dc_gain_relative_error_max": 5.633792878888151e-16,
+      "near_native_resonance_gain_vs_native_peak": {
+        "min": 1.0430232264105201,
+        "p5": 1.0430232264105206,
+        "median": 1.1146071180511035,
+        "p95": 1.1179033917027352,
+        "max": 1.1179033917027437
+      },
+      "horizon_tokens": {
+        "min": 0.5271711739649029,
+        "p5": 1.4108350757949162,
+        "median": 29.361769083980374,
+        "p95": 665.9918732050962,
+        "max": 1375.6018106637646
+      }
+    },
+    {
+      "seed": 302,
+      "variant": "history",
+      "alpha": 0.1,
+      "proximal_ratio": 0.0,
+      "n_modes": 384,
+      "continuous_unstable": 0,
+      "discrete_unstable": 0,
+      "max_radius": 0.9995157060101892,
+      "slow_decay_time_vs_native": {
+        "min": 0.9778049850337273,
+        "p5": 0.9778049850337314,
+        "median": 0.9910984011180062,
+        "p95": 1.0548304151135734,
+        "max": 1.0548304151136059
+      },
+      "continuous_dc_gain_relative_error_max": 4.451864022824606e-16,
+      "near_native_resonance_gain_vs_native_peak": {
+        "min": 1.0004553597121748,
+        "p5": 1.000455359712175,
+        "median": 1.014390352832371,
+        "p95": 1.0861728897438847,
+        "max": 1.0861728897438856
+      },
+      "horizon_tokens": {
+        "min": 0.05172958197443683,
+        "p5": 0.13812783252255864,
+        "median": 2.653815417250364,
+        "p95": 58.975650510776646,
+        "max": 145.23709313218762
+      }
+    },
+    {
+      "seed": 302,
+      "variant": "proximal_matched",
+      "alpha": 0.1,
+      "proximal_ratio": 0.5,
+      "n_modes": 384,
+      "continuous_unstable": 0,
+      "discrete_unstable": 0,
+      "max_radius": 0.9994791560041048,
+      "slow_decay_time_vs_native": {
+        "min": 0.33551702885739115,
+        "p5": 0.3355170288573943,
+        "median": 0.7413250468847015,
+        "p95": 1.0045115731430176,
+        "max": 1.0045115731430203
+      },
+      "continuous_dc_gain_relative_error_max": 6.663485963559939e-16,
+      "near_native_resonance_gain_vs_native_peak": {
+        "min": 0.34471939681942626,
+        "p5": 0.34471939681942654,
+        "median": 0.7553182388062938,
+        "p95": 0.9746048552794424,
+        "max": 0.9746048552794426
+      },
+      "horizon_tokens": {
+        "min": 0.05172958197443683,
+        "p5": 0.13812783252255864,
+        "median": 2.653815417250364,
+        "p95": 58.975650510776646,
+        "max": 145.23709313218762
+      }
+    },
+    {
+      "seed": 302,
+      "variant": "proximal_main",
+      "alpha": 1.0,
+      "proximal_ratio": 0.5,
+      "n_modes": 384,
+      "continuous_unstable": 0,
+      "discrete_unstable": 0,
+      "max_radius": 0.9997168783471733,
+      "slow_decay_time_vs_native": {
+        "min": 1.5081914680270374,
+        "p5": 1.5081914680271147,
+        "median": 1.5458546132324251,
+        "p95": 1.8481667806861788,
+        "max": 1.8481667806861806
+      },
+      "continuous_dc_gain_relative_error_max": 6.6968975097155e-16,
+      "near_native_resonance_gain_vs_native_peak": {
+        "min": 1.04302322641052,
+        "p5": 1.0430232264105206,
+        "median": 1.114607118051103,
+        "p95": 1.1179033917027368,
+        "max": 1.117903391702744
+      },
+      "horizon_tokens": {
+        "min": 0.5172958197443682,
+        "p5": 1.3812783252255862,
+        "median": 26.53815417250364,
+        "p95": 589.7565051077664,
+        "max": 1452.3709313218762
+      }
+    }
+  ]
+}
