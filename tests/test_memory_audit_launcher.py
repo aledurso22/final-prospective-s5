@@ -57,6 +57,7 @@ def test_cpu_submission_isolated_pinned_and_all_nine_inputs(fixture):
     assert 'JAX_PLATFORMS=cpu JAX_ENABLE_X64=0 CUDA_VISIBLE_DEVICES=""' in payload
     assert 'OUT="$RUNS/s5-memory-audit/job-${SLURM_JOB_ID}"' in payload
     assert '--all-epochs --out "$OUT"' in payload
+    assert '--plots none --all-epochs --out "$OUT"' in payload
     for arm in ("native_matched_s5", "generalized_prospective_s5", "calibrated_old_s5"):
         for seed in (301, 302):
             assert f'"$BASE/{arm}/{seed}"' in payload
@@ -66,6 +67,27 @@ def test_cpu_submission_isolated_pinned_and_all_nine_inputs(fixture):
     assert "S5_THREE_ARM_DATA" not in payload
     assert "git push" not in payload
     subprocess.run(["bash", "-n", str(out / "payload")], check=True)
+
+
+def test_plot_dependencies_are_isolated_and_ready_before_analysis(fixture):
+    result = run(fixture)
+    assert result.returncode == 0, result.stderr
+    payload = (fixture[2] / "payload").read_text()
+    assert 'PLOT_ENV="/Local/durso/s5-memory-audit-plots-${SLURM_JOB_ID}"' in payload
+    assert '[[ ! -e "$PLOT_ENV" ]]' in payload
+    assert '"$PROSPECTIVE_VENV/bin/python" -m venv "$PLOT_ENV"' in payload
+    assert 'PLOT_PYTHON="$PLOT_ENV/bin/python"' in payload
+    install = '"$PLOT_PYTHON" -m pip --disable-pip-version-check install --no-input matplotlib scipy'
+    assert install in payload
+    assert '"$PROSPECTIVE_VENV/bin/python" -m pip' not in payload
+    assert "--system-site-packages" not in payload
+    numerical = '"$PROSPECTIVE_VENV/bin/python" -u -m experiments.s5_predictor_corrector.memory_poles'
+    assert payload.index(install) < payload.index(numerical)
+    assert "exec " + numerical not in payload
+    render = '"$PLOT_PYTHON" -u -m experiments.s5_predictor_corrector.memory_pole_render'
+    assert payload.index(numerical) < payload.index(render)
+    assert '--report "$OUT/memory_poles.json" --out "$OUT/figures"' in payload
+    assert '"$OUT/plot-requirements-frozen.txt"' in payload
 
 
 def test_dry_run_submits_nothing(fixture):

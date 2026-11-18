@@ -47,10 +47,25 @@ The helper submits a CPU-only job on `pgi14-gpu1`, partition `pgi14`, requesting
 
 Each job creates its own checkout `/Local/durso/s5-memory-audit-<jobid>` and writes a new `/Users/durso/s5-runs/s5-memory-audit/job-<jobid>` directory. The main log is `/Users/durso/s5-runs/s5-memory-audit-<jobid>.log`. Neither the active training checkout nor its output directory is used for writes. Source hashes are checked by the analysis. An existing output directory is refused. The submission helper does not push code or launch any training.
 
-Primary products are `memory_poles.json`, `poles.csv`, `summary.txt`, and PNG/PDF per-seed layer figures, plus the all-epoch analysis when requested. The result is ready for interpretation only after successful completion; smoke tests and synthetic fixtures cannot establish the trained models' memory spectra.
+Primary numerical products are `memory_poles.json`, `poles.csv`, `summary.txt` and the all-epoch analyses. The launcher renders PNG/PDF figures under `figures/` after numerical analysis succeeds. Synthetic fixtures cannot establish the trained models' memory spectra.
 
 `--all-epochs` writes `checkpoint_analyses/<arm>/<seed>/epoch_NN.json` for all 135 source checkpoints, plus `epoch_summaries.json` and `epoch_summaries.csv`. Every source checkpoint is hashed before and after the analysis. `memory_poles.json` is written only after the complete audit succeeds. A partial output directory does not establish successful completion.
+
+### Plot dependency recovery
+
+Cluster job 76959 at `bde7119` failed on missing Matplotlib after selected-checkpoint calculations, before writing numerical reports or processing the complete epoch history. The retry checks plotting imports first. If needed it creates `/Local/durso/s5-memory-audit-plots-<jobid>` and installs Matplotlib/SciPy there, without installing into or upgrading the shared training environment. Plot package versions are recorded in `plot-requirements-frozen.txt`. Package installation needs network access; any installation failure occurs before expensive checkpoint work.
+
+The numerical command now saves JSON/CSV/summary before rendering. Its `--plots auto` mode continues without Matplotlib, `--plots required` refuses missing imports before analysis, and `--plots none` skips plotting. The cluster launcher uses `none` deliberately, then runs the independent renderer. Accordingly `plot_status.json` says `skipped`, while `figures/render_status.json` records successful separate rendering. If plotting subsequently fails, numerical results remain available.
+
+Figures can be regenerated from `memory_poles.json` alone, without JAX, checkpoints or datasets, using a Python environment with NumPy, SciPy and Matplotlib:
+
+```bash
+python -m experiments.s5_predictor_corrector.memory_pole_render \
+  --report /path/to/memory_poles.json --out /path/to/new-figures
+```
 
 ## Local validation
 
 50 focused tests pass: known complex poles, zero/unit/growing/repeated roots, per-pole exclusions, actual N/A/C coefficient routing, explicit dense-kernel energy oracles, input/readout cancellations, component interference, synthetic complete-history selection/provenance, source mutation detection, plotting and CPU-only submission. A separate local check analysed all six production-width layers from the actual float32 initializer for N/A/C seed 301 over 16,000 lags. These checks validate the implementation; trained-checkpoint measurements still require the cluster run.
+
+The dependency fix adds regressions for missing plotting imports, early refusal, numerical-report preservation after rendering errors, isolated plotting setup, and standalone rendering from saved JSON with imports of training modules explicitly forbidden.

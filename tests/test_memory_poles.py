@@ -287,3 +287,95 @@ def test_all_epochs_detects_unselected_checkpoint_mutation_during_audit(tmp_path
     with pytest.raises((M.SA.AuditError, M.CC.CheckpointError), match="changed"):
         M.main(args)
     assert not (out / "memory_poles.json").exists()
+
+
+def test_plot_preflight_handles_missing_dependency_before_analysis(monkeypatch):
+    import importlib
+
+    real_import = importlib.import_module
+    attempts = []
+
+    def missing_matplotlib(name, *args, **kwargs):
+        if name.startswith("matplotlib"):
+            attempts.append(name)
+            raise ModuleNotFoundError("No module named 'matplotlib'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", missing_matplotlib)
+    assert M.plot_preflight("auto")["status"] == "unavailable"
+    with pytest.raises(M.SA.AuditError, match="[Mm]atplotlib"):
+        M.plot_preflight("required")
+    # Invalid source paths must never be inspected when required plotting is
+    # unavailable: fail before initialization and checkpoint processing.
+    with pytest.raises(M.SA.AuditError, match="[Mm]atplotlib"):
+        M.main(["--native", "/absent/native/301", "--original", "/absent/original/301",
+                "--calibrated", "/absent/calibrated/301", "--out", "/absent/out",
+                "--plots", "required"])
+    n = len(attempts)
+    assert M.plot_preflight("none")["status"] == "skipped"
+    assert len(attempts) == n
+
+
+def test_missing_optional_plotting_preserves_complete_numeric_audit(tmp_path, monkeypatch):
+    from experiments.s5_predictor_corrector import production_init as PI
+    from experiments.s5_predictor_corrector import memory_pole_plots as plots
+    from experiments.s5_predictor_corrector import memory_impulses as impulses
+    roots, inputs = make_inputs(tmp_path)
+    before = snapshot(roots)
+    monkeypatch.setattr(PI, "production_init_flat", lambda arm, seed: params(arm))
+    preflight = []
+
+    def unavailable(mode):
+        preflight.append(mode)
+        return {"status": "unavailable", "reason": "No module named 'matplotlib'"}
+
+    def must_not_plot(*args, **kwargs):
+        pytest.fail("optional renderer called despite missing dependency")
+
+    monkeypatch.setattr(M, "plot_preflight", unavailable)
+    monkeypatch.setattr(plots, "plot_report", must_not_plot)
+    monkeypatch.setattr(impulses, "plot_impulse_report", must_not_plot)
+    out = tmp_path / "numeric_only"
+    args = []
+    for label, directories in zip(("native", "original", "calibrated"), inputs):
+        args += ["--" + label, *map(str, directories)]
+    args += ["--out", str(out), "--expected-epochs", "3", "--all-epochs",
+             "--impulse-horizon", "32", "--plots", "auto"]
+    M.main(args)
+    assert preflight == ["auto"]
+    assert before == snapshot(roots)
+    saved = json.loads((out / "memory_poles.json").read_text())
+    assert len(saved["all_epoch_checkpoints"]) == 27
+    assert (out / "poles.csv").is_file()
+    assert (out / "epoch_summaries.csv").is_file()
+    assert (out / "summary.txt").is_file()
+    assert json.loads((out / "plot_status.json").read_text())["status"] == "unavailable"
+
+
+def test_rendering_failure_does_not_discard_numeric_outputs(tmp_path, monkeypatch):
+    from experiments.s5_predictor_corrector import production_init as PI
+    from experiments.s5_predictor_corrector import memory_pole_plots as plots
+    roots, inputs = make_inputs(tmp_path)
+    before = snapshot(roots)
+    monkeypatch.setattr(PI, "production_init_flat", lambda arm, seed: params(arm))
+    monkeypatch.setattr(M, "plot_preflight", lambda mode: {"status": "ready", "reason": "test"})
+    out = tmp_path / "plot_failure"
+
+    def failed_plot(report, directory):
+        assert directory == out
+        assert (out / "memory_poles.json").is_file()
+        assert (out / "poles.csv").is_file()
+        assert (out / "summary.txt").is_file()
+        raise RuntimeError("synthetic renderer failure")
+
+    monkeypatch.setattr(plots, "plot_report", failed_plot)
+    args = []
+    for label, directories in zip(("native", "original", "calibrated"), inputs):
+        args += ["--" + label, *map(str, directories)]
+    args += ["--out", str(out), "--expected-epochs", "3", "--impulse-horizon", "32"]
+    with pytest.raises(RuntimeError, match="synthetic renderer failure"):
+        M.main(args)
+    assert before == snapshot(roots)
+    saved = json.loads((out / "memory_poles.json").read_text())
+    assert len(saved["tasks"]) == 9
+    assert json.loads((out / "plot_status.json").read_text())["status"] == "failed"

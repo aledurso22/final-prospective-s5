@@ -16,6 +16,8 @@ if [[ "$DRY_RUN" == 1 ]]; then
   echo "DRY_RUN: CPU-only checkpoint audit on pgi14-gpu1, partition pgi14; 4 CPUs, 24G, 2h; no GPUs"
   echo "DRY_RUN: commit $SHA; N/A/C x seeds301/302/303; selected checkpoints, reconstructed init, all15 saved epochs"
   echo "DRY_RUN: fresh per-job clone/output; no training, dataset access or test evaluation"
+  echo "DRY_RUN: plotting checked before analysis; install missing plotting packages only in a new isolated environment"
+  echo "DRY_RUN: numerical reports saved before separate rendering; shared training environment is not modified"
   exit 0
 fi
 # A caller's SBATCH GPU defaults must not turn this into a GPU allocation.
@@ -51,7 +53,24 @@ OUT="$RUNS/s5-memory-audit/job-${SLURM_JOB_ID}"
 [[ ! -e "$OUT" ]] || { echo "FAIL: output already exists" >&2; exit 1; }
 echo "CPU memory audit: commit $S5_MEMORY_AUDIT_COMMIT; job $SLURM_JOB_ID"
 echo "Output: $OUT"
-exec "$PROSPECTIVE_VENV/bin/python" -u -m experiments.s5_predictor_corrector.memory_poles \
+# Check dependencies BEFORE numerical work. Missing plotting packages go in a
+# separate per-job environment; pip never modifies the shared training venv.
+PLOT_PYTHON="$PROSPECTIVE_VENV/bin/python"
+PLOT_IMPORTS='from matplotlib.backends.backend_agg import FigureCanvasAgg; from matplotlib.figure import Figure; import scipy'
+if "$PLOT_PYTHON" -c "$PLOT_IMPORTS" > "$MPLCONFIGDIR/dependency-check.log" 2>&1; then
+  echo "Plotting imports passed in the existing environment."
+else
+  PLOT_ENV="/Local/durso/s5-memory-audit-plots-${SLURM_JOB_ID}"
+  [[ ! -e "$PLOT_ENV" ]] || { echo "FAIL: isolated plotting environment already exists" >&2; exit 1; }
+  echo "Preparing isolated plotting environment: $PLOT_ENV"
+  "$PROSPECTIVE_VENV/bin/python" -m venv "$PLOT_ENV"
+  PLOT_PYTHON="$PLOT_ENV/bin/python"
+  "$PLOT_PYTHON" -m pip --disable-pip-version-check install --no-input matplotlib scipy
+  "$PLOT_PYTHON" -c "$PLOT_IMPORTS"
+fi
+"$PLOT_PYTHON" -m pip --disable-pip-version-check freeze > "$MPLCONFIGDIR/plot-requirements-frozen.txt"
+echo "Plotting dependencies ready; starting numerical checkpoint analysis."
+"$PROSPECTIVE_VENV/bin/python" -u -m experiments.s5_predictor_corrector.memory_poles \
   --native \
     "$BASE/native_matched_s5/301" \
     "$BASE/native_matched_s5/302" \
@@ -64,5 +83,10 @@ exec "$PROSPECTIVE_VENV/bin/python" -u -m experiments.s5_predictor_corrector.mem
     "$BASE/calibrated_old_s5/301" \
     "$BASE/calibrated_old_s5/302" \
     "$THIRD/calibrated_old_s5/303" \
-  --all-epochs --out "$OUT"
+  --plots none --all-epochs --out "$OUT"
+cp "$MPLCONFIGDIR/plot-requirements-frozen.txt" "$OUT/plot-requirements-frozen.txt"
+echo "Numerical reports saved. Rendering figures from the saved JSON."
+"$PLOT_PYTHON" -u -m experiments.s5_predictor_corrector.memory_pole_render \
+  --report "$OUT/memory_poles.json" --out "$OUT/figures"
+echo "Completed checkpoint audit and figure rendering: $OUT"
 S5_MEMORY_AUDIT_JOB

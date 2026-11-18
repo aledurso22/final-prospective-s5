@@ -5,6 +5,7 @@ an internal e-folding timescale, not a measurement of task-relevant memory.
 """
 import argparse
 import csv
+import importlib
 import json
 from pathlib import Path
 import sys
@@ -18,6 +19,21 @@ ARMS = SA.ARMS[:3]
 LABELS = dict(zip(ARMS, ("N", "A", "C")))
 STAGES = ("reconstructed_init", "trained")
 TOL = 1e-5
+
+
+def plot_preflight(mode):
+    """Check optional plotting dependencies before expensive checkpoint work."""
+    if mode == "none":
+        return {"status": "skipped", "reason": "--plots none"}
+    try:
+        importlib.import_module("matplotlib.backends.backend_agg")
+        importlib.import_module("matplotlib.figure")
+    except ImportError as exc:
+        reason = f"Plotting dependency unavailable: {exc}"
+        if mode == "required":
+            raise SA.AuditError(reason + "; install Matplotlib or use --plots auto/none") from exc
+        return {"status": "unavailable", "reason": reason}
+    return {"status": "ready", "reason": "plotting imports succeeded"}
 
 
 def summarize_poles(roots, radius=None):
@@ -299,9 +315,13 @@ def main(argv=None):
     ap.add_argument("--expected-epochs", type=int, default=15)
     ap.add_argument("--all-epochs", action="store_true", help="also analyze every saved epoch in the completed runs")
     ap.add_argument("--impulse-horizon", type=int, default=16000, help="finite impulse horizon in waveform samples")
+    ap.add_argument("--plots", choices=("auto", "required", "none"), default="auto",
+                    help="auto: save numerical results even if Matplotlib is absent; required: fail before analysis")
     args = ap.parse_args(argv)
     if args.impulse_horizon < 2:
         raise SA.AuditError("impulse horizon must be at least two samples")
+    plot_plan = plot_preflight(args.plots)
+    print(f"Plot preflight: {plot_plan['status']} — {plot_plan['reason']}", flush=True)
     import jax
     if jax.config.read("jax_enable_x64") or jax.default_backend() != "cpu":
         raise SA.AuditError("set JAX_PLATFORMS=cpu JAX_ENABLE_X64=0")
@@ -310,7 +330,8 @@ def main(argv=None):
     from .production_init import production_init_flat
     from s5 import checkpointing
     report = {"schema_version": 1, "manifest": manifest, "analysis_provenance": checkpointing.provenance(),
-              "tasks": [], "all_epoch_checkpoints": [], "impulse_horizon": args.impulse_horizon, "scope": {
+              "tasks": [], "all_epoch_checkpoints": [], "impulse_horizon": args.impulse_horizon,
+              "plot_plan": plot_plan, "scope": {
                   "initialization": "Current CPU float32 runner reconstruction in x64-off subprocess; not proof of historical epoch-0 identity across JAX versions/backends.",
                   "trained": "Actual already-selected N/A/C checkpoint weights, no counterfactual coefficient substitution.",
                   "precision": "NumPy float64 equation analysis plus CPU JAX float32 coefficient/root calculation; not bit-identical GPU replay.",
@@ -345,10 +366,6 @@ def main(argv=None):
     report["paired_layer_summaries"] = paired_distributions(report["tasks"])
     assert_sources_unchanged(manifest)
     out.mkdir(parents=True, exist_ok=False)
-    from .memory_pole_plots import plot_report
-    plot_report(report, out)
-    from .memory_impulses import plot_impulse_report
-    plot_impulse_report(report, out)
     write_csv(report, out / "poles.csv")
     if args.all_epochs:
         write_epoch_analyses(report, initial, out, args.impulse_horizon)
@@ -358,7 +375,22 @@ def main(argv=None):
     text = digest(report)
     (out / "summary.txt").write_text(text)
     print(text, flush=True)
-    print(f"Wrote {out}", flush=True)
+    print(f"Numerical audit complete: {out}", flush=True)
+    status = dict(plot_plan)
+    try:
+        if plot_plan["status"] == "ready":
+            from .memory_pole_plots import plot_report
+            from .memory_impulses import plot_impulse_report
+            files = (plot_report(report, out) or []) + (plot_impulse_report(report, out) or [])
+            status = {"status": "completed", "files": files}
+    except Exception as exc:
+        status = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}",
+                  "numerical_reports_preserved": True}
+        raise
+    finally:
+        with (out / "plot_status.json").open("x") as f:
+            json.dump(status, f, indent=2)
+        print(f"Plot status: {status['status']}. Numerical reports are preserved.", flush=True)
     return report
 
 
